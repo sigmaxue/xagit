@@ -178,3 +178,107 @@ fn unbound_suffix() {
     app.press("C-p").unwrap();
     assert_eq!(app.message(), format!("Unbound suffix: `C-p' {HELP} [previous-line]"));
 }
+
+const HELP_LINES: [&str; 2] =
+    ["Type a <KEY> to show help for that suffix command, or ? to show manual.", "Type C-g to exit help."];
+
+fn in_help_mode(app: &App) -> bool {
+    let popup = app.transient_popup();
+    HELP_LINES.iter().all(|l| popup.iter().any(|r| r == l))
+}
+
+/// The line of the text view shown first.
+fn shown_line(app: &App) -> String {
+    let (_, text) = app.text_view().expect("help shown");
+    text.lines().nth(app.text_view_scroll()).unwrap_or("").trim().to_string()
+}
+
+#[test]
+fn transient_help() {
+    let (td, g, head) = repo_with_commit();
+    let dir = td.path().join("lisp");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("magit.info"),
+        "This is magit.info.\n\u{1f}\nFile: magit.info,  Node: Top,  Next: Introduction,  Up: (dir)\n\nMagit\n*****\n\
+         \u{1f}\nFile: magit.info,  Node: Initiating a Commit,  Next: Editing Commit Messages,  Up: Committing\n\n\
+         6.1.1 Initiating a Commit\n-------------------------\n\u{1f}\nTag Table:\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("magit-commit.el"),
+        ";;; magit-commit.el\n\n(defun magit-commit-create (&optional args)\n  \"Create a new commit on `HEAD'.\n\
+         With a prefix argument, amend to the commit at `HEAD' instead.\n\\n\\n(fn &optional ARGS)\"\n  (interactive))\n",
+    )
+    .unwrap();
+    let mut app = App::new(g.clone());
+    app.set_help_dirs(vec![dir.clone()]);
+    app.press("c").unwrap();
+    assert!(!in_help_mode(&app));
+    // ?: help-mode, the transient stays
+    app.press("?").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    assert!(in_help_mode(&app), "{:?}", app.transient_popup());
+    // ? again: the info-manual of the prefix; the transient is suspended
+    app.press("?").unwrap();
+    assert_eq!(app.current_menu(), None);
+    assert!(app.transient_popup().is_empty());
+    assert_eq!(app.text_view().map(|v| v.0), Some("*info* (magit) Initiating a Commit"));
+    assert_eq!(shown_line(&app), "6.1.1 Initiating a Commit");
+    assert_eq!(app.message(), "Type `q' to resume transient command.");
+    // q: transient-resume
+    app.press("q").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    assert!(app.text_view().is_none());
+    assert!(!in_help_mode(&app), "help-mode ended");
+    // an infix: the manpage of the prefix at its argument
+    press_all(&mut app, &["C-h", "-", "v"]);
+    assert_eq!(app.text_view().map(|v| v.0), Some("*Man git-commit*"));
+    assert!(shown_line(&app).starts_with("-v, --verbose"), "{}", shown_line(&app));
+    // the help scrolls
+    let at = app.text_view_scroll();
+    app.press("C-n").unwrap();
+    assert_eq!(app.text_view_scroll(), at + 1);
+    press_all(&mut app, &["q", "?", "-", "A"]);
+    assert!(shown_line(&app).starts_with("--author=<author>"), "{}", shown_line(&app));
+    assert_eq!(app.active_switches(), ["--verbose"], "the infix isn't invoked");
+    // a suffix: its documentation
+    press_all(&mut app, &["q", "?", "c"]);
+    assert_eq!(app.text_view().map(|v| v.0), Some("*Help*"));
+    assert_eq!(
+        app.text_view().unwrap().1,
+        "magit-commit-create is an interactive Lisp function in `magit-commit.el'.\n\n\
+         (magit-commit-create &optional ARGS)\n\nCreate a new commit on `HEAD'.\n\
+         With a prefix argument, amend to the commit at `HEAD' instead.\n"
+    );
+    assert_eq!(g.rev_parse("HEAD").unwrap(), head, "no commit was made");
+    // one not found in the sources
+    press_all(&mut app, &["q", "?", "e"]);
+    assert_eq!(app.text_view().unwrap().1, "magit-commit-extend is an interactive command.\n\nExtend.\n");
+    // C-g leaves help-mode; unbound keys are transient-undefined
+    press_all(&mut app, &["q", "?", "p"]);
+    assert_eq!(app.message(), format!("Unbound suffix: `p' {HELP} [magit-section-backward]"));
+    assert!(in_help_mode(&app));
+    app.press("C-g").unwrap();
+    assert!(!in_help_mode(&app));
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    // the value commands
+    press_all(&mut app, &["?", "C-x", "s"]);
+    assert!(app.text_view().unwrap().1.starts_with("transient-set is an interactive command.\n\nSet."));
+    press_all(&mut app, &["q", "C-g"]);
+    assert_eq!(app.current_menu(), None);
+    // a sub-prefix: its help; a prefix with a man-page and no info-manual
+    press_all(&mut app, &["h", "?", "c"]);
+    assert_eq!(app.text_view().map(|v| v.0), Some("*info* (magit) Initiating a Commit"));
+    press_all(&mut app, &["q", "?", "b"]);
+    assert_eq!(app.text_view().map(|v| v.0), Some("*Man git-branch*"));
+    assert_eq!(app.text_view_scroll(), 0);
+    app.press("q").unwrap();
+    assert_eq!(app.current_menu(), Some("dispatch"));
+    // the manual not found: a message, the transient stays
+    app.set_help_dirs(Vec::new());
+    press_all(&mut app, &["?", "?"]);
+    assert_eq!(app.message(), "transient-help: Info file magit does not exist");
+    assert_eq!(app.current_menu(), Some("dispatch"));
+    assert!(app.text_view().is_none());
+}

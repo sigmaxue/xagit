@@ -1,6 +1,7 @@
 pub mod app;
 pub mod blame;
 pub mod diffbuf;
+pub mod help;
 pub mod keys;
 pub mod logbuf;
 pub mod minibuf;

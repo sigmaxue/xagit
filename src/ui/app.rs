@@ -8,6 +8,7 @@ use super::transient::{
     Lookup, Menu, MenuEntry, Reader, RepoState, VALUE_COMMANDS,
 };
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
+use super::help;
 use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
 };
@@ -75,6 +76,14 @@ pub struct App {
     prefix_arg: Option<PrefixArg>,
     /// C-u / M-- was typed and digits are read (universal-argument-map)
     reading_arg: bool,
+    /// transient--helpp: `?` was typed in a transient, the next key
+    /// shows the help of its suffix
+    transient_helpp: bool,
+    /// the transient is suspended to show help (transient-resume-mode):
+    /// the text view and its scroll position to restore on `q`
+    transient_help: Option<(Option<(String, String)>, usize)>,
+    /// where info manuals and the Lisp sources are found (help)
+    help_dirs: Vec<std::path::PathBuf>,
     /// magit-blame-previous-chunk: (buffer, commit, first line) of the
     /// chunk point was in after the last command
     blame_previous_chunk: Option<(String, String, usize)>,
@@ -492,6 +501,9 @@ impl App {
             cc_prefix: false,
             prefix_arg: None,
             reading_arg: false,
+            transient_helpp: false,
+            transient_help: None,
+            help_dirs: help::default_dirs(),
             blame_previous_chunk: None,
             margins: HashMap::new(),
             refs_counts: CommitCount::Nothing,
@@ -800,15 +812,12 @@ impl App {
 
     // ------------------------------------------------------------ rendering
 
-    fn draw(&mut self) {
-        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-        let (w, h) = (w as usize, h as usize);
-        let mut rows: Vec<String> = Vec::new();
-
-        // transient popup (shown in a window at the bottom, like transient)
+    /// The rows of the transient shown in a window at the bottom (none
+    /// while no transient is active).
+    pub fn transient_popup(&self) -> Vec<String> {
         let mut popup: Vec<String> = Vec::new();
         if let Some((name, active)) = self.stack.last() {
-            if let Some(menu) = self.menus.get(name) {
+            if let Some(menu) = self.menus.get(name).filter(|_| self.transient_help.is_none()) {
                 popup.push(String::new());
                 popup.push(menu.title.clone());
                 popup.extend(menu.render(active).lines().map(|l| format!("  {l}")));
@@ -817,9 +826,24 @@ impl App {
                     popup.push("  Value commands".into());
                     popup.extend(VALUE_COMMANDS.iter().map(|(k, d)| format!("  {k:<8} {d}")));
                 }
+                // transient--insert-help
+                if self.transient_helpp {
+                    popup.push(String::new());
+                    popup.push("Type a <KEY> to show help for that suffix command, or ? to show manual.".into());
+                    popup.push("Type C-g to exit help.".into());
+                }
                 popup.push("  q/C-g quit popup".into());
             }
         }
+        popup
+    }
+
+    fn draw(&mut self) {
+        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (w, h) = (w as usize, h as usize);
+        let mut rows: Vec<String> = Vec::new();
+
+        let popup = self.transient_popup();
         let body = h.saturating_sub(2 + popup.len()).max(1);
 
         if let Some((title, content)) = &self.view_text {
@@ -1422,6 +1446,11 @@ impl App {
     }
 
     fn dispatch_key(&mut self, key: Key) -> Result<()> {
+        // transient-resume-mode: the help of a suspended transient
+        if self.transient_help.is_some() {
+            self.transient_help_key(&key);
+            return Ok(());
+        }
         // transient popup takes precedence
         if let Some((name, active)) = self.stack.last().cloned() {
             if let Some(menu) = self.menus.get(&name).cloned() {
@@ -1668,6 +1697,12 @@ impl App {
         self.refresh();
     }
 
+    /// The directories where the help of transients finds info manuals
+    /// and the Lisp sources of the commands.
+    pub fn set_help_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.help_dirs = dirs;
+    }
+
     /// Read the user options from FILE (if it exists), reporting the
     /// lines in error.
     pub fn load_options(&mut self, file: &std::path::Path) {
@@ -1789,8 +1824,12 @@ impl App {
         }
     }
 
-    /// Name of the transient currently shown, if any.
+    /// Name of the transient currently shown, if any (none while it is
+    /// suspended to show help).
     pub fn current_menu(&self) -> Option<&str> {
+        if self.transient_help.is_some() {
+            return None;
+        }
         self.stack.last().map(|(n, _)| n.as_str())
     }
 
@@ -1860,6 +1899,10 @@ impl App {
         menu: Menu,
         mut active: BTreeMap<String, bool>,
     ) -> Result<()> {
+        if self.transient_helpp {
+            self.transient_help_mode_key(key, &menu);
+            return Ok(());
+        }
         // transient-map: C-M-p / C-M-n
         if key.ctrl && (key.code == "M-p" || key.code == "M-n") && self.pending.is_empty() {
             self.transient_history(key.code == "M-p");
@@ -1914,9 +1957,9 @@ impl App {
                     // `undefined', this-command nil
                     [_, _, ..] => self.transient_undefined(&keys, None),
                     // a key bound in the buffer's keymaps (a non-suffix:
-                    // transient--do-warn), else not bound at all
-                    // transient-help (? and C-h) isn't implemented
-                    [k] if k.code == "?" || (k.ctrl && k.code == "h") => self.set_msg(&format!("{keys} is undefined")),
+                    // transient--do-warn), else not bound at all;
+                    // transient-help enters help-mode
+                    [k] if k.code == "?" || (k.ctrl && k.code == "h") => self.transient_helpp = true,
                     [k] => match self.buffer_binding(k) {
                         Some(cmd) => self.transient_undefined(&keys, Some(&cmd)),
                         None => self.set_msg(&format!("{keys} is undefined")),
@@ -2018,6 +2061,155 @@ impl App {
     fn transient_undefined(&mut self, keys: &str, cmd: Option<&str>) {
         let cmd = cmd.unwrap_or("nil");
         self.set_msg(&format!("Unbound suffix: `{keys}' (Use `C-g' to abort, `?' for help) [{cmd}]"));
+    }
+
+    /// A key of the transient MENU in help-mode (transient--helpp): the
+    /// quit commands leave help-mode, `?' shows the help of the prefix,
+    /// a suffix its help, other keys are transient-undefined.
+    fn transient_help_mode_key(&mut self, key: Key, menu: &Menu) {
+        let cx = Key { code: "x".into(), ctrl: true };
+        let describe = |s: &mut Self, cmd: &str, desc: &str| {
+            let text = help::describe_function(&s.help_dirs, cmd, desc);
+            s.show_transient_help(Ok(("*Help*".into(), text, 0)));
+        };
+        if self.pending == [cx.clone()] {
+            self.pending.clear();
+            let cmd = match (key.ctrl, key.code.as_str()) {
+                (false, "s") => "transient-set",
+                (true, "s") => "transient-save",
+                (true, "k") => "transient-reset",
+                (false, "p") => "transient-history-prev",
+                (false, "n") => "transient-history-next",
+                // transient-quit-seq
+                (true, "g") => return,
+                _ => return self.transient_undefined(&format!("C-x {}", key.label()), None),
+            };
+            let seq = format!("C-x {}", key.label());
+            let desc = VALUE_COMMANDS.iter().find(|(k, _)| *k == seq).map_or("", |(_, d)| d);
+            return describe(self, cmd, desc);
+        }
+        if key == cx && self.pending.is_empty() {
+            self.pending.push(key);
+            return;
+        }
+        if key.ctrl && (key.code == "M-p" || key.code == "M-n") && self.pending.is_empty() {
+            let (cmd, desc) = if key.code == "M-p" {
+                ("transient-history-prev", "Previous value")
+            } else {
+                ("transient-history-next", "Next value")
+            };
+            return describe(self, cmd, desc);
+        }
+        // transient--quit-commands: transient--do-quit-one leaves help-mode
+        let q_suffix = key.code == "q" && self.pending.is_empty() && menu.find(&key).is_some();
+        if (key.code == "q" && !q_suffix) || key.code == "esc" || (key.ctrl && key.code == "g") {
+            self.pending.clear();
+            self.transient_helpp = false;
+            return;
+        }
+        if key.ctrl && key.code == "q" && self.pending.is_empty() {
+            self.transient_helpp = false;
+            self.stack.clear();
+            return;
+        }
+        let mut typed = std::mem::take(&mut self.pending);
+        typed.push(key);
+        let help = match menu.lookup(&typed) {
+            Lookup::Found(e) => self.suffix_help(menu, &e.clone()),
+            Lookup::Prefix => {
+                self.pending = typed;
+                return;
+            }
+            Lookup::None => {
+                let keys: Vec<String> = typed.iter().map(Key::label).collect();
+                let keys = keys.join(" ");
+                match typed.as_slice() {
+                    [k] if k.code == "?" || (k.ctrl && k.code == "h") => self.prefix_help(&menu.name),
+                    [k] => {
+                        let cmd = self.buffer_binding(k);
+                        return self.transient_undefined(&keys, cmd.as_deref());
+                    }
+                    _ => return self.transient_undefined(&keys, None),
+                }
+            }
+        };
+        self.show_transient_help(help);
+    }
+
+    /// The help of the transient NAME (transient-show-help of a prefix):
+    /// its info manual, else its manpage, else its documentation.
+    fn prefix_help(&self, name: &str) -> std::result::Result<(String, String, usize), String> {
+        if let Some(spec) = help::info_manual(name) {
+            return help::info_node(&self.help_dirs, spec).map(|(t, c)| (t, c, 0));
+        }
+        if let Some(page) = help::man_page(name) {
+            return help::manpage(page, self.help_width()).map(|c| (format!("*Man {page}*"), c, 0));
+        }
+        let title = self.menus.get(name).map_or("", |m| m.title.as_str());
+        Ok(("*Help*".into(), help::describe_function(&self.help_dirs, &help::prefix_command(name), title), 0))
+    }
+
+    /// The help of the suffix ENTRY of MENU: a sub-prefix's help, the
+    /// manpage of the prefix at the description of an infix's argument,
+    /// else the documentation of the command.
+    fn suffix_help(&self, menu: &Menu, entry: &MenuEntry) -> std::result::Result<(String, String, usize), String> {
+        let prefix = help::prefix_command(&menu.name);
+        let doc = |cmd: &str| Ok(("*Help*".to_string(), help::describe_function(&self.help_dirs, cmd, &entry.desc), 0));
+        match &entry.action {
+            Action::Switch(arg) | Action::Option { arg, .. } => match help::man_page(&menu.name) {
+                Some(page) => help::manpage(page, self.help_width()).map(|c| {
+                    let line = help::argument_line(&c, arg).unwrap_or(0);
+                    (format!("*Man {page}*"), c, line)
+                }),
+                None => doc(&format!("transient:{prefix}:{arg}")),
+            },
+            // a transient-switches has no argument
+            Action::Switches(_) => doc(&format!("transient:{prefix}:{}", entry.key)),
+            Action::Submenu(name) => self.prefix_help(&resolve_menu(name, self.repo_state())),
+            Action::Command(cmd) if self.menus.contains_key(cmd) => self.prefix_help(&resolve_menu(cmd, self.repo_state())),
+            Action::Command(cmd) if cmd.starts_with("transient-") => doc(cmd),
+            Action::Command(cmd) => doc(&format!("magit-{cmd}")),
+        }
+    }
+
+    /// The width manpages are formatted for.
+    fn help_width(&self) -> usize {
+        crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w))
+    }
+
+    /// Leave help-mode and suspend the transient to show HELP (title,
+    /// text, first line shown) until `q' resumes it (transient--display-help).
+    fn show_transient_help(&mut self, help: std::result::Result<(String, String, usize), String>) {
+        self.transient_helpp = false;
+        match help {
+            Ok((title, text, line)) => {
+                let saved = (self.view_text.take(), self.view_scroll);
+                self.transient_help = Some(saved);
+                self.view_text = Some((title, text));
+                self.view_scroll = line;
+                self.set_msg("Type `q' to resume transient command.");
+            }
+            Err(e) => self.set_msg(&format!("transient-help: {e}")),
+        }
+    }
+
+    /// A key in the help of a suspended transient (transient-resume-mode):
+    /// `q' resumes it (transient-resume), the line motions scroll.
+    fn transient_help_key(&mut self, key: &Key) {
+        if key.code == "q" && !key.ctrl {
+            if let Some((view, scroll)) = self.transient_help.take() {
+                self.view_text = view;
+                self.view_scroll = scroll;
+            }
+            self.set_msg("");
+            return;
+        }
+        match status_binding(key) {
+            Some(Binding::Down | Binding::SectionForward) => self.view_scroll += 1,
+            Some(Binding::Up | Binding::SectionBackward) => self.view_scroll = self.view_scroll.saturating_sub(1),
+            Some(Binding::KeyboardQuit) => self.set_msg("Quit"),
+            _ => self.set_msg(&format!("{} is undefined", key.label())),
+        }
     }
 
     /// The command KEY is bound to in the keymaps of the buffer shown
