@@ -329,9 +329,8 @@ fn visit_commit_and_hunk_line() {
     app.press("TAB").unwrap();
     goto(&mut app, "+L19");
     app.press("RET").unwrap();
-    let (title, _) = app.text_view().unwrap();
-    assert_eq!(title, "file.txt");
-    assert_eq!(app.text_view_scroll(), 18);
+    assert_eq!(app.header_line(), "file.txt");
+    assert_eq!(app.file_line(), Some(19));
 }
 
 #[test]

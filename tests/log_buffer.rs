@@ -210,9 +210,8 @@ fn log_with_diffstat_and_patches() {
     // RET on a removed line visits the parent's version of the file
     goto(&mut app, "-hello");
     app.press("RET").unwrap();
-    let (title, content) = app.text_view().unwrap();
-    assert_eq!(title, format!("file.txt.~{}~", short(&g, "HEAD~2")));
-    assert_eq!(content, "hello");
+    assert_eq!(app.header_line(), format!("file.txt.~{}~", short(&g, "HEAD~2")));
+    assert_eq!(texts(&app), ["hello"]);
     app.press("q").unwrap();
     // u on a committed hunk reverses it in the index
     goto(&mut app, "+changed");

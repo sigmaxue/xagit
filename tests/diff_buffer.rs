@@ -219,26 +219,24 @@ fn visit_old_and_new_side_of_a_commit() {
     // a removed line visits the old version (REV^, abbreviated), at its line
     goto(&mut app, "-l2");
     app.press("RET").unwrap();
-    let (title, content) = app.text_view().unwrap();
-    assert_eq!(title, format!("file.txt.~{parent}~"));
-    assert!(content.starts_with("l1\nl2\n"));
-    assert_eq!(app.text_view_scroll(), 1);
+    assert_eq!(app.header_line(), format!("file.txt.~{parent}~"));
+    assert_eq!(texts(&app)[..2], ["l1", "l2"]);
+    assert_eq!(app.file_line(), Some(2));
     app.press("q").unwrap();
-    assert!(app.text_view().is_none());
+    assert!(matches!(app.mode(), BufferMode::Revision { .. }));
     // an added line visits the new version (REV)
     goto(&mut app, "+L2");
     app.press("RET").unwrap();
-    assert_eq!(app.text_view().unwrap().0, "file.txt.~HEAD~");
-    assert_eq!(app.text_view_scroll(), 1);
+    assert_eq!(app.header_line(), "file.txt.~HEAD~");
+    assert_eq!(app.file_line(), Some(2));
     app.press("q").unwrap();
     // C-RET visits the worktree file, at the line moved by the
     // uncommitted change above it
     goto(&mut app, "+L2");
     app.press("C-RET").unwrap();
-    let (title, content) = app.text_view().unwrap();
-    assert_eq!(title, "file.txt");
-    assert!(content.starts_with("top\n"));
-    assert_eq!(app.text_view_scroll(), 2);
+    assert_eq!(app.header_line(), "file.txt");
+    assert_eq!(texts(&app)[0], "top");
+    assert_eq!(app.file_line(), Some(3));
     app.press("q").unwrap();
     app.press("q").unwrap();
     assert_eq!(app.mode(), &BufferMode::Status);

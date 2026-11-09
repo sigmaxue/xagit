@@ -27,6 +27,10 @@ pub enum LineKind {
     Meta { section: String, path: String, kind: String },
     Stash { idx: usize, name: String, msg: String },
     Commit { section: String, hash: String },
+    /// line LINE (1-based) of a file or blob buffer, in blame chunk CHUNK
+    FileLine { line: usize, chunk: Option<usize> },
+    /// the heading (or separator) shown before blame chunk CHUNK
+    BlameHeading { chunk: usize },
     Info,
 }
 
@@ -93,13 +97,27 @@ pub struct StatusBuffer {
     defaults: HashMap<String, bool>,
     /// width of the right margin (0: no margin, as in the status buffer)
     pub margin_width: usize,
+    /// the blame chunks of a file or blob buffer
+    pub blame: Vec<super::blame::Chunk>,
+    /// why blaming the file failed
+    pub blame_error: Option<String>,
 }
 
 impl StatusBuffer {
     pub(crate) fn new(all: Vec<BufferLine>, diffs: Vec<(String, Vec<FileDiff>)>, title: String) -> StatusBuffer {
         let (sections, line_section) = index_sections(&all);
         let defaults = all.iter().filter(|l| l.heading && l.has_body).map(|l| (l.ident.clone(), l.hide)).collect();
-        StatusBuffer { all, diffs, title, sections, line_section, defaults, margin_width: 0 }
+        StatusBuffer {
+            all,
+            diffs,
+            title,
+            sections,
+            line_section,
+            defaults,
+            margin_width: 0,
+            blame: Vec::new(),
+            blame_error: None,
+        }
     }
 
     /// Whether the section IDENT is hidden under VIS (else its initial state).

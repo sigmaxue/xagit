@@ -1,6 +1,7 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::Key;
+use super::blame::{blob_ancestor, blob_successor, build_file, Blame, BlameType, STYLES};
 use super::transient::{
     diff_refresh_menu, log_refresh_menu, prefix_value, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader,
     RepoState, VALUE_COMMANDS,
@@ -112,6 +113,9 @@ pub enum BufferMode {
     /// magit-log-select: the log of REV, from which a commit is picked
     /// for ACTION (magit-log-select-pick-function); MSG is the usage
     LogSelect { rev: String, action: SelectAction, msg: String },
+    /// a buffer visiting FILE at REV ("{worktree}", "{index}" or a
+    /// commit: magit-blob-mode), maybe blamed (magit-blame-mode)
+    File { rev: String, file: String, blame: Option<Blame> },
 }
 
 /// What is done with the commit picked in a log-select buffer.
@@ -130,9 +134,13 @@ pub enum SelectAction {
 }
 
 impl BufferMode {
-    /// Magit has one buffer per mode and repository.
+    /// Magit has one buffer per mode and repository (and one per visited
+    /// file or blob).
     fn same_kind(&self, other: &BufferMode) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
+        match (self, other) {
+            (BufferMode::File { rev: a, file: f, .. }, BufferMode::File { rev: b, file: g, .. }) => a == b && f == g,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
     }
 
     /// magit-log-mode and the modes derived from it with its log
@@ -437,6 +445,7 @@ impl App {
             BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args, &margin),
             BufferMode::Stashes { refname } => build_stashes(&self.git, refname, &margin),
             BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream, &margin),
+            BufferMode::File { rev, file, blame } => build_file(&self.git, rev, file, blame.as_ref()),
         }
     }
 
@@ -658,6 +667,11 @@ impl App {
     }
 
     fn read_line_prompt(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+        Ok(self.read_line_raw(prompt, default)?.filter(|s| !s.is_empty()))
+    }
+
+    /// Read a line (the DEFAULT when empty); only EOF gives none.
+    fn read_line_raw(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
         let scripted = self.scripted.borrow_mut().pop_front();
         let buf = if let Some(ans) = scripted {
             ans
@@ -691,9 +705,6 @@ impl App {
             if let Some(d) = default {
                 s = d.to_string();
             }
-        }
-        if s.is_empty() {
-            return Ok(None);
         }
         Ok(Some(s))
     }
@@ -840,10 +851,13 @@ impl App {
         }
         if std::mem::take(&mut self.cc_prefix) {
             let select = matches!(self.mode, BufferMode::LogSelect { .. });
+            let blaming = matches!(self.mode, BufferMode::File { blame: Some(_), .. });
             match (key.ctrl, key.code.as_str()) {
                 (true, "n") if self.mode.is_log() => self.log_move_to_parent(),
                 (true, "c") if select => return self.log_select_pick(),
                 (true, "k") if select => self.bury_buffer(),
+                // magit-blame-mode-map
+                (true, "q") if blaming => self.blame_quit(),
                 _ => self.set_msg(&format!("C-c {} is undefined", key.label())),
             }
             return Ok(());
@@ -851,6 +865,10 @@ impl App {
         if key.ctrl && key.code == "c" {
             self.cc_prefix = true;
             self.set_msg("C-c-");
+            return Ok(());
+        }
+        // file and blob buffers
+        if self.view_text.is_none() && self.file_key(&key)? {
             return Ok(());
         }
         // magit-log-select-mode-map
@@ -896,6 +914,14 @@ impl App {
         let Some(binding) = status_binding(&key) else {
             return Ok(());
         };
+        // a file buffer has none of the Magit buffer bindings
+        if matches!(self.mode, BufferMode::File { .. })
+            && self.view_text.is_none()
+            && !matches!(binding, Binding::Down | Binding::Up | Binding::SetMark | Binding::KeyboardQuit)
+        {
+            self.set_msg(&format!("{} is undefined", key.label()));
+            return Ok(());
+        }
         match binding {
             Binding::Bury => self.bury_buffer(),
             Binding::Refresh => {
@@ -1221,7 +1247,10 @@ impl App {
             self.pending.push(key);
             return Ok(());
         }
-        if key.code == "q" || key.code == "esc" || (key.ctrl && key.code == "g") {
+        // q quits the transient unless it is a suffix (magit-blame's
+        // "Quit blaming")
+        let q_suffix = key.code == "q" && self.pending.is_empty() && menu.find(&key).is_some();
+        if (key.code == "q" && !q_suffix) || key.code == "esc" || (key.ctrl && key.code == "g") {
             self.pending.clear();
             self.stack.pop();
             return Ok(());
@@ -1292,6 +1321,7 @@ impl App {
             }
             // the margin commands are transient: the menu stays
             Action::Command(cmd) if cmd.starts_with("margin-") => self.margin_command(&cmd),
+            Action::Command(cmd) if cmd == "blame-cycle-style" => self.blame_cycle_style(),
             // magit-diff-refresh / magit-log-refresh "s" and "w": refresh
             // the buffer and set or save the defaults
             Action::Command(cmd) if cmd == "transient-set-and-exit" || cmd == "transient-save-and-exit" => {
@@ -1351,11 +1381,19 @@ impl App {
                 format!("{trace}:{file}")
             }
             _ => {
-                let Some(v) = self.read_line_prompt(arg, None)? else {
+                // an option with :allow-empty is the argument alone when
+                // the answer is empty
+                let read = if *reader == Reader::OptionalNumber {
+                    self.read_line_raw(arg, None)?
+                } else {
+                    self.read_line_prompt(arg, None)?
+                };
+                let Some(v) = read else {
                     return Ok(None);
                 };
                 let valid = match reader {
                     Reader::Number { zero } => v.parse::<u64>().is_ok_and(|n| *zero || n > 0),
+                    Reader::OptionalNumber => v.is_empty() || v.parse::<u64>().is_ok_and(|n| n > 0),
                     Reader::Similarity => {
                         let digits = v.strip_suffix('%').unwrap_or(&v);
                         !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
@@ -1365,7 +1403,7 @@ impl App {
                 if !valid {
                     let what = match reader {
                         Reader::Number { zero: true } => "a non-negative integer".to_string(),
-                        Reader::Number { zero: false } => "a positive integer".to_string(),
+                        Reader::Number { zero: false } | Reader::OptionalNumber => "a positive integer".to_string(),
                         _ => "a percentage ending in %, or a fraction, omitting the implied leading \"0.\"".to_string(),
                     };
                     self.set_msg(&format!("Please enter {what}"));
@@ -1412,6 +1450,11 @@ impl App {
                 self.refresh();
                 self.set_msg("refreshed");
             }
+            // magit-blame (B)
+            "blame-addition" => self.blame(BlameType::Addition, args)?,
+            "blame-removal" => self.blame(BlameType::Removal, args)?,
+            "blame-reverse" => self.blame(BlameType::Final, args)?,
+            "blame-quit" => self.blame_quit(),
             "quit" => self.bury_buffer(),
             "toggle-section" => self.toggle_section(),
             "visit" => self.visit_thing()?,
@@ -2360,6 +2403,7 @@ impl App {
                 Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
                 _ => Dwim::None,
             },
+            BufferMode::File { .. } => Dwim::None,
             BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
                 ("committed", Some(r)) => Dwim::Range(r.clone()),
                 (t, _) => Dwim::Type(t.to_string()),
@@ -3829,30 +3873,259 @@ impl App {
             (Some((h, l)), Some(fd)) => Some(Self::hunk_line(fd, h, l, goto_from)),
             _ => None,
         };
-        let (title, content) = if worktree || rev == "{worktree}" {
+        let rev = if worktree || rev == "{worktree}" {
             if worktree && rev != "{worktree}" {
                 line = line.map(|l| self.visit_offset(l, &file, &rev));
             }
-            let full = self.git.toplevel.join(&file);
-            match std::fs::read(&full) {
-                Ok(bytes) => (file.clone(), String::from_utf8_lossy(&bytes).into_owned()),
-                Err(_) => {
-                    self.set_msg(&format!("Cannot visit {file}: file does not exist"));
-                    return;
-                }
-            }
+            "{worktree}".to_string()
         } else {
-            let spec = if rev == "{index}" { format!(":{file}") } else { format!("{rev}:{file}") };
-            match self.git.git_string(&["cat-file", "-p", &spec]) {
-                Ok(c) => (format!("{file}.~{rev}~"), c),
-                Err(e) => {
-                    self.set_msg(&format!("{e}"));
-                    return;
+            rev
+        };
+        if let Err(e) = super::blame::file_contents(&self.git, &rev, &file) {
+            self.set_msg(&format!("{e}"));
+            return;
+        }
+        self.find_file(&rev, &file, line.unwrap_or(1));
+    }
+
+    /// magit-find-file: the buffer visiting FILE at REV, at LINE.
+    fn find_file(&mut self, rev: &str, file: &str, line: usize) {
+        self.setup_buffer(BufferMode::File { rev: rev.into(), file: file.into(), blame: None }, Vec::new());
+        self.goto_file_line(line);
+    }
+
+    /// The line of the file at point (1-based), and its blame chunk.
+    pub fn file_line(&self) -> Option<usize> {
+        self.file_line_at_point().map(|(l, _)| l)
+    }
+
+    fn file_line_at_point(&self) -> Option<(usize, Option<usize>)> {
+        let lines = &self.lines;
+        let i = self.cursor.min(lines.len().saturating_sub(1));
+        // a blame heading belongs to the line after it
+        lines[i..].iter().chain(lines[..i].iter().rev()).find_map(|l| match l.kind {
+            LineKind::FileLine { line, chunk } => Some((line, chunk)),
+            _ => None,
+        })
+    }
+
+    fn goto_file_line(&mut self, line: usize) {
+        if let Some(i) = self.lines.iter().position(|l| matches!(l.kind, LineKind::FileLine { line: n, .. } if n >= line)) {
+            self.cursor = i;
+        } else {
+            self.cursor = self.lines.len().saturating_sub(1);
+        }
+    }
+
+    /// magit-current-blame-chunk
+    fn current_blame_chunk(&self) -> Option<super::blame::Chunk> {
+        let (_, chunk) = self.file_line_at_point()?;
+        chunk.and_then(|c| self.buf.blame.get(c).cloned())
+    }
+
+    /// magit-blame-arguments outside the blame transient: its value
+    fn prefix_args(&self, name: &str) -> Vec<String> {
+        match self.set_values.get(name).or(self.saved_values.get(name)) {
+            Some(v) => v.clone(),
+            None => prefix_value(name).iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// magit-blame-addition / -removal / -reverse with ARGS.
+    fn blame(&mut self, typ: BlameType, args: Vec<String>) -> Result<()> {
+        let BufferMode::File { rev, file, blame } = self.mode.clone() else {
+            self.set_msg("Buffer isn't visiting a file");
+            return Ok(());
+        };
+        if typ != BlameType::Addition && (rev == "{worktree}" || rev == "{index}") {
+            self.set_msg("Only blob buffers can be blamed in reverse");
+            return Ok(());
+        }
+        let tracked = self.git.git_ok(&["ls-files", "--error-unmatch", "--", &file]);
+        if rev == "{worktree}" && !tracked {
+            self.set_msg("Buffer isn't visiting a tracked file");
+            return Ok(());
+        }
+        // magit-blame--pre-blame-assert / -setup
+        let (line, _) = self.file_line_at_point().unwrap_or((1, None));
+        match blame {
+            Some(b) if b.typ == typ => {
+                let Some(chunk) = self.current_blame_chunk() else {
+                    self.set_msg("Still blaming, commit data not available yet");
+                    return Ok(());
+                };
+                let (Some(prev_rev), Some(prev_file)) = (chunk.prev_rev.clone(), chunk.prev_file.clone()) else {
+                    self.set_msg("Chunk has no further history");
+                    return Ok(());
+                };
+                // magit-blame-visit-other-file, keeping the style
+                let blame = Blame { typ, style: b.style, recursive: true, args };
+                self.setup_buffer(BufferMode::File { rev: prev_rev, file: prev_file, blame: Some(blame) }, Vec::new());
+                self.goto_file_line(chunk.orig_line);
+            }
+            b => {
+                let style = b.map_or(0, |b| b.style);
+                let recursive = matches!(&self.mode, BufferMode::File { blame: Some(b), .. } if b.recursive);
+                let blame = Blame { typ, style, recursive, args };
+                self.mode = BufferMode::File { rev, file, blame: Some(blame) };
+                self.refresh();
+                self.goto_file_line(line);
+            }
+        }
+        if let Some(e) = self.buf.blame_error.clone() {
+            self.set_msg(&e);
+        } else {
+            self.blame_show_message();
+        }
+        Ok(())
+    }
+
+    /// magit-blame-quit: turn off blaming; a buffer created by a recursive
+    /// blame is killed.
+    fn blame_quit(&mut self) {
+        let BufferMode::File { rev, file, blame: Some(b) } = self.mode.clone() else {
+            self.set_msg("Not blaming");
+            return;
+        };
+        if b.recursive {
+            self.bury_buffer();
+            return;
+        }
+        let (line, _) = self.file_line_at_point().unwrap_or((1, None));
+        self.mode = BufferMode::File { rev, file, blame: None };
+        self.refresh();
+        self.goto_file_line(line);
+    }
+
+    /// magit-blame-cycle-style
+    fn blame_cycle_style(&mut self) {
+        let BufferMode::File { blame: Some(b), .. } = &mut self.mode else {
+            self.set_msg("Not blaming");
+            return;
+        };
+        b.style = (b.style + 1) % STYLES.len();
+        let (line, _) = self.file_line_at_point().unwrap_or((1, None));
+        self.refresh();
+        self.goto_file_line(line);
+    }
+
+    /// magit-blame-maybe-show-message: the summary of the chunk at point
+    /// in the lines style.
+    fn blame_show_message(&mut self) {
+        let lines_style = matches!(&self.mode, BufferMode::File { blame: Some(b), .. } if STYLES[b.style] == "lines");
+        if let Some(c) = self.current_blame_chunk().filter(|_| lines_style) {
+            let msg = c.info.get("summary").cloned().unwrap_or_default();
+            self.set_msg(&format!("{msg:?}"));
+        }
+    }
+
+    /// magit-blame-next-chunk / -previous-chunk; with SAME, only chunks of
+    /// the commit at point (magit-blame-next-chunk-same-commit).
+    fn blame_goto_chunk(&mut self, forward: bool, same: bool) {
+        let Some((_, Some(cur))) = self.file_line_at_point() else {
+            self.set_msg(if same { "No more chunks from same commit" } else { "No more chunks" });
+            return;
+        };
+        let rev = self.buf.blame[cur].orig_rev.clone();
+        let wanted = |c: usize, chunks: &[super::blame::Chunk]| !same || chunks[c].orig_rev == rev;
+        let chunks = &self.buf.blame;
+        let target = if forward {
+            (cur + 1..chunks.len()).find(|&c| wanted(c, chunks))
+        } else {
+            (0..cur).rev().find(|&c| wanted(c, chunks))
+        };
+        let Some(t) = target else {
+            self.set_msg(if same { "No more chunks from same commit" } else { "No more chunks" });
+            return;
+        };
+        // the start of the chunk: its heading, if any
+        let start = self.lines.iter().position(|l| {
+            matches!(l.kind, LineKind::BlameHeading { chunk } if chunk == t)
+                || matches!(l.kind, LineKind::FileLine { chunk: Some(c), .. } if c == t)
+        });
+        if let Some(i) = start {
+            self.cursor = i;
+        }
+        self.blame_show_message();
+    }
+
+    /// magit-blob-previous (OLDER) / magit-blob-next
+    fn blob_visit(&mut self, older: bool) {
+        let BufferMode::File { rev, file, .. } = self.mode.clone() else {
+            self.set_msg("Buffer isn't visiting a file or blob");
+            return;
+        };
+        let target = if older { blob_ancestor(&self.git, &rev, &file) } else { blob_successor(&self.git, &rev, &file) };
+        let Some((r, f)) = target else {
+            self.set_msg(if older { "You have reached the beginning of time" } else { "You have reached the end of time" });
+            return;
+        };
+        let (line, _) = self.file_line_at_point().unwrap_or((1, None));
+        self.find_file(&r, &f, line);
+        // magit-blob-visit
+        if r != "{worktree}" && r != "{index}" {
+            let s = self.git.git_string(&["log", "-1", "--format=%s\x1f%ct", &r]).unwrap_or_default();
+            let (subject, time) = s.trim_end().split_once('\x1f').unwrap_or((s.trim_end(), "0"));
+            let (n, unit) = super::logbuf::age(super::logbuf::now() - time.parse::<f64>().unwrap_or(0.0));
+            self.set_msg(&format!("{subject} ({n} {unit} ago)"));
+        }
+    }
+
+    /// The keys of a file or blob buffer: magit-blame-read-only-mode-map
+    /// while blaming, else magit-blob-mode-map. Returns whether KEY is
+    /// bound there.
+    fn file_key(&mut self, key: &Key) -> Result<bool> {
+        let BufferMode::File { blame, .. } = &self.mode else { return Ok(false) };
+        let blaming = blame.is_some();
+        let typ = blame.as_ref().map(|b| b.typ);
+        let label = key.label();
+        match label.as_str() {
+            "b" | "r" | "f" => {
+                let t = match label.as_str() {
+                    "b" => BlameType::Addition,
+                    "r" => BlameType::Removal,
+                    _ => BlameType::Final,
+                };
+                let args = match &self.mode {
+                    BufferMode::File { blame: Some(b), .. } if Some(t) == typ => b.args.clone(),
+                    _ => self.prefix_args("blame-menu"),
+                };
+                self.blame(t, args)?;
+            }
+            "B" => self.open_menu("blame-menu"),
+            "q" if blaming => self.blame_quit(),
+            "q" => self.bury_buffer(),
+            "n" if blaming => self.blame_goto_chunk(true, false),
+            "p" if blaming => self.blame_goto_chunk(false, false),
+            "N" if blaming => self.blame_goto_chunk(true, true),
+            "P" if blaming => self.blame_goto_chunk(false, true),
+            "n" => self.blob_visit(false),
+            "p" => self.blob_visit(true),
+            "c" if blaming => self.blame_cycle_style(),
+            "M-w" if blaming => match self.current_blame_chunk() {
+                Some(c) => self.set_msg(&c.orig_rev),
+                None => self.set_msg("No chunk at point"),
+            },
+            "RET" | "SPC" | "backspace" if blaming => match self.current_blame_chunk() {
+                Some(c) if c.orig_rev.chars().all(|x| x == '0') => self.set_msg("Not Yet Committed"),
+                Some(c) => self.show_commit(&c.orig_rev),
+                None => self.set_msg("No chunk at point"),
+            },
+            "g" => {
+                let (line, _) = self.file_line_at_point().unwrap_or((1, None));
+                self.refresh();
+                self.goto_file_line(line);
+            }
+            "C-n" | "down" | "C-p" | "up" => {
+                let before = self.current_blame_chunk().map(|c| c.final_line);
+                self.forward_line(if matches!(label.as_str(), "C-n" | "down") { 1 } else { -1 });
+                if blaming && self.current_blame_chunk().map(|c| c.final_line) != before {
+                    self.blame_show_message();
                 }
             }
-        };
-        self.view_text = Some((title, content));
-        self.view_scroll = line.map_or(0, |l| l.saturating_sub(1));
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     /// RET (magit-visit-thing as remapped by the section at point)
@@ -4440,7 +4713,8 @@ impl App {
                     | BufferMode::LogSelect { .. }
                     | BufferMode::Reflog { .. }
                     | BufferMode::Stashes { .. }
-                    | BufferMode::Cherry { .. } => {
+                    | BufferMode::Cherry { .. }
+                    | BufferMode::File { .. } => {
                         self.set_msg("Only diff buffers can be saved as patches");
                         return Ok(());
                     }

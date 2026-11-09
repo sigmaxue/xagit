@@ -38,6 +38,9 @@ pub enum Reader {
     String,
     /// transient-read-number-N0 / -N+
     Number { zero: bool },
+    /// transient-read-number-N+ of an option with :allow-empty (the
+    /// argument alone when empty)
+    OptionalNumber,
     /// magit-read-similarity-index: digits with an optional "%"
     Similarity,
     /// magit-read-char-case: one of these ("unspecified" unsets)
@@ -336,6 +339,7 @@ pub fn prefix_value(name: &str) -> &'static [&'static str] {
         "revert-menu" => &["--edit"],
         "patches-menu" => &["--3way"],
         "rebase-menu" => &["--autostash"],
+        "blame-menu" => &["-w"],
         _ => &[],
     }
 }
@@ -1027,6 +1031,32 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("p", "Prune", "worktree-prune"),
                     cmd("l", "List", "worktree-list"),
                 ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-blame (B in
+    // file and blob buffers)
+    m.insert(
+        "blame-menu".into(),
+        Menu {
+            name: "blame-menu".into(),
+            title: "Blame".into(),
+            groups: vec![
+                vec![
+                    sw("-w", "Ignore whitespace", "-w"),
+                    sw("-r", "Do not treat root commits as boundaries", "--root"),
+                    sw("-P", "Follow only first parent", "--first-parent"),
+                    opt("-M", "Detect lines moved or copied within a file", "-M", Reader::OptionalNumber),
+                    opt("-C", "Detect lines moved or copied between files", "-C", Reader::OptionalNumber),
+                ],
+                vec![
+                    cmd("b", "Show commits adding lines", "blame-addition"),
+                    cmd("r", "Show commits removing lines", "blame-removal"),
+                    cmd("f", "Show last commits that still have lines", "blame-reverse"),
+                    cmd("q", "Quit blaming", "blame-quit"),
+                ],
+                vec![cmd("c", "Cycle style", "blame-cycle-style")],
             ],
         },
     );
