@@ -561,3 +561,47 @@ fn shortlog() {
     assert!(content.starts_with(&format!("{author} (2):")), "{content}");
     assert!(content.contains("Merge branch 'side'"), "{content}");
 }
+
+/// magit-log-refresh in the status buffer: only the "Arguments" group,
+/// changing the buffer's log arguments (magit-status-mode's default
+/// "-n256 --decorate"), which the log sections use.
+#[test]
+fn status_log_arguments() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    goto(&mut app, "Recent commits");
+    app.press("TAB").unwrap();
+    let merge = format!("{} master v1 Merge branch 'side'", short(&g, "HEAD"));
+    assert!(texts(&app).contains(&merge), "{:#?}", texts(&app));
+    assert!(!texts(&app).iter().any(|t| t.trim() == "|\\"));
+    app.press("L").unwrap();
+    assert_eq!(app.active_switches(), ["--decorate", "-n256"]);
+    for k in ["-", "r"] {
+        app.press(k).unwrap();
+    }
+    assert_eq!(app.message(), "- r is undefined");
+    for k in ["-", "g", "g"] {
+        app.press(k).unwrap();
+    }
+    assert_eq!(app.current_menu(), None);
+    let t = texts(&app);
+    assert!(t.iter().any(|l| l.trim() == "|\\"), "{t:#?}");
+    let h = short(&g, "HEAD");
+    assert!(t.iter().any(|l| l.starts_with(&format!("{h} *"))), "{t:#?}");
+    // the log buffer's arguments are not changed ...
+    assert_eq!(app.log_args, ["--graph", "-n256", "--decorate"]);
+    // ... and its L has all arguments
+    log_current(&mut app);
+    for k in ["L", "-", "r"] {
+        app.press(k).unwrap();
+    }
+    assert!(app.active_switches().contains(&"--reverse".to_string()));
+    app.press("C-g").unwrap();
+    app.press("q").unwrap();
+    // without a decoration, no refs
+    for k in ["L", "-", "d", "-", "g", "g"] {
+        app.press(k).unwrap();
+    }
+    let merge = format!("{} Merge branch 'side'", short(&g, "HEAD"));
+    assert!(texts(&app).contains(&merge), "{:#?}", texts(&app));
+}

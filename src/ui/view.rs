@@ -7,7 +7,7 @@
 //! across refreshes by the caller, and the initial visibility follows the
 //! HIDE argument Magit passes to `magit-insert-section`.
 
-use super::logbuf::{now, shortstats, Margin};
+use super::logbuf::{commit_limit, now, section_log, shortstats, wash_section_log, LogSection, Margin};
 use crate::git::diff::FileDiff;
 use crate::git::status::{FileEntry, Status};
 use crate::git::Git;
@@ -176,7 +176,12 @@ pub fn hunk_ident(section: &str, path: &str, header: &str) -> String {
 
 /// Status buffer with default visibility (for tests and `J`).
 pub fn render_status(g: &Git, st: &Status) -> Vec<BufferLine> {
-    build_status(g, st, &[], &Margin::status()).visible(&Visibility::new())
+    build_status(g, st, &[], &status_log_args(), &Margin::status()).visible(&Visibility::new())
+}
+
+/// magit-status-mode's magit-log-default-arguments
+pub fn status_log_args() -> Vec<String> {
+    vec![format!("-n{LOG_SECTION_LIMIT}"), "--decorate".into()]
 }
 
 /// Build the section tree from the lines' headings and ancestors.
@@ -333,11 +338,34 @@ impl Builder {
         }
         self.blank();
     }
+
+    /// A top-level log section of the status buffer (magit--insert-log
+    /// with the buffer's log ARGS), omitted when it has no commits. Other
+    /// than "Recent commits", TITLE is followed by the number of commits
+    /// (magit-log-insert-child-count), "N+" when that is the limit.
+    fn log_section(&mut self, g: &Git, ident: &str, title: &str, section: &str, revs: Option<&str>, args: &[String]) {
+        let (out, n) = section_log(g, revs, args);
+        if n == 0 {
+            return;
+        }
+        let title = if section != "recent" {
+            let plus = if Some(n) == commit_limit(args) { "+" } else { "" };
+            format!("{title} ({n}{plus})")
+        } else {
+            title.to_string()
+        };
+        self.heading(title, LineKind::SectionHeader { section: section.into(), n }, ident, 0, true);
+        let margin = self.log_margin.clone();
+        let ident = format!("{ident}/");
+        wash_section_log(self, g, &out, &margin, &LogSection { depth: 1, section, ident: &ident });
+        self.blank();
+    }
 }
 
 /// Build the status buffer (magit-status-refresh-buffer); MARGIN is
-/// magit-status-margin (shown for the commits and stashes).
-pub fn build_status(g: &Git, st: &Status, diff_args: &[String], margin: &Margin) -> StatusBuffer {
+/// magit-status-margin (shown for the commits and stashes), LOG_ARGS the
+/// buffer's log arguments (magit-buffer-log-args).
+pub fn build_status(g: &Git, st: &Status, diff_args: &[String], log_args: &[String], margin: &Margin) -> StatusBuffer {
     let mut b = Builder::new();
     b.log_margin = margin.clone();
     let unstaged = g.diff_sections(false, diff_args).unwrap_or_default();
@@ -353,7 +381,7 @@ pub fn build_status(g: &Git, st: &Status, diff_args: &[String], margin: &Margin)
     insert_changes(&mut b, "unstaged", "Unstaged changes", &st.unstaged, &unstaged);
     insert_changes(&mut b, "staged", "Staged changes", &st.staged, &staged);
     insert_stashes(&mut b, g, &st.stashes);
-    insert_log_sections(&mut b, g);
+    insert_log_sections(&mut b, g, log_args);
 
     while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
         b.lines.pop();
@@ -542,18 +570,10 @@ pub fn log_lines(g: &Git, range: Option<&str>, limit: usize, extra: &[&str]) -> 
         .collect()
 }
 
-fn count_label(n: usize, limit: usize) -> String {
-    if n == limit {
-        format!("{n}+")
-    } else {
-        n.to_string()
-    }
-}
-
-fn insert_log_sections(b: &mut Builder, g: &Git) {
+fn insert_log_sections(b: &mut Builder, g: &Git, args: &[String]) {
     let Some(branch) = g.current_branch() else {
         // detached HEAD: no upstream, only recent commits
-        insert_recent(b, g);
+        insert_recent(b, g, args);
         return;
     };
     let upstream = g.upstream_shortname();
@@ -563,46 +583,37 @@ fn insert_log_sections(b: &mut Builder, g: &Git) {
 
     if pushremote_log {
         let t = push.clone().unwrap_or_default();
-        let c = log_lines(g, Some(&format!("{t}..")), LOG_SECTION_LIMIT, &["--decorate"]);
-        if !c.is_empty() {
-            let title = format!("Unpushed to {t} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-            b.commit_section(g, "unpushed:@{push}..", title, "unpushed", &c);
-        }
+        let range = format!("{t}..");
+        b.log_section(g, "unpushed:@{push}..", &format!("Unpushed to {t}"), "unpushed", Some(&range), args);
     }
     // magit-insert-unpushed-to-upstream-or-recent
     match &upstream {
         Some(up) if !g.git_ok(&["merge-base", "--is-ancestor", "HEAD", up]) => {
-            let c = log_lines(g, Some("@{upstream}.."), LOG_SECTION_LIMIT, &["--decorate"]);
-            if !c.is_empty() {
-                let title = format!("Unmerged into {up} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-                b.commit_section(g, "unpushed:@{upstream}..", title, "unpushed", &c);
-            }
+            let title = format!("Unmerged into {up}");
+            b.log_section(g, "unpushed:@{upstream}..", &title, "unpushed", Some("@{upstream}.."), args);
         }
-        _ => insert_recent(b, g),
+        _ => insert_recent(b, g, args),
     }
     if pushremote_log {
         let t = push.unwrap_or_default();
-        let c = log_lines(g, Some(&format!("..{t}")), LOG_SECTION_LIMIT, &["--decorate"]);
-        if !c.is_empty() {
-            let title = format!("Unpulled from {t} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-            b.commit_section(g, "unpulled:..@{push}", title, "unpulled", &c);
-        }
+        let range = format!("..{t}");
+        b.log_section(g, "unpulled:..@{push}", &format!("Unpulled from {t}"), "unpulled", Some(&range), args);
     }
     if let Some(up) = &upstream {
-        let c = log_lines(g, Some("..@{upstream}"), LOG_SECTION_LIMIT, &["--decorate"]);
-        if !c.is_empty() {
-            let title = format!("Unpulled from {up} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-            b.commit_section(g, "unpulled:..@{upstream}", title, "unpulled", &c);
-        }
+        let title = format!("Unpulled from {up}");
+        b.log_section(g, "unpulled:..@{upstream}", &title, "unpulled", Some("..@{upstream}"), args);
     }
 }
 
-/// magit-insert-recent-commits
-fn insert_recent(b: &mut Builder, g: &Git) {
-    let c = log_lines(g, None, RECENT_COMMIT_COUNT, &["--decorate"]);
-    if !c.is_empty() {
-        b.commit_section(g, "recent", "Recent commits".into(), "recent", &c);
-    }
+/// magit-insert-recent-commits: the last magit-log-section-commit-count
+/// commits, with the buffer's arguments other than the limit.
+fn insert_recent(b: &mut Builder, g: &Git, args: &[String]) {
+    let start = format!("HEAD~{RECENT_COMMIT_COUNT}");
+    let range = rev_exists(g, &start).then(|| format!("{start}..HEAD"));
+    let revs = range.filter(|_| args.iter().any(|a| a == "--graph"));
+    let mut a = vec![format!("-n{RECENT_COMMIT_COUNT}")];
+    a.extend(args.iter().filter(|x| !x.starts_with("-n")).cloned());
+    b.log_section(g, "recent", "Recent commits", "recent", revs.as_deref(), &a);
 }
 
 // ---------------------------------------------------------------- sequences

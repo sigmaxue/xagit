@@ -2,14 +2,14 @@
 
 use super::keys::Key;
 use super::transient::{
-    diff_refresh_menu, prefix_value, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader, RepoState,
-    VALUE_COMMANDS,
+    diff_refresh_menu, log_refresh_menu, prefix_value, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader,
+    RepoState, VALUE_COMMANDS,
 };
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
 };
-use super::view::{build_status, BufferLine, LineKind, Section, StatusBuffer, Visibility};
+use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
 use crate::git::exec::Editor;
@@ -50,6 +50,10 @@ pub struct App {
     buf_args: Vec<String>,
     /// diff arguments of the status buffer
     status_args: Vec<String>,
+    /// log arguments of the status buffer (its magit-buffer-log-args)
+    status_log_args: Vec<String>,
+    /// the current value of magit-log-select-mode's log arguments
+    log_select_args: Vec<String>,
     /// buffers below the one shown (the status buffer under a diff buffer)
     buried: Vec<SavedBuffer>,
     /// the arguments of the `d` transient while one of its suffixes runs
@@ -327,6 +331,8 @@ impl App {
             mode: BufferMode::Status,
             buf_args: Vec::new(),
             status_args: vec!["--no-ext-diff".into(), "--ignore-submodules=none".into()],
+            status_log_args: status_log_args(),
+            log_select_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             buried: Vec::new(),
             transient_diff_args: None,
             transient_log_args: None,
@@ -415,7 +421,7 @@ impl App {
         match &self.mode {
             BufferMode::Status => {
                 let st = Status::load(&self.git);
-                build_status(&self.git, &st, &self.status_diff_args(), &margin)
+                build_status(&self.git, &st, &self.status_diff_args(), &self.status_log_args, &margin)
             }
             BufferMode::Diff(spec) => build_diff(&self.git, spec, &self.buf_args),
             BufferMode::Revision { rev, files } => build_revision(&self.git, rev, &self.buf_args, files),
@@ -947,6 +953,10 @@ impl App {
                 self.set_msg(&format!("Cannot change log arguments in {kind} buffers"));
                 return;
             }
+            // magit-log-infix-arguments only in magit-log-mode, the short
+            // "Arguments" group elsewhere
+            let full = matches!(self.mode, BufferMode::Log { .. });
+            self.menus.insert(name.clone(), log_refresh_menu(full));
         }
         // `d` starts with the arguments of the diff buffer shown, else the
         // current value of magit-diff-mode; `D` with the buffer's arguments.
@@ -962,6 +972,7 @@ impl App {
             ("diff-refresh-menu", BufferMode::Status) => &self.status_args,
             ("diff-refresh-menu", _) => &self.buf_args,
             ("log-menu" | "log-refresh-menu", m) if m.is_log() => &self.buf_args,
+            ("log-refresh-menu", BufferMode::Status) => &self.status_log_args,
             ("log-menu" | "log-refresh-menu", _) => &self.log_args,
             _ => &default,
         };
@@ -985,6 +996,8 @@ impl App {
             "diff-menu" => "magit-diff:magit-diff-mode",
             "diff-refresh-menu" if self.mode == BufferMode::Status => "magit-diff:magit-status-mode",
             "diff-refresh-menu" => "magit-diff:magit-diff-mode",
+            "log-refresh-menu" if self.mode == BufferMode::Status => "magit-log:magit-status-mode",
+            "log-refresh-menu" if matches!(self.mode, BufferMode::LogSelect { .. }) => "magit-log:magit-log-select-mode",
             "log-menu" | "log-refresh-menu" => "magit-log:magit-log-mode",
             b => b,
         }
@@ -997,6 +1010,8 @@ impl App {
             "magit-diff:magit-status-mode" => Some(&mut self.status_args),
             "magit-diff:magit-diff-mode" => Some(&mut self.diff_args),
             "magit-log:magit-log-mode" => Some(&mut self.log_args),
+            "magit-log:magit-status-mode" => Some(&mut self.status_log_args),
+            "magit-log:magit-log-select-mode" => Some(&mut self.log_select_args),
             _ => None,
         }
     }
@@ -1006,7 +1021,8 @@ impl App {
         let v: &[&str] = match key {
             "magit-diff:magit-status-mode" => &["--no-ext-diff", "--ignore-submodules=none"],
             "magit-diff:magit-diff-mode" => &["--stat", "--no-ext-diff"],
-            "magit-log:magit-log-mode" => &["--graph", "-n256", "--decorate"],
+            "magit-log:magit-log-mode" | "magit-log:magit-log-select-mode" => &["--graph", "-n256", "--decorate"],
+            "magit-log:magit-status-mode" => &["-n256", "--decorate"],
             k => prefix_value(k),
         };
         v.iter().map(|s| s.to_string()).collect()
@@ -2117,6 +2133,11 @@ impl App {
                     self.buf_args = args.clone();
                     self.refresh();
                 }
+                // the log sections of the status buffer
+                BufferMode::Status => {
+                    self.status_log_args = args.clone();
+                    self.refresh();
+                }
                 _ => {
                     self.log_args = args.clone();
                     self.set_msg(&format!("log arguments: {}", self.log_args.join(" ")));
@@ -2589,7 +2610,7 @@ impl App {
         };
         let msg = msg.replace("%p", "C-c C-c").replace("%q", "C-c C-k");
         let rev = self.git.current_branch().unwrap_or_else(|| "HEAD".into());
-        let args = ["--graph", "-n256", "--decorate"].map(String::from).to_vec();
+        let args = self.log_select_args.clone();
         self.setup_buffer(BufferMode::LogSelect { rev, action, msg: msg.clone() }, args);
         match initial {
             Some(c) => {

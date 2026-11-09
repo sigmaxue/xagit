@@ -259,10 +259,40 @@ fn log_switches() -> Vec<MenuEntry> {
         sw("-r", "Reverse order", "--reverse"),
         // Formatting
         sw("-g", "Show graph", "--graph"),
+        sw("-c", "Show graph in color", "--color"),
         sw("-d", "Show refnames", "--decorate"),
         sw("-p", "Show diffs", "--patch"),
         sw("-s", "Show diffstats", "--stat"),
     ]
+}
+
+/// magit-log-refresh (L): with FULL (in magit-log-mode) the arguments of
+/// magit-log-infix-arguments, elsewhere only the "Arguments" group.
+pub fn log_refresh_menu(full: bool) -> Menu {
+    let args = if full {
+        log_switches()
+    } else {
+        vec![
+            opt("-n", "Limit number of commits", "-n", Reader::Number { zero: false }),
+            switches("-o", "Order commits by", &["--topo-order", "--author-date-order", "--date-order"]),
+            sw("-g", "Show graph", "--graph"),
+            sw("-c", "Show graph in color", "--color"),
+            sw("-d", "Show refnames", "--decorate"),
+        ]
+    };
+    Menu {
+        name: "log-refresh-menu".into(),
+        title: "Change arguments of log buffers".into(),
+        groups: vec![
+            args,
+            vec![
+                cmd("g", "buffer", "log-refresh"),
+                cmd("s", "buffer and set defaults", "transient-set-and-exit"),
+                cmd("w", "buffer and save defaults", "transient-save-and-exit"),
+            ],
+            vec![margin_toggle(), margin_cycle(), margin_details(), cmd("x", "Toggle shortstat", "margin-toggle-shortstat")],
+        ],
+    }
 }
 
 /// Repository state behind Magit's `:if` predicates that swap menu suffixes.
@@ -846,22 +876,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
     );
 
     // ------------------------------------------------ magit-log-refresh (L)
-    m.insert(
-        "log-refresh-menu".into(),
-        Menu {
-            name: "log-refresh-menu".into(),
-            title: "Change arguments of log buffers".into(),
-            groups: vec![
-                log_switches(),
-                vec![
-                    cmd("g", "buffer", "log-refresh"),
-                    cmd("s", "buffer and set defaults", "transient-set-and-exit"),
-                    cmd("w", "buffer and save defaults", "transient-save-and-exit"),
-                ],
-                vec![margin_toggle(), margin_cycle(), margin_details(), cmd("x", "Toggle shortstat", "margin-toggle-shortstat")],
-            ],
-        },
-    );
+    m.insert("log-refresh-menu".into(), log_refresh_menu(true));
 
     // ------------------------------------------------ magit-margin-settings
     // (L in reflog, stashes and cherry buffers)

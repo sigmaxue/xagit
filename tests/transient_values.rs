@@ -110,3 +110,18 @@ fn log_set_defaults() {
     press_all(&mut app, &["L"]);
     assert_eq!(app.active_switches(), ["--decorate", "--reverse", "-n256"]);
 }
+
+#[test]
+fn status_log_defaults_are_per_mode() {
+    let (td, g, _) = repo_with_commit();
+    let file = td.path().join("transient-values");
+    let mut app = App::new(g.clone());
+    app.load_values(file.clone());
+    press_all(&mut app, &["L", "-", "g", "w"]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "magit-log:magit-status-mode\t--decorate\t--graph\t-n256\n");
+    assert_eq!(app.log_args, ["--graph", "-n256", "--decorate"], "magit-log-mode is not changed");
+    let mut app = App::new(g.clone());
+    app.load_values(file);
+    app.press("L").unwrap();
+    assert_eq!(app.active_switches(), ["--decorate", "--graph", "-n256"]);
+}

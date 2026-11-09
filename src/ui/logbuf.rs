@@ -374,13 +374,45 @@ pub fn build_log(g: &Git, revs: &[String], args: &[String], files: &[String], ma
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
         Err(_) => String::new(),
     };
-    let count = wash_log(&mut b, g, &out, align, &mut diffs, margin);
+    let count = wash_log(&mut b, g, &out, align, &mut diffs, margin, &LogSection::LOG);
     if count > 0 && Some(count) == commit_limit(args) {
         b.line("Type + to show more history".into(), LineKind::Info, "longer", true, 0);
     }
     let mut buf = StatusBuffer::new(b.lines, diffs, title);
     buf.margin_width = margin.shown_width();
     buf
+}
+
+/// Where washed commits go: the depth of their sections, the section
+/// name of their lines, and the prefix of their idents.
+pub(crate) struct LogSection<'a> {
+    pub depth: usize,
+    pub section: &'a str,
+    pub ident: &'a str,
+}
+
+impl LogSection<'_> {
+    const LOG: LogSection<'static> = LogSection { depth: 0, section: "log", ident: "commit:" };
+}
+
+/// The output of magit--insert-log for REVS with ARGS (the status
+/// buffer's log sections), and the number of commits in it.
+pub(crate) fn section_log(g: &Git, revs: Option<&str>, args: &[String]) -> (String, usize) {
+    let mut a: Vec<String> = vec!["log".into()];
+    a.extend(log_command_args(args, &[]));
+    a.extend(["--use-mailmap".into(), "--no-prefix".into()]);
+    a.extend(revs.map(String::from));
+    a.push("--".into());
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    let out = g.git_string(&a).unwrap_or_default();
+    let n = out.lines().filter(|l| parse_log_line(l).is_some()).count();
+    (out, n)
+}
+
+/// magit-log-wash-log for a log section of the status buffer.
+pub(crate) fn wash_section_log(b: &mut Builder, g: &Git, out: &str, margin: &Margin, sec: &LogSection) {
+    let mut diffs = Vec::new();
+    wash_log(b, g, out, true, &mut diffs, margin, sec);
 }
 
 /// magit-log-wash-log for the `log` style; returns the number of commits.
@@ -391,6 +423,7 @@ fn wash_log(
     align: bool,
     diffs: &mut Vec<(String, Vec<FileDiff>)>,
     margin: &Margin,
+    sec: &LogSection,
 ) -> usize {
     let lines: Vec<&str> = out.lines().collect();
     let revs: Vec<&str> = lines.iter().filter_map(|l| parse_log_line(l)).map(|c| c.hash).collect();
@@ -431,8 +464,9 @@ fn wash_log(
         }
         text.push_str(c.msg);
         let margin = margin.format(c.hash, c.author, c.date, now, &stats);
-        let kind = LineKind::Commit { section: "log".into(), hash: c.hash.to_string() };
-        let id = format!("commit:{}", c.hash);
+        let kind = LineKind::Commit { section: sec.section.into(), hash: c.hash.to_string() };
+        let id = format!("{}{}", sec.ident, c.hash);
+        let depth = sec.depth;
 
         let is_diff = cont.first().is_some_and(|l| {
             l.starts_with("---")
@@ -440,14 +474,14 @@ fn wash_log(
         });
         if is_diff {
             // the diffstat and diffs become the body of the commit section
-            b.heading_hide(text, kind, &id, 0, true, false);
+            b.heading_hide(text, kind, &id, depth, true, false);
             b.margin(margin);
             let body = cont[1..].join("\n");
-            let files = insert_diff(b, c.hash, &body, 1, false, true);
+            let files = insert_diff(b, c.hash, &body, depth + 1, false, true);
             diffs.push((c.hash.to_string(), files));
             continue;
         }
-        b.line(text, kind.clone(), &id, true, 0);
+        b.line(text, kind.clone(), &id, true, depth);
         b.margin(margin);
         if cont.is_empty() {
             continue;
@@ -457,11 +491,11 @@ fn wash_log(
         let mut last = String::new();
         for l in cont {
             last = format!("{pad}{l}");
-            b.heading_cont(last.clone(), kind.clone(), &id, 0);
+            b.heading_cont(last.clone(), kind.clone(), &id, depth);
         }
         let graph: String = last.chars().take_while(|c| GRAPH_CHARS.contains(*c)).collect();
         if !graph.contains(['/', '\\', '.']) {
-            b.heading_cont(graph, kind.clone(), &id, 0);
+            b.heading_cont(graph, kind.clone(), &id, depth);
         }
     }
     count
