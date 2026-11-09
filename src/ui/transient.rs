@@ -18,10 +18,52 @@ pub struct MenuEntry {
 pub enum Action {
     /// toggle an infix argument for the *next* action (e.g. "-u" for stash)
     Switch(String),
+    /// transient-option: ARG followed by a value read by READER when it is
+    /// set; typing the key again unsets it (choices are always read, the
+    /// empty choice "unspecified" unsets it).
+    Option { arg: String, reader: Reader },
+    /// transient-switches: at most one of these arguments, the key cycles
+    /// through them and then back to none.
+    Switches(Vec<String>),
     /// run a named command (dispatch to App)
     Command(String),
     /// open a sub-menu
     Submenu(String),
+}
+
+/// How the value of an option is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reader {
+    /// any non-empty string
+    String,
+    /// transient-read-number-N0 / -N+
+    Number { zero: bool },
+    /// magit-read-similarity-index: digits with an optional "%"
+    Similarity,
+    /// magit-read-char-case: one of these ("unspecified" unsets)
+    Choices(Vec<String>),
+    /// magit-read-file-trace: "TRACE:FILE"
+    FileTrace,
+}
+
+impl Action {
+    /// The argument of this infix that is set in ACTIVE, if any.
+    pub fn value_in(&self, active: &BTreeMap<String, bool>) -> Option<String> {
+        let on = active.iter().filter(|(_, on)| **on).map(|(k, _)| k);
+        match self {
+            Action::Switch(sw) => on.into_iter().find(|k| *k == sw).cloned(),
+            Action::Option { arg, .. } => on.into_iter().find(|k| option_matches(arg, k)).cloned(),
+            Action::Switches(args) => on.into_iter().find(|k| args.contains(k)).cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Whether K is a value of the option ARG ("-n" matches "-n256", "-M" also
+/// matches "-M" alone). Switches use long arguments ("--patch"), so a
+/// short option's prefix never matches one of them.
+pub fn option_matches(arg: &str, k: &str) -> bool {
+    k.starts_with(arg) && (k.len() > arg.len() || !arg.ends_with('='))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,37 +134,19 @@ impl Menu {
         v
     }
 
-    /// Render like Magit's transient popup:
-    ///   key             description
-    ///   --------------------------
+    /// Render like Magit's transient popup, in columns; an infix that is
+    /// set is followed by its value, as in "-n Limit number of commits (-n256)".
     pub fn render(&self, active: &BTreeMap<String, bool>) -> String {
         let mut out = String::new();
         let ncols = self.groups.len();
-        let widths: Vec<usize> = self
-            .groups
-            .iter()
-            .map(|g| g.iter().map(|e| display(e).len()).max().unwrap_or(0))
-            .collect();
+        let cells: Vec<Vec<String>> = self.groups.iter().map(|g| g.iter().map(|e| display(e, active)).collect()).collect();
+        let widths: Vec<usize> = cells.iter().map(|g| g.iter().map(|d| d.chars().count()).max().unwrap_or(0)).collect();
         let nrows = self.groups.iter().map(|g| g.len()).max().unwrap_or(0);
         for row in 0..nrows {
             let mut line = String::new();
-            for c in 0..ncols {
-                match self.groups[c].get(row) {
-                    Some(e) => {
-                        let d = display(e);
-                        let on = match &e.action {
-                            Action::Switch(sw) => *active.get(sw).unwrap_or(&false),
-                            _ => false,
-                        };
-                        let shown = if on {
-                            format!("-{}", d.trim_start_matches('-'))
-                        } else {
-                            d.clone()
-                        };
-                        line.push_str(&format!("{:<w$}", shown, w = widths[c] + 3));
-                    }
-                    None => line.push_str(&" ".repeat(widths[c] + 3)),
-                }
+            for (c, w) in widths.iter().enumerate().take(ncols) {
+                let d = cells[c].get(row).map_or("", String::as_str);
+                line.push_str(&format!("{d:<w$}", w = w + 3));
             }
             out.push_str(line.trim_end());
             out.push('\n');
@@ -131,8 +155,29 @@ impl Menu {
     }
 }
 
-fn display(e: &MenuEntry) -> String {
-    format!("{} {}", e.key, e.desc)
+fn display(e: &MenuEntry, active: &BTreeMap<String, bool>) -> String {
+    match e.action.value_in(active) {
+        Some(v) => format!("{} {} ({v})", e.key, e.desc),
+        None => format!("{} {}", e.key, e.desc),
+    }
+}
+
+fn opt(key: &str, desc: &str, arg: &str, reader: Reader) -> MenuEntry {
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Option { arg: arg.into(), reader } }
+}
+fn choices(c: &[&str]) -> Reader {
+    Reader::Choices(c.iter().map(|s| s.to_string()).collect())
+}
+fn switches(key: &str, desc: &str, args: &[&str]) -> MenuEntry {
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switches(args.iter().map(|s| s.to_string()).collect()) }
+}
+/// magit-merge:--strategy ("-s" for merge, "=s" for cherry-pick and revert)
+fn merge_strategy(key: &str) -> MenuEntry {
+    opt(key, "Strategy", "--strategy=", choices(&["resolve", "recursive", "octopus", "ours", "subtree"]))
+}
+/// magit-cherry-pick:--mainline
+fn mainline() -> MenuEntry {
+    opt("-m", "Replay merge relative to parent", "--mainline=", Reader::Number { zero: false })
 }
 
 fn cmd(key: &str, desc: &str, command: &str) -> MenuEntry {
@@ -151,9 +196,17 @@ fn sub(key: &str, desc: &str, menu: &str) -> MenuEntry {
 /// buffer.
 fn diff_switches(stat: bool) -> Vec<MenuEntry> {
     let mut v = vec![
+        // Limit arguments
+        opt("-i", "Ignore submodules", "--ignore-submodules=", choices(&["none", "untracked", "dirty", "all"])),
         sw("-b", "Ignore whitespace changes", "--ignore-space-change"),
         sw("-w", "Ignore all whitespace", "--ignore-all-space"),
+        // Context arguments
+        opt("-U", "Context lines", "-U", Reader::Number { zero: true }),
         sw("-W", "Show surrounding functions", "--function-context"),
+        // Tune arguments
+        opt("-A", "Diff algorithm", "--diff-algorithm=", choices(&["default", "minimal", "patience", "histogram"])),
+        opt("-X", "Diff merges", "--diff-merges=", choices(&["off", "first-parent", "combined", "dense-combined"])),
+        opt("-M", "Detect renames", "-M", Reader::Similarity),
         sw("-x", "Disallow external diff drivers", "--no-ext-diff"),
     ];
     if stat {
@@ -171,12 +224,23 @@ pub fn diff_refresh_menu(stat: bool) -> Menu {
     }
 }
 
-/// magit-log argument switches shared by `l` and `L` (default level).
+/// magit-log-infix-arguments (default level).
 fn log_switches() -> Vec<MenuEntry> {
     vec![
+        // Commit limiting
+        opt("-n", "Limit number of commits", "-n", Reader::Number { zero: false }),
+        opt("-A", "Limit to author", "--author=", Reader::String),
+        opt("-F", "Search messages", "--grep=", Reader::String),
+        opt("-G", "Search changes", "-G", Reader::String),
+        opt("-S", "Search occurrences", "-S", Reader::String),
+        opt("-L", "Trace line evolution", "-L", Reader::FileTrace),
+        // History simplification
         sw("-D", "Simplify by decoration", "--simplify-by-decoration"),
         sw("-f", "Follow renames when showing single-file log", "--follow"),
+        // Commit ordering
+        switches("-o", "Order commits by", &["--topo-order", "--author-date-order", "--date-order"]),
         sw("-r", "Reverse order", "--reverse"),
+        // Formatting
         sw("-g", "Show graph", "--graph"),
         sw("-d", "Show refnames", "--decorate"),
         sw("-p", "Show diffs", "--patch"),
@@ -299,6 +363,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-v", "Show diff of changes to be committed", "--verbose"),
                     sw("-n", "Disable hooks", "--no-verify"),
                     sw("-R", "Claim authorship and reset author date", "--reset-author"),
+                    opt("-A", "Override the author", "--author=", Reader::String),
+                    opt("-C", "Reuse commit message", "--reuse-message=", Reader::String),
+                    opt("-c", "Reedit commit message", "--reedit-message=", Reader::String),
                 ],
                 vec![
                     cmd("c", "Commit", "commit-create"),
@@ -453,6 +520,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     sw("-f", "Fast-forward only", "--ff-only"),
                     sw("-n", "No fast-forward", "--no-ff"),
+                    merge_strategy("-s"),
                     sw("-b", "Ignore changes in amount of whitespace", "-Xignore-space-change"),
                     sw("-w", "Ignore whitespace when comparing lines", "-Xignore-all-space"),
                 ],
@@ -562,8 +630,10 @@ pub fn registry() -> BTreeMap<String, Menu> {
             groups: vec![
                 vec![
                     sw("-f", "Force", "--force"),
+                    sw("-e", "Edit message", "--edit"),
                     sw("-a", "Annotate", "--annotate"),
                     sw("-s", "Sign", "--sign"),
+                    opt("-u", "Sign as", "--local-user=", Reader::String),
                 ],
                 vec![
                     cmd("t", "tag", "tag-create"),
@@ -720,9 +790,11 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Apply or transplant commits".into(),
             groups: vec![
                 vec![
+                    mainline(),
+                    merge_strategy("=s"),
+                    sw("-F", "Attempt fast-forward", "--ff"),
                     sw("-x", "Reference cherry in commit message", "-x"),
                     sw("-e", "Edit commit messages", "--edit"),
-                    sw("-F", "Attempt fast-forward", "--ff"),
                 ],
                 vec![
                     cmd("A", "Pick", "cherry-pick"),
@@ -760,8 +832,10 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Revert existing commits, with or without creating new commits".into(),
             groups: vec![
                 vec![
+                    mainline(),
                     sw("-e", "Edit commit message", "--edit"),
                     sw("-E", "Don't edit commit message", "--no-edit"),
+                    merge_strategy("=s"),
                 ],
                 vec![
                     cmd("V", "Revert commit(s)", "revert"),
@@ -938,6 +1012,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     sw("-3", "Fall back on 3way merge", "--3way"),
                     sw("-R", "Reject only failed hunks", "--reject"),
+                    opt("-p", "Remove leading slashes from paths", "-p", Reader::Number { zero: false }),
                     sw("-c", "Remove text before scissors line", "--scissors"),
                     sw("-k", "Inhibit removal of email cruft", "--keep"),
                     sw("-b", "Limit removal of email cruft", "--keep-non-patch"),

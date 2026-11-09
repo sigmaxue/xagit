@@ -281,6 +281,70 @@ fn reflog_buffer() {
 }
 
 #[test]
+fn log_options() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    app.press("l").unwrap();
+    // -n is an option: typing it unsets it, typing it again reads a value
+    assert!(app.active_switches().contains(&"-n256".to_string()));
+    app.press("-").unwrap();
+    app.press("n").unwrap();
+    assert!(!app.active_switches().iter().any(|a| a.starts_with("-n")));
+    app.script_answers(&["0"]);
+    app.press("-").unwrap();
+    app.press("n").unwrap();
+    assert_eq!(app.message(), "Please enter a positive integer");
+    app.script_answers(&["2"]);
+    app.press("-").unwrap();
+    app.press("n").unwrap();
+    assert!(app.active_switches().contains(&"-n2".to_string()));
+    // -F: --grep=
+    app.script_answers(&["thr"]);
+    app.press("-").unwrap();
+    app.press("F").unwrap();
+    // -o cycles through the orders and back to none
+    app.press("-").unwrap();
+    app.press("o").unwrap();
+    assert!(app.active_switches().contains(&"--topo-order".to_string()));
+    app.press("-").unwrap();
+    app.press("o").unwrap();
+    assert!(app.active_switches().contains(&"--author-date-order".to_string()));
+    assert!(!app.active_switches().contains(&"--topo-order".to_string()));
+    app.press("-").unwrap();
+    app.press("o").unwrap();
+    app.press("-").unwrap();
+    app.press("o").unwrap();
+    assert!(!app.active_switches().iter().any(|a| a.ends_with("-order")), "{:?}", app.active_switches());
+    app.press("l").unwrap();
+    let t = texts(&app);
+    assert_eq!(t.len(), 1, "{t:#?}");
+    assert!(t[0].ends_with("* three"), "{t:#?}");
+    // L shows the buffer's values
+    app.press("L").unwrap();
+    assert!(app.active_switches().contains(&"--grep=thr".to_string()));
+    assert!(app.active_switches().contains(&"-n2".to_string()));
+}
+
+#[test]
+fn log_trace_lines() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    app.press("l").unwrap();
+    app.script_answers(&["file.txt", "1,1"]);
+    app.press("-").unwrap();
+    app.press("L").unwrap();
+    assert!(app.active_switches().contains(&"-L1,1:file.txt".to_string()), "{:?}", app.active_switches());
+    app.press("l").unwrap();
+    assert_eq!(app.header_line(), "Commits in master -L1,1:file.txt");
+    let t = texts(&app);
+    // no graph with -L; each commit's diff is its body
+    let three = t.iter().position(|l| l.ends_with(" three")).unwrap_or_else(|| panic!("{t:#?}"));
+    assert!(!t[three].contains('*'), "{t:#?}");
+    assert!(t[three + 1..].iter().any(|l| l == "+changed"), "{t:#?}");
+    assert!(t.iter().any(|l| l.ends_with(" initial")), "{t:#?}");
+}
+
+#[test]
 fn reflog_subjects() {
     assert_eq!(reflog_subject("commit"), format!("{:<16} ", "commit"));
     assert_eq!(reflog_subject("commit (amend)"), format!("{:<16} ", "amend"));

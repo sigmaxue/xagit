@@ -605,7 +605,7 @@ fn fetch_pull_push_roundtrip() {
 #[test]
 fn push_tag_roundtrip() {
     let (_td, g, _td2, _g2) = remote_sandbox();
-    g.tag_create("v1.0", "HEAD", false, None).unwrap();
+    g.tag_create("v1.0", "HEAD", &[], None).unwrap();
     g.push_tag("origin", "v1.0").unwrap();
     let tags = g.git_string(&["ls-remote", "--tags", "origin"]).unwrap();
     assert!(tags.contains("v1.0"));
@@ -652,7 +652,7 @@ fn merge_nocommit_leaves_changes_staged() {
     write(&g, "master.txt", "m");
     g.stage("master.txt").unwrap();
     g.commit(Some("master work"), &[]).unwrap();
-    g.merge_nocommit("feature").unwrap();
+    g.merge_nocommit("feature", &[]).unwrap();
     assert!(exists(&g, "feature.txt"));
     // a true merge with --no-commit stops before committing
     assert!(
@@ -796,8 +796,8 @@ fn reset_worktree_only_restores_files() {
 #[test]
 fn tag_create_lightweight_and_annotated() {
     let (_td, g, _head) = repo_with_commit();
-    g.tag_create("light", "HEAD", false, None).unwrap();
-    g.tag_create("anno", "HEAD", true, Some("annotation")).unwrap();
+    g.tag_create("light", "HEAD", &[], None).unwrap();
+    g.tag_create("anno", "HEAD", &["--annotate".into()], Some("annotation")).unwrap();
     let tags = g.tags();
     assert!(tags.contains(&"light".to_string()));
     assert!(tags.contains(&"anno".to_string()));
@@ -811,7 +811,7 @@ fn tag_create_lightweight_and_annotated() {
 #[test]
 fn tag_delete() {
     let (_td, g, _head) = repo_with_commit();
-    g.tag_create("gone", "HEAD", false, None).unwrap();
+    g.tag_create("gone", "HEAD", &[], None).unwrap();
     g.tag_delete("gone").unwrap();
     assert!(!g.tags().contains(&"gone".to_string()));
 }
@@ -1475,8 +1475,8 @@ fn push_pushremote_tags_matching_refspecs() {
     assert_eq!(remote_head("pub", &cur).as_deref(), Some(head.as_str()));
     assert_ne!(remote_head("origin", &cur).as_deref(), Some(head.as_str()), "upstream untouched");
 
-    g.tag_create("t1", "HEAD", false, None).unwrap();
-    g.tag_create("t2", "HEAD~1", false, None).unwrap();
+    g.tag_create("t1", "HEAD", &[], None).unwrap();
+    g.tag_create("t2", "HEAD~1", &[], None).unwrap();
     g.push_tags("origin", &[]).unwrap();
     let tags = g.git_string(&["ls-remote", "--tags", "origin"]).unwrap();
     assert!(tags.contains("refs/tags/t1") && tags.contains("refs/tags/t2"), "{tags}");
@@ -1518,7 +1518,7 @@ fn merge_commit_finishes_merge_in_progress() {
     write(&g, "master.txt", "m");
     g.stage("master.txt").unwrap();
     g.commit(Some("master work"), &[]).unwrap();
-    g.merge_nocommit("feature").unwrap();
+    g.merge_nocommit("feature", &[]).unwrap();
     assert!(g.merge_in_progress());
     g.merge_commit().unwrap();
     assert!(!g.merge_in_progress());
@@ -1619,7 +1619,7 @@ fn rebase_autosquash_folds_fixups() {
 fn process_log_records_commands_not_queries() {
     use ngit_lib::git::exec::process_log;
     let (_td, g, _head) = repo_with_commit();
-    g.tag_create("proclog-marker", "HEAD", false, None).unwrap();
+    g.tag_create("proclog-marker", "HEAD", &[], None).unwrap();
     let _ = g.git_string(&["rev-parse", "--verify", "proclog-query^{commit}"]);
     let _ = g.git_interactive(&["checkout", "proclog-missing-branch"]);
     let log = process_log();

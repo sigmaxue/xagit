@@ -365,6 +365,15 @@ fn log_popup_layout() {
     assert!(matches!(action_of(&m, "O"), Action::Command(c) if c == "reflog-other"));
     assert!(matches!(action_of(&m, "H"), Action::Command(c) if c == "reflog-head"));
     assert!(matches!(action_of(&m, "s"), Action::Submenu(c) if c == "shortlog-menu"));
+    // options and their values in the popup
+    assert!(matches!(action_of(&m, "-n"), Action::Option { arg, .. } if arg == "-n"));
+    assert!(matches!(action_of(&m, "-A"), Action::Option { arg, .. } if arg == "--author="));
+    assert!(matches!(action_of(&m, "-o"), Action::Switches(a) if a[0] == "--topo-order"));
+    let active = std::collections::BTreeMap::from([("-n256".to_string(), true), ("--graph".to_string(), true)]);
+    let shown = m.render(&active);
+    assert!(shown.contains("-n Limit number of commits (-n256)"), "{shown}");
+    assert!(shown.contains("-g Show graph (--graph)"), "{shown}");
+    assert!(shown.contains("-A Limit to author ") || shown.contains("-A Limit to author\n"), "{shown}");
 
     // magit-shortlog ("l s")
     let s = menu("shortlog-menu");

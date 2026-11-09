@@ -1,7 +1,7 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::Key;
-use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, RepoState};
+use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader, RepoState};
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, REFLOG_LIMIT};
 use super::view::{build_status, BufferLine, LineKind, Section, StatusBuffer, Visibility};
@@ -918,10 +918,48 @@ impl App {
                 return Ok(());
             }
         };
-        match entry.action {
+        match entry.action.clone() {
             Action::Switch(sw) => {
                 let on = *active.get(&sw).unwrap_or(&false);
                 active.insert(sw, !on);
+                if let Some(top) = self.stack.last_mut() {
+                    top.1 = active;
+                }
+            }
+            Action::Option { arg, reader } => {
+                let old = entry.action.value_in(&active);
+                let is_choice = matches!(reader, Reader::Choices(_));
+                let new = if old.is_some() && !is_choice {
+                    None
+                } else {
+                    match self.read_option(&arg, &reader)? {
+                        Some(v) => v,
+                        None => return Ok(()),
+                    }
+                };
+                if let Some(o) = old {
+                    active.remove(&o);
+                }
+                if let Some(v) = new {
+                    active.insert(format!("{arg}{v}"), true);
+                }
+                if let Some(top) = self.stack.last_mut() {
+                    top.1 = active;
+                }
+            }
+            Action::Switches(args) => {
+                // transient-switches: cycle to the next argument, then none
+                let old = entry.action.value_in(&active);
+                let next = match &old {
+                    None => args.first().cloned(),
+                    Some(o) => args.iter().skip_while(|a| *a != o).nth(1).cloned(),
+                };
+                if let Some(o) = old {
+                    active.remove(&o);
+                }
+                if let Some(n) = next {
+                    active.insert(n, true);
+                }
                 if let Some(top) = self.stack.last_mut() {
                     top.1 = active;
                 }
@@ -949,6 +987,62 @@ impl App {
 
     // ------------------------------------------------------------ commands
 
+    /// Read the value of the option ARG (transient-infix-read). None: the
+    /// user quit (nothing changes); Some(None): unset; Some(Some(v)): set
+    /// to ARG followed by V.
+    fn read_option(&mut self, arg: &str, reader: &Reader) -> Result<Option<Option<String>>> {
+        let value = match reader {
+            Reader::Choices(choices) => {
+                let prompt = format!("{arg} [unspecified, {}]", choices.join(", "));
+                let Some(v) = self.read_line_prompt(&prompt, Some("unspecified"))? else {
+                    return Ok(None);
+                };
+                if "unspecified".starts_with(v.as_str()) {
+                    return Ok(Some(None));
+                }
+                match choices.iter().find(|c| c.starts_with(v.as_str())) {
+                    Some(c) => c.clone(),
+                    None => {
+                        self.set_msg(&format!("{v} is not one of {}", choices.join(", ")));
+                        return Ok(None);
+                    }
+                }
+            }
+            Reader::FileTrace => {
+                let Some(file) = self.read_line_prompt("File", self.current_file().map(|(_, p)| p).as_deref())? else {
+                    return Ok(None);
+                };
+                let Some(trace) = self.read_line_prompt("Trace", None)? else {
+                    return Ok(None);
+                };
+                format!("{trace}:{file}")
+            }
+            _ => {
+                let Some(v) = self.read_line_prompt(arg, None)? else {
+                    return Ok(None);
+                };
+                let valid = match reader {
+                    Reader::Number { zero } => v.parse::<u64>().is_ok_and(|n| *zero || n > 0),
+                    Reader::Similarity => {
+                        let digits = v.strip_suffix('%').unwrap_or(&v);
+                        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+                    }
+                    _ => true,
+                };
+                if !valid {
+                    let what = match reader {
+                        Reader::Number { zero: true } => "a non-negative integer".to_string(),
+                        Reader::Number { zero: false } => "a positive integer".to_string(),
+                        _ => "a percentage ending in %, or a fraction, omitting the implied leading \"0.\"".to_string(),
+                    };
+                    self.set_msg(&format!("Please enter {what}"));
+                    return Ok(None);
+                }
+                v
+            }
+        };
+        Ok(Some(Some(value)))
+    }
     fn args_from(&self, active: &BTreeMap<String, bool>) -> Vec<String> {
         active
             .iter()
@@ -1026,8 +1120,17 @@ impl App {
 
             // -------- commit menu
             "commit-create" => {
-                let msg = self.read_line_prompt("Commit message", None)?;
-                g!().commit(msg.as_deref(), &args)?;
+                // -C reuses a message as is, -c edits it in the editor
+                if args.iter().any(|a| a.starts_with("--reedit-message=")) {
+                    self.with_terminal(|g| g.commit(None, &args))?;
+                } else {
+                    let msg = if args.iter().any(|a| a.starts_with("--reuse-message=")) {
+                        None
+                    } else {
+                        self.read_line_prompt("Commit message", None)?
+                    };
+                    g!().commit(msg.as_deref(), &args)?;
+                }
                 self.set_msg("committed");
                 self.refresh();
             }
@@ -1344,7 +1447,7 @@ impl App {
                 };
                 match cmd {
                     "merge-plain" => g!().merge(&rev, &args)?,
-                    "merge-nocommit" => g!().merge_nocommit(&rev)?,
+                    "merge-nocommit" => g!().merge_nocommit(&rev, &args)?,
                     "merge-squash" => g!().merge_squash(&rev)?,
                     "merge-editmsg" => {
                         let into = g!().current_branch().unwrap_or_else(|| "HEAD".into());
@@ -1460,19 +1563,27 @@ impl App {
 
             // -------- tag
             "tag-create" => {
-                let annotate = args.iter().any(|a| a == "--annotate");
+                // a message is needed for annotated and signed tags
+                let annotate = args
+                    .iter()
+                    .any(|a| a == "--annotate" || a == "--sign" || a.starts_with("--local-user="));
                 let Some(name) = self.read_line_prompt("Tag name", None)? else {
                     return Ok(());
                 };
                 let rev = self
                     .read_line_prompt("Place tag on", Some("HEAD"))?
                     .unwrap_or_else(|| "HEAD".into());
-                let msg = if annotate {
+                let edit = args.iter().any(|a| a == "--edit");
+                let msg = if annotate && !edit {
                     self.read_line_prompt("Tag message", Some(&name))?
                 } else {
                     None
                 };
-                g!().tag_create(&name, &rev, annotate, msg.as_deref())?;
+                if edit {
+                    self.with_terminal(|g| g.tag_create(&name, &rev, &args, None))?;
+                } else {
+                    g!().tag_create(&name, &rev, &args, msg.as_deref())?;
+                }
                 self.set_msg(&format!("tagged {name}"));
                 self.refresh();
             }

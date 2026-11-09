@@ -245,6 +245,51 @@ fn visit_old_and_new_side_of_a_commit() {
 }
 
 #[test]
+fn diff_options_read_values() {
+    let (_td, g) = history_repo();
+    let mut app = App::new(g);
+    show_head(&mut app);
+    // -U reads a number; the hunk then has that much context
+    app.press("D").unwrap();
+    app.script_answers(&["x"]);
+    app.press("-").unwrap();
+    app.press("U").unwrap();
+    assert_eq!(app.message(), "Please enter a non-negative integer");
+    app.script_answers(&["0"]);
+    app.press("-").unwrap();
+    app.press("U").unwrap();
+    assert!(app.active_switches().contains(&"-U0".to_string()), "{:?}", app.active_switches());
+    // -A offers the algorithms ("unspecified" unsets)
+    app.script_answers(&["pat"]);
+    app.press("-").unwrap();
+    app.press("A").unwrap();
+    assert!(app.active_switches().contains(&"--diff-algorithm=patience".to_string()));
+    app.script_answers(&["hist"]);
+    app.press("-").unwrap();
+    app.press("A").unwrap();
+    assert!(app.active_switches().contains(&"--diff-algorithm=histogram".to_string()));
+    assert!(!app.active_switches().contains(&"--diff-algorithm=patience".to_string()));
+    app.script_answers(&["u"]);
+    app.press("-").unwrap();
+    app.press("A").unwrap();
+    assert!(!app.active_switches().iter().any(|a| a.starts_with("--diff-algorithm")));
+    // -M rejects what is not a similarity index
+    app.script_answers(&["half"]);
+    app.press("-").unwrap();
+    app.press("M").unwrap();
+    assert!(app.message().starts_with("Please enter a percentage"), "{}", app.message());
+    app.press("g").unwrap();
+    assert!(texts(&app).iter().any(|l| l.starts_with("@@ -2 +2 @@")), "{:#?}", texts(&app));
+    // typing an option that is set unsets it
+    app.press("D").unwrap();
+    app.press("-").unwrap();
+    app.press("U").unwrap();
+    assert!(!app.active_switches().iter().any(|a| a.starts_with("-U")));
+    app.press("g").unwrap();
+    assert!(texts(&app).iter().any(|l| l.starts_with("@@ -1,5 +1,5 @@")), "{:#?}", texts(&app));
+}
+
+#[test]
 fn diff_refresh_changes_only_the_buffer_shown() {
     let (_td, g) = history_repo();
     let mut app = App::new(g);

@@ -461,9 +461,15 @@ impl Git {
         self.git_interactive(&["merge", "--squash", rev])
     }
 
-    /// magit-merge-nocommit: `git merge --no-commit <rev>`
-    pub fn merge_nocommit(&self, rev: &str) -> Result<()> {
-        self.git_interactive(&["merge", "--no-commit", rev])
+    /// magit-merge-nocommit: `git merge --no-commit --no-ff <args> <rev>`
+    pub fn merge_nocommit(&self, rev: &str, args: &[String]) -> Result<()> {
+        let mut a: Vec<&str> = vec!["merge", "--no-commit"];
+        if !args.iter().any(|x| x == "--no-ff") {
+            a.push("--no-ff");
+        }
+        a.extend(args.iter().map(String::as_str));
+        a.push(rev);
+        self.git_interactive(&a)
     }
 
     /// magit-rebase: `git rebase <args> <onto>`
@@ -551,18 +557,20 @@ impl Git {
     // ---------------------------------------------------------------- tag
 
     /// magit-tag-create ("t t"): `git tag [-a] [-m msg] <name> <rev>`
-    pub fn tag_create(&self, name: &str, rev: &str, annotate: bool, msg: Option<&str>) -> Result<()> {
-        let mut args: Vec<&str> = vec!["tag"];
-        if annotate || msg.is_some() {
-            args.push("-a");
-        }
+    /// magit-tag-create ("t t"): `git tag ARGS [-m MSG] NAME REV`
+    pub fn tag_create(&self, name: &str, rev: &str, args: &[String], msg: Option<&str>) -> Result<()> {
+        let mut a: Vec<&str> = vec!["tag"];
+        a.extend(args.iter().map(String::as_str));
         if let Some(m) = msg {
-            args.push("-m");
-            args.push(m);
+            if !args.iter().any(|x| x == "--annotate" || x == "--sign" || x.starts_with("--local-user=")) {
+                a.push("--annotate");
+            }
+            a.push("-m");
+            a.push(m);
         }
-        args.push(name);
-        args.push(rev);
-        self.git_interactive(&args)
+        a.push(name);
+        a.push(rev);
+        self.git_interactive(&a)
     }
 
     /// magit-tag-delete ("t k"): `git tag -d <name>`
