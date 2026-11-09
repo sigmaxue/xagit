@@ -353,6 +353,10 @@ pub const VALUE_COMMANDS: [(&str, &str); 5] = [
     ("C-x n", "Next value"),
 ];
 
+/// transient-common-commands "Sticky commands".
+pub const STICKY_COMMANDS: [(&str, &str); 3] =
+    [("C-g", "Quit prefix or transient"), ("C-q", "Quit transient stack"), ("C-z", "Suspend transient stack")];
+
 /// transient-values-file: `~/.config/ngit/transient-values` (or under
 /// $XDG_CONFIG_HOME).
 pub fn default_values_file() -> Option<std::path::PathBuf> {

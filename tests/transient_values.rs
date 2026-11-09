@@ -7,6 +7,7 @@ mod common;
 
 use common::*;
 use ngit_lib::ui::app::App;
+use ngit_lib::ui::options::Options;
 
 fn press_all(app: &mut App, keys: &[&str]) {
     for k in keys {
@@ -146,8 +147,8 @@ fn unbound_suffix() {
     }
     assert_eq!(app.current_menu(), Some("commit-menu"));
     // a key bound nowhere
-    app.press("C-t").unwrap();
-    assert_eq!(app.message(), "C-t is undefined");
+    app.press("C-o").unwrap();
+    assert_eq!(app.message(), "C-o is undefined");
     // digit-argument stays transient (M-5 isn't a section command)
     app.press("M-5").unwrap();
     assert_eq!(app.current_menu(), Some("commit-menu"));
@@ -177,6 +178,13 @@ fn unbound_suffix() {
     assert_eq!(app.message(), "k is undefined");
     app.press("C-p").unwrap();
     assert_eq!(app.message(), format!("Unbound suffix: `C-p' {HELP} [previous-line]"));
+    app.press("M-x").unwrap();
+    assert_eq!(app.message(), format!("Unbound suffix: `M-x' {HELP} [execute-extended-command]"));
+    // M-x is global: file buffers have it
+    app.press("C-g").unwrap();
+    app.script_answers(&["magit-commit"]);
+    app.press("M-x").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
 }
 
 const HELP_LINES: [&str; 2] =
@@ -281,4 +289,107 @@ fn transient_help() {
     assert_eq!(app.message(), "transient-help: Info file magit does not exist");
     assert_eq!(app.current_menu(), Some("dispatch"));
     assert!(app.text_view().is_none());
+}
+
+fn has_row(app: &App, row: &str) -> bool {
+    app.transient_popup().iter().any(|r| r == row)
+}
+
+#[test]
+fn suspend_and_resume() {
+    let (td, g, _) = repo_with_commit();
+    let mut app = App::new(g.clone());
+    press_all(&mut app, &["c", "-", "e"]);
+    // C-z: transient-suspend, the stack and its value are saved
+    app.press("C-z").unwrap();
+    assert_eq!(app.current_menu(), None);
+    assert!(app.transient_popup().is_empty());
+    // M-x transient-resume
+    app.script_answers(&["transient-resume"]);
+    app.press("M-x").unwrap();
+    assert_eq!(app.prompts().last().map(String::as_str), Some("M-x "));
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    assert_eq!(app.active_switches(), ["--allow-empty", "--verbose"]);
+    // in a transient M-x isn't a suffix
+    app.press("M-x").unwrap();
+    assert_eq!(app.message(), format!("Unbound suffix: `M-x' {HELP} [execute-extended-command]"));
+    // transient-show: the menu stays (it is always shown)
+    app.press("C-t").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    app.press("C-g").unwrap();
+    app.script_answers(&["transient-resume"]);
+    app.press("M-x").unwrap();
+    assert_eq!(app.message(), "No suspended transient command");
+    // C-z in an incomplete sequence (transient-sticky-map)
+    press_all(&mut app, &["c", "C-x", "C-z"]);
+    assert_eq!(app.current_menu(), None);
+    // a new transient replaces the suspended one
+    press_all(&mut app, &["b", "C-g"]);
+    app.script_answers(&["transient-resume"]);
+    app.press("M-x").unwrap();
+    assert_eq!(app.message(), "No suspended transient command");
+    assert_eq!(app.current_menu(), None);
+    // the prefixes are commands
+    app.script_answers(&["magit-branch"]);
+    app.press("M-x").unwrap();
+    assert_eq!(app.current_menu(), Some("branch-menu"));
+    app.press("C-g").unwrap();
+    app.script_answers(&["frobnicate"]);
+    app.press("M-x").unwrap();
+    assert_eq!(app.message(), "[No match]");
+    // help for transient-suspend
+    let dir = td.path().join("lisp");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("transient.el"),
+        "(defun transient-suspend ()\n  \"Suspend the current transient.\nIt can later be resumed using `transient-resume'.\"\n  (interactive))\n",
+    )
+    .unwrap();
+    app.set_help_dirs(vec![dir]);
+    press_all(&mut app, &["c", "?", "C-z"]);
+    assert_eq!(
+        app.text_view().unwrap().1,
+        "transient-suspend is an interactive Lisp function in `transient.el'.\n\n(transient-suspend)\n\n\
+         Suspend the current transient.\nIt can later be resumed using `transient-resume'.\n"
+    );
+    app.press("q").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+}
+
+#[test]
+fn common_commands() {
+    let (_td, g, _) = repo_with_commit();
+    let mut app = App::new(g.clone());
+    app.press("c").unwrap();
+    assert!(!has_row(&app, "  Sticky commands"));
+    // shown after C-x
+    app.press("C-x").unwrap();
+    for row in [
+        "  Value commands",
+        "  C-x s    Set",
+        "  Sticky commands",
+        "  C-g      Quit prefix or transient",
+        "  C-q      Quit transient stack",
+        "  C-z      Suspend transient stack",
+        "  Customize",
+        "  C-x t    Show common permanently",
+    ] {
+        assert!(has_row(&app, row), "{row}: {:?}", app.transient_popup());
+    }
+    // C-x t: transient-toggle-common, the transient stays
+    app.press("t").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    assert!(has_row(&app, "  Sticky commands"));
+    assert!(has_row(&app, "  C-x t    Hide common commands"));
+    press_all(&mut app, &["C-g", "b"]);
+    assert!(has_row(&app, "  Value commands"), "for all transients");
+    press_all(&mut app, &["C-x", "t"]);
+    assert!(!has_row(&app, "  Value commands"));
+    app.press("C-g").unwrap();
+    // transient-show-common-commands
+    let (o, e) = Options::parse("transient-show-common-commands t");
+    assert!(e.is_empty());
+    app.set_options(o);
+    app.press("c").unwrap();
+    assert!(has_row(&app, "  C-x t    Hide common commands"));
 }

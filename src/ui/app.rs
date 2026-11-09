@@ -5,7 +5,7 @@ use super::blame::{blob_ancestor, blob_successor, build_file, style_shows_messag
 use super::transient::{
     blame_menu, diff_refresh_menu, file_dispatch_menu, log_refresh_menu, prefix_value, registry, resolve_menu,
     show_refs_menu, Action,
-    Lookup, Menu, MenuEntry, Reader, RepoState, VALUE_COMMANDS,
+    Lookup, Menu, MenuEntry, Reader, RepoState, STICKY_COMMANDS, VALUE_COMMANDS,
 };
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::help;
@@ -82,6 +82,9 @@ pub struct App {
     /// the transient is suspended to show help (transient-resume-mode):
     /// the text view and its scroll position to restore on `q`
     transient_help: Option<(Option<(String, String)>, usize)>,
+    /// transient--stack after transient-suspend (C-z): the transients
+    /// and their values, resumed by transient-resume
+    suspended: Vec<(String, BTreeMap<String, bool>)>,
     /// where info manuals and the Lisp sources are found (help)
     help_dirs: Vec<std::path::PathBuf>,
     /// magit-blame-previous-chunk: (buffer, commit, first line) of the
@@ -278,6 +281,17 @@ pub enum Binding {
     Command(&'static str),
 }
 
+impl Binding {
+    /// Whether this is a binding of the global map, which file buffers
+    /// have too.
+    fn is_global(&self) -> bool {
+        matches!(
+            self,
+            Binding::Down | Binding::Up | Binding::SetMark | Binding::KeyboardQuit | Binding::Command("execute-extended-command")
+        )
+    }
+}
+
 /// Choices cycled by `b C r` / `b C R` (magit-branch.<branch>.rebase, magit-pull.rebase).
 pub const REBASE_CHOICES: &[&str] = &["true", "merges", "interactive", "false"];
 /// Choices cycled by `b C a m` (magit-branch.autoSetupMerge).
@@ -372,6 +386,7 @@ fn binding_command(b: &Binding) -> String {
         Binding::Command("untrack") => "magit-file-untrack",
         Binding::Command("rename-thing") => "magit-file-rename",
         Binding::Command("discard") => "magit-discard",
+        Binding::Command("execute-extended-command") => "execute-extended-command",
         Binding::Command(c) => return format!("magit-{c}"),
         Binding::Menu(m) => return format!("magit-{}", m.trim_end_matches("-menu")),
     };
@@ -405,6 +420,7 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
         "up" => Up,
         "M-n" => SiblingForward,
         "M-p" => SiblingBackward,
+        "M-x" => Command("execute-extended-command"),
         "j" => Command("jump"),
         "^" => Command("section-up"),
         "tab" => Toggle,
@@ -503,6 +519,7 @@ impl App {
             reading_arg: false,
             transient_helpp: false,
             transient_help: None,
+            suspended: Vec::new(),
             help_dirs: help::default_dirs(),
             blame_previous_chunk: None,
             margins: HashMap::new(),
@@ -821,10 +838,16 @@ impl App {
                 popup.push(String::new());
                 popup.push(menu.title.clone());
                 popup.extend(menu.render(active).lines().map(|l| format!("  {l}")));
-                // transient-common-commands are shown after C-x
-                if self.pending.first().is_some_and(|k| k.ctrl && k.code == "x") {
+                // transient-common-commands are shown after C-x, or
+                // always with transient-show-common-commands
+                if self.options.show_common_commands || self.pending.first().is_some_and(|k| k.ctrl && k.code == "x") {
+                    let row = |(k, d): &(&str, &str)| format!("  {k:<8} {d}");
                     popup.push("  Value commands".into());
-                    popup.extend(VALUE_COMMANDS.iter().map(|(k, d)| format!("  {k:<8} {d}")));
+                    popup.extend(VALUE_COMMANDS.iter().map(row));
+                    popup.push("  Sticky commands".into());
+                    popup.extend(STICKY_COMMANDS.iter().map(row));
+                    popup.push("  Customize".into());
+                    popup.push(row(&("C-x t", self.toggle_common_description())));
                 }
                 // transient--insert-help
                 if self.transient_helpp {
@@ -1457,6 +1480,16 @@ impl App {
                 return self.handle_transient_key(key, menu, active);
             }
         }
+        let r = self.dispatch_buffer_key(key);
+        // transient-setup outside a transient replaces the suspended one
+        if !self.stack.is_empty() {
+            self.suspended.clear();
+        }
+        r
+    }
+
+    /// A key outside transients.
+    fn dispatch_buffer_key(&mut self, key: Key) -> Result<()> {
         if std::mem::take(&mut self.cc_prefix) {
             let select = matches!(self.mode, BufferMode::LogSelect { .. });
             let blaming = matches!(self.mode, BufferMode::File { blame: Some(_), .. });
@@ -1534,7 +1567,7 @@ impl App {
         // a file buffer has none of the Magit buffer bindings
         if matches!(self.mode, BufferMode::File { .. })
             && self.view_text.is_none()
-            && !matches!(binding, Binding::Down | Binding::Up | Binding::SetMark | Binding::KeyboardQuit)
+            && !binding.is_global()
         {
             self.set_msg(&format!("{} is undefined", key.label()));
             return Ok(());
@@ -1918,8 +1951,12 @@ impl App {
                 (true, "k") => self.transient_reset(),
                 (false, "p") => self.transient_history(true),
                 (false, "n") => self.transient_history(false),
-                // transient-quit-seq
+                // transient-toggle-common
+                (false, "t") => self.options.show_common_commands = !self.options.show_common_commands,
+                // transient-quit-seq; transient-sticky-map
                 (true, "g") => {}
+                (true, "q") => self.stack.clear(),
+                (true, "z") => self.transient_suspend(),
                 _ => self.transient_undefined(&format!("C-x {}", key.label()), None),
             }
             return Ok(());
@@ -1939,6 +1976,15 @@ impl App {
         // transient-quit-all
         if key.ctrl && key.code == "q" && self.pending.is_empty() {
             self.stack.clear();
+            return Ok(());
+        }
+        // transient-suspend (also in transient-sticky-map)
+        if key.ctrl && key.code == "z" {
+            self.transient_suspend();
+            return Ok(());
+        }
+        // transient-show: the menu is always shown
+        if key.ctrl && key.code == "t" && self.pending.is_empty() {
             return Ok(());
         }
         let mut typed = std::mem::take(&mut self.pending);
@@ -2056,6 +2102,54 @@ impl App {
         Ok(())
     }
 
+    /// transient-suspend: save the transient stack (with the values) and
+    /// exit; transient-resume sets it up again.
+    fn transient_suspend(&mut self) {
+        self.pending.clear();
+        self.transient_helpp = false;
+        self.suspended = std::mem::take(&mut self.stack);
+    }
+
+    /// transient-resume
+    fn transient_resume(&mut self) {
+        if self.suspended.is_empty() {
+            self.set_msg("No suspended transient command");
+        } else {
+            self.stack = std::mem::take(&mut self.suspended);
+        }
+    }
+
+    /// The description of transient-toggle-common.
+    fn toggle_common_description(&self) -> &'static str {
+        if self.options.show_common_commands {
+            "Hide common commands"
+        } else {
+            "Show common permanently"
+        }
+    }
+
+    /// execute-extended-command (M-x): read a command and call it. The
+    /// commands are transient-resume and the transient prefixes.
+    fn execute_extended_command(&mut self) -> Result<()> {
+        let mut commands: Vec<String> = vec!["transient-resume".into()];
+        for name in self.menus.keys() {
+            let cmd = help::prefix_command(name);
+            if !commands.contains(&cmd) {
+                commands.push(cmd);
+            }
+        }
+        commands.sort();
+        let Some(cmd) = self.read_choice("M-x ", &commands, None)? else {
+            return Ok(());
+        };
+        if cmd == "transient-resume" {
+            self.transient_resume();
+        } else if let Some(name) = self.menus.keys().find(|n| help::prefix_command(n) == cmd).cloned() {
+            self.open_menu(&name);
+        }
+        Ok(())
+    }
+
     /// transient-undefined: KEYS bound to CMD (nil: none) aren't a
     /// suffix of the transient shown.
     fn transient_undefined(&mut self, keys: &str, cmd: Option<&str>) {
@@ -2080,17 +2174,34 @@ impl App {
                 (true, "k") => "transient-reset",
                 (false, "p") => "transient-history-prev",
                 (false, "n") => "transient-history-next",
+                (false, "t") => "transient-toggle-common",
+                (true, "q") => {
+                    self.transient_helpp = false;
+                    self.stack.clear();
+                    return;
+                }
+                (true, "z") => "transient-suspend",
                 // transient-quit-seq
                 (true, "g") => return,
                 _ => return self.transient_undefined(&format!("C-x {}", key.label()), None),
             };
             let seq = format!("C-x {}", key.label());
-            let desc = VALUE_COMMANDS.iter().find(|(k, _)| *k == seq).map_or("", |(_, d)| d);
+            let desc = match VALUE_COMMANDS.iter().chain(&STICKY_COMMANDS).find(|(k, _)| *k == seq || *k == key.label()) {
+                Some((_, d)) => d,
+                None => self.toggle_common_description(),
+            };
             return describe(self, cmd, desc);
         }
         if key == cx && self.pending.is_empty() {
             self.pending.push(key);
             return;
+        }
+        if key.ctrl && self.pending.is_empty() && matches!(key.code.as_str(), "z" | "t") {
+            return if key.code == "z" {
+                describe(self, "transient-suspend", "Suspend transient stack")
+            } else {
+                describe(self, "transient-show", "Show the transient's state in the menu buffer")
+            };
         }
         if key.ctrl && (key.code == "M-p" || key.code == "M-n") && self.pending.is_empty() {
             let (cmd, desc) = if key.code == "M-p" {
@@ -2217,7 +2328,7 @@ impl App {
     fn buffer_binding(&self, key: &Key) -> Option<String> {
         let file = matches!(self.mode, BufferMode::File { .. }) && self.view_text.is_none();
         let b = status_binding(key)?;
-        if file && !matches!(b, Binding::Down | Binding::Up | Binding::SetMark | Binding::KeyboardQuit) {
+        if file && !b.is_global() {
             return None;
         }
         Some(binding_command(&b))
@@ -2348,6 +2459,7 @@ impl App {
             "stage-files" => self.stage_files()?,
             "unstage-files" => self.unstage_files()?,
             "display-repository-buffer" | "display-buffer" => self.display_repository_buffer()?,
+            "execute-extended-command" => self.execute_extended_command()?,
             "quit" => self.mode_bury_buffer(),
             "toggle-section" => self.toggle_section(),
             "visit" => self.visit_thing()?,

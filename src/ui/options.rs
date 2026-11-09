@@ -9,6 +9,7 @@
 //! magit-refs-filter-alist ^origin/pr- nil
 //! magit-visit-ref-behavior create-branch checkout-branch
 //! magit-published-branches origin/master origin/main
+//! transient-show-common-commands t
 //! ```
 //!
 //! magit-no-confirm and magit-visit-ref-behavior take a list of symbols
@@ -65,6 +66,8 @@ pub struct Options {
     pub visit_ref_behavior: Vec<String>,
     /// magit-published-branches
     pub published_branches: Vec<String>,
+    /// transient-show-common-commands
+    pub show_common_commands: bool,
 }
 
 impl Default for Options {
@@ -74,6 +77,7 @@ impl Default for Options {
             refs_filter: Vec::new(),
             visit_ref_behavior: Vec::new(),
             published_branches: vec!["origin/master".into()],
+            show_common_commands: false,
         }
     }
 }
@@ -144,6 +148,13 @@ impl Options {
                     o.published_branches = vs.iter().map(|v| v.to_string()).collect();
                     None
                 }
+                "transient-show-common-commands" => match values.as_slice() {
+                    [v @ ("t" | "nil")] => {
+                        o.show_common_commands = *v == "t";
+                        None
+                    }
+                    _ => Some("expected t or nil".into()),
+                },
                 "magit-refs-filter-alist" => match values.as_slice() {
                     ["nil"] => {
                         o.refs_filter.clear();
@@ -202,5 +213,9 @@ mod tests {
         assert!(o.published_branches.is_empty() && Options::default().published_branches == ["origin/master"]);
         let (o, _) = Options::parse("magit-published-branches origin/main upstream/main");
         assert_eq!(o.published_branches, ["origin/main", "upstream/main"]);
+        assert!(!o.show_common_commands);
+        let (o, e) = Options::parse("transient-show-common-commands t\ntransient-show-common-commands 1");
+        assert!(o.show_common_commands);
+        assert_eq!(e, ["2: expected t or nil"]);
     }
 }
