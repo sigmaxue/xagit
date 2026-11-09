@@ -3,13 +3,15 @@
 use super::keys::Key;
 use super::blame::{blob_ancestor, blob_successor, build_file, Blame, BlameType, STYLES};
 use super::transient::{
-    blame_menu, diff_refresh_menu, file_dispatch_menu, log_refresh_menu, prefix_value, registry, resolve_menu, Action,
+    blame_menu, diff_refresh_menu, file_dispatch_menu, log_refresh_menu, prefix_value, registry, resolve_menu,
+    show_refs_menu, Action,
     Lookup, Menu, MenuEntry, Reader, RepoState, VALUE_COMMANDS,
 };
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
 };
+use super::refs::{build_refs, deferred_ref, CommitCount, RefKind};
 use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
@@ -73,6 +75,8 @@ pub struct App {
     reading_arg: bool,
     /// magit--right-margin-config of the buffer of each mode (permanent)
     margins: HashMap<&'static str, Margin>,
+    /// magit-refs-show-commit-count of the refs buffer
+    refs_counts: CommitCount,
     message: String,
     quit: bool,
     /// pending text-mode buffer shown instead of status (diff/log/show output)
@@ -125,6 +129,9 @@ pub enum BufferMode {
     /// a buffer visiting FILE at REV ("{worktree}", "{index}" or a
     /// commit: magit-blob-mode), maybe blamed (magit-blame-mode)
     File { rev: String, file: String, blame: Option<Blame> },
+    /// magit-refs-mode: the refs compared with UPSTREAM
+    /// (magit-buffer-refs-upstream)
+    Refs { upstream: String },
 }
 
 /// What is done with the commit picked in a log-select buffer.
@@ -167,6 +174,7 @@ impl BufferMode {
             BufferMode::Reflog { .. } => "reflog",
             BufferMode::Stashes { .. } => "stashes",
             BufferMode::Cherry { .. } => "cherry",
+            BufferMode::Refs { .. } => "refs",
             _ => return None,
         })
     }
@@ -188,6 +196,8 @@ fn default_margin(name: &str) -> Margin {
     match name {
         "status" => Margin::status(),
         "reflog" | "stashes" => Margin::reflog(),
+        // magit-refs-margin: hidden, without the author
+        "refs" => Margin::status(),
         _ => Margin::log(),
     }
 }
@@ -250,6 +260,15 @@ const PUBLISHED_BRANCHES: &[&str] = &["origin/master"];
 /// magit-section-mode-map). `k` is magit-discard and `j` is
 /// magit-status-jump (Magit has no vi-style movement); `n` / `p` move
 /// between sections, C-n / C-p and the arrows between lines.
+/// The kind of the section at point in the refs buffer, for the
+/// commands remapped in its section keymaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefThing {
+    Branch,
+    Tag,
+    Remote,
+}
+
 /// A prefix argument (Emacs' raw prefix argument): `C-u` typed N times
 /// is Raw(4^N), `C-u 12` is Num(12), `C-u -` / `M--` is Minus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +359,7 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
         "u" => Command("unstage"),
         "U" => Command("unstage-all"),
         "k" => Command("discard"),
+        "R" => Command("rename-thing"),
         "K" => Command("untrack"),
         "x" => Command("reset-quickly"),
         "a" => Command("apply"),
@@ -406,6 +426,7 @@ impl App {
             prefix_arg: None,
             reading_arg: false,
             margins: HashMap::new(),
+            refs_counts: CommitCount::Nothing,
             message: String::new(),
             quit: false,
             view_text: None,
@@ -512,6 +533,9 @@ impl App {
             BufferMode::Stashes { refname } => build_stashes(&self.git, refname, &margin),
             BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream, &margin),
             BufferMode::File { rev, file, blame } => build_file(&self.git, rev, file, blame.as_ref()),
+            BufferMode::Refs { upstream } => {
+                build_refs(&self.git, upstream, &self.buf_args, self.refs_counts, &self.vis, &margin)
+            }
         }
     }
 
@@ -672,6 +696,22 @@ impl App {
 
     /// Re-show the buffer after a visibility change with point at P.
     fn relayout_at(&mut self, p: usize) {
+        // magit-insert-section-body: the bodies of the sections just shown
+        let shown: Vec<String> =
+            self.buf.deferred.iter().filter(|id| !self.buf.is_hidden(&self.vis, id)).cloned().collect();
+        if !shown.is_empty() {
+            let ident = self.buf.all.get(p).map(|l| l.ident.clone());
+            self.buf = self.build_buffer();
+            let p = ident.and_then(|id| self.buf.all.iter().position(|l| l.ident == id)).unwrap_or(p);
+            self.lines = self.buf.visible(&self.vis);
+            self.cursor = self.visible_index_near(p);
+            for id in shown {
+                if self.buf.sections.iter().any(|s| s.ident == id && s.end == s.start + 1) {
+                    self.set_msg(&format!("No cherries for {}", deferred_ref(&id)));
+                }
+            }
+            return;
+        }
         self.lines = self.buf.visible(&self.vis);
         self.cursor = self.visible_index_near(p);
     }
@@ -1088,9 +1128,16 @@ impl App {
                 return Ok(());
             }
         }
+        // magit-refs-mode-map
+        if matches!(self.mode, BufferMode::Refs { .. }) && self.view_text.is_none() && key.ctrl && key.code == "y" {
+            return self.run_command("refs-set-show-commit-count", &BTreeMap::new());
+        }
         // L is magit-margin-settings in magit-reflog-mode-map (and so in
-        // magit-stashes-mode) and magit-cherry-mode-map
-        if matches!(self.mode, BufferMode::Reflog { .. } | BufferMode::Stashes { .. } | BufferMode::Cherry { .. })
+        // magit-stashes-mode), magit-cherry-mode-map and magit-refs-mode-map
+        if matches!(
+            self.mode,
+            BufferMode::Reflog { .. } | BufferMode::Stashes { .. } | BufferMode::Cherry { .. } | BufferMode::Refs { .. }
+        )
             && self.view_text.is_none()
             && !key.ctrl
             && key.code == "L"
@@ -1177,6 +1224,10 @@ impl App {
             BufferMode::File { rev, blame, .. } => (true, rev != "{worktree}", blame.is_some()),
             _ => (false, false, false),
         };
+        if name == "show-refs-menu" {
+            let refs = matches!(self.mode, BufferMode::Refs { .. });
+            self.menus.insert(name.clone(), show_refs_menu(refs));
+        }
         if name == "blame-menu" {
             self.menus.insert(name.clone(), blame_menu(blob, blaming));
         }
@@ -1200,6 +1251,8 @@ impl App {
             ("log-menu" | "log-refresh-menu", m) if m.is_log() => &self.buf_args,
             ("log-refresh-menu", BufferMode::Status) => &self.status_log_args,
             ("log-menu" | "log-refresh-menu", _) => &self.log_args,
+            // magit-show-refs-arguments: the refs buffer's
+            ("show-refs-menu", BufferMode::Refs { .. }) => &self.buf_args,
             _ => &default,
         };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
@@ -1698,6 +1751,11 @@ impl App {
             "stage-all" => self.stage_modified()?,
             "unstage" => self.unstage_cmd()?,
             "unstage-all" => self.unstage_all()?,
+            "discard" if self.ref_thing().is_some() => match self.ref_thing() {
+                Some(RefThing::Tag) => self.run_command("tag-delete", &BTreeMap::new())?,
+                Some(RefThing::Remote) => self.run_command("remote-remove", &BTreeMap::new())?,
+                _ => self.branch_delete()?,
+            },
             "discard" => self.discard_cmd()?,
             "untrack" => {
                 if let Some((_, path)) = self.pick_current_file_or_section() {
@@ -1812,7 +1870,10 @@ impl App {
             // -------- branch menu
             "checkout" | "branch-checkout" => {
                 let bs = g!().branches();
-                if let Some(b) = self.pick("Checkout branch/revision", &bs, None)? {
+                // magit-read-other-branch-or-commit: the branch at point
+                let current = g!().current_branch();
+                let default = self.branch_at_point().filter(|b| Some(b) != current.as_ref() && bs.contains(b));
+                if let Some(b) = self.pick("Checkout branch/revision", &bs, default.as_deref())? {
                     g!().checkout(b)?;
                     self.set_msg(&format!("checked out {b}"));
                     self.refresh();
@@ -1854,20 +1915,18 @@ impl App {
                 self.set_msg(&format!("spin-out {name}"));
                 self.refresh();
             }
+            // magit-branch-rename
             "branch-rename" => {
                 let bs = g!().branches();
-                if let Some(old) = self.pick("Rename branch", &bs, None)? {
-                    if let Some(new) = self.read_line_prompt("New name", Some(old))? {
-                        // with a prefix argument even if NEW exists
-                        if self.prefix_arg.is_some() {
-                            g!().git_interactive(&["branch", "-M", old, &new])?;
-                        } else {
-                            g!().branch_rename(old, &new)?;
-                        }
-                        self.set_msg("renamed");
-                        self.refresh();
-                    }
-                }
+                // magit-read-local-branch
+                let default = self.local_branch_at_point().or_else(|| g!().current_branch());
+                let Some(old) = self.pick("Rename branch", &bs, default.as_deref())?.cloned() else {
+                    return Ok(());
+                };
+                let Some(new) = self.read_line_prompt(&format!("Rename branch '{old}' to"), None)? else {
+                    return Ok(());
+                };
+                self.branch_rename(&old, &new)?;
             }
             "branch-reset" => {
                 let bs = g!().branches();
@@ -1904,20 +1963,28 @@ impl App {
                 self.set_msg(&format!("added remote {name}"));
                 self.refresh();
             }
+            // magit-remote-rename
             "remote-rename" => {
                 let rs = g!().remotes();
-                if let Some(old) = self.pick("Rename remote", &rs, None)? {
-                    if let Some(new) = self.read_line_prompt("New name", Some(old))? {
-                        g!().remote_rename(old, &new)?;
-                        self.set_msg("renamed remote");
+                let default = self.remote_default();
+                if let Some(old) = self.pick("Rename remote", &rs, default.as_deref())?.cloned() {
+                    if let Some(new) = self.read_line_prompt(&format!("Rename {old} to"), None)? {
+                        if new != old {
+                            g!().remote_rename(&old, &new)?;
+                            self.remote_cleanup_push_variables(&old, Some(&new));
+                            self.set_msg("renamed remote");
+                        }
                         self.refresh();
                     }
                 }
             }
+            // magit-remote-remove
             "remote-remove" => {
                 let rs = g!().remotes();
-                if let Some(r) = self.pick("Remove remote", &rs, None)? {
-                    g!().remote_remove(r)?;
+                let default = self.remote_default();
+                if let Some(r) = self.pick("Delete remote", &rs, default.as_deref())?.cloned() {
+                    g!().remote_remove(&r)?;
+                    self.remote_cleanup_push_variables(&r, None);
                     self.set_msg("removed remote");
                     self.refresh();
                 }
@@ -2210,13 +2277,28 @@ impl App {
                 self.set_msg(&format!("tagged {name}"));
                 self.refresh();
             }
+            // magit-tag-delete: the selected tags, else one read
             "tag-delete" => {
-                let tags = g!().tags();
-                if let Some(t) = self.pick("Delete tag", &tags, None)? {
-                    g!().tag_delete(t)?;
-                    self.set_msg("tag deleted");
-                    self.refresh();
-                }
+                let tags = match self.region_refs(&[RefKind::Tag], false) {
+                    Some(tags) => {
+                        if !self.confirm(&format!("Delete {} tags", tags.len()))? {
+                            return Ok(());
+                        }
+                        tags
+                    }
+                    None => {
+                        let tags = g!().tags();
+                        let default = self.tag_at_point();
+                        match self.pick("Delete tag", &tags, default.as_deref())? {
+                            Some(t) => vec![t.clone()],
+                            None => return Ok(()),
+                        }
+                    }
+                };
+                let mut a = vec!["tag", "-d"];
+                a.extend(tags.iter().map(String::as_str));
+                let res = g!().git_interactive(&a);
+                self.done("tag deleted", res.map(|()| String::new()));
             }
 
             // -------- revert / cherry-pick
@@ -2386,19 +2468,60 @@ impl App {
                 }
                 self.refresh();
             }
+            // magit-show-refs: the menu in the refs buffer or with a
+            // prefix argument, else the refs compared with HEAD
             "show-refs" => {
-                let mut out = String::new();
-                out.push_str(&format!("Branches:\n"));
-                for b in g!().branches() {
-                    let marker = if Some(b.clone()) == g!().current_branch() { "*" } else { " " };
-                    out.push_str(&format!("  {marker} {b}\n"));
+                if matches!(self.mode, BufferMode::Refs { .. }) || self.prefix_arg.is_some() {
+                    self.open_menu("show-refs-menu");
+                } else {
+                    let args = self.prefix_args("show-refs-menu");
+                    self.setup_buffer(BufferMode::Refs { upstream: "HEAD".into() }, args);
                 }
-                out.push_str("Tags:\n");
-                for t in g!().tags() {
-                    out.push_str(&format!("  {t}\n"));
-                }
-                self.view_text = Some(("refs".into(), out));
             }
+            "show-refs-head" => self.setup_buffer(BufferMode::Refs { upstream: "HEAD".into() }, args),
+            "show-refs-current" => {
+                let upstream = g!().current_branch().unwrap_or_else(|| "HEAD".into());
+                self.setup_buffer(BufferMode::Refs { upstream }, args);
+            }
+            // magit-read-other-branch
+            "show-refs-other" => {
+                let current = g!().current_branch();
+                let mut choices = g!().branches();
+                choices.extend(g!().remote_branches());
+                choices.retain(|b| Some(b) != current.as_ref());
+                let atpoint = self.branch_at_point().filter(|b| Some(b) != current.as_ref());
+                let previous = self.previous_branch();
+                let default = atpoint.or(previous);
+                if let Some(r) = self.pick("Compare with", &choices, default.as_deref())?.cloned() {
+                    self.setup_buffer(BufferMode::Refs { upstream: r }, args);
+                }
+            }
+            // magit-refs-set-show-commit-count
+            "refs-set-show-commit-count" => {
+                if !matches!(self.mode, BufferMode::Refs { .. }) {
+                    self.set_msg("Not in a refs buffer");
+                    return Ok(());
+                }
+                let prompt = "Show commit counts for [a]ll refs, [b]ranches only, [n]othing";
+                let answer = self.read_line_prompt(prompt, None)?.unwrap_or_default();
+                self.refs_counts = match answer.chars().next() {
+                    Some('a') => CommitCount::All,
+                    Some('b') => CommitCount::Branches,
+                    Some('n') => CommitCount::Nothing,
+                    _ => {
+                        self.set_msg("Quit");
+                        return Ok(());
+                    }
+                };
+                self.refresh();
+            }
+            // magit-delete-thing / magit-file-rename remapped in the
+            // sections of the refs buffer
+            "rename-thing" => match self.ref_thing() {
+                Some(RefThing::Branch) => self.run_command("branch-rename", &BTreeMap::new())?,
+                Some(RefThing::Remote) => self.run_command("remote-rename", &BTreeMap::new())?,
+                _ => self.file_command("file-rename")?,
+            },
 
             // -------- log / diff / show (arguments come from the l/d menus)
             "log-current" | "log-head" | "log-other" | "log-related" | "log-branches" | "log-all-branches"
@@ -2612,6 +2735,8 @@ impl App {
                 .iter()
                 .filter_map(|&s| match &self.buf.all[self.sec(s).start].kind {
                     LineKind::Commit { hash, .. } => Some(hash.clone()),
+                    // magit-region-values '(commit branch)
+                    LineKind::Ref { kind: RefKind::Local | RefKind::Remote, name } => Some(name.clone()),
                     _ => None,
                 })
                 .collect();
@@ -2654,7 +2779,7 @@ impl App {
                     _ => Dwim::None,
                 }
             }
-            BufferMode::Stashes { .. } | BufferMode::Cherry { .. } => match line.map(|l| &l.kind) {
+            BufferMode::Stashes { .. } | BufferMode::Cherry { .. } | BufferMode::Refs { .. } => match line.map(|l| &l.kind) {
                 Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
                 Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
                 _ => Dwim::None,
@@ -4446,6 +4571,7 @@ impl App {
     fn branch_or_commit_default(&self) -> Option<String> {
         match self.current_line().map(|l| l.kind.clone()) {
             Some(LineKind::Commit { hash, .. }) => Some(self.git.rev_short(&hash)),
+            Some(LineKind::Ref { name, .. }) => Some(name),
             _ => self.git.current_branch(),
         }
     }
@@ -4739,6 +4865,139 @@ impl App {
         self.git.git_string(&["log", "-1", "--format=%cD", "HEAD"]).ok()
     }
 
+    /// magit-branch-rename OLD to NEW (with a prefix argument even if NEW
+    /// exists), moving its push-remote setup (magit-branch-rename-push-
+    /// target t): branch.OLD.pushRemote becomes branch.NEW.pushRemote and,
+    /// if confirmed, the push-target is renamed on the remote.
+    fn branch_rename(&mut self, old: &str, new: &str) -> Result<()> {
+        let old = old.strip_prefix("heads/").unwrap_or(old);
+        let force = self.prefix_arg.is_some();
+        if old == new {
+            anyhow::bail!("Old and new branch names are the same");
+        }
+        if !force && self.git.git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{new}")]) {
+            anyhow::bail!("Branch `{new}' already exists");
+        }
+        let config = |k: &str| self.git.git_string(&["config", k]).ok().filter(|v| !v.is_empty());
+        let push_remote = config(&format!("branch.{old}.pushRemote"));
+        let remote = push_remote.clone().or_else(|| config("remote.pushDefault"));
+        self.git.git_interactive(&["branch", if force { "-M" } else { "-m" }, old, new])?;
+        if let Some(r) = &push_remote {
+            let _ = self.git.git_ok(&["config", "--unset", &format!("branch.{old}.pushRemote")]);
+            let _ = self.git.git_ok(&["config", &format!("branch.{new}.pushRemote"), r]);
+        }
+        if let Some(remote) = remote {
+            let (o, n) = (format!("{remote}/{old}"), format!("{remote}/{new}"));
+            if self.git.rev_verify(&o)
+                && !self.git.rev_verify(&n)
+                && self.yes_no(&format!("Also rename \"{old}\" to \"{new}\" on \"{remote}\"?"))?
+            {
+                let src = format!("refs/remotes/{o}:refs/heads/{new}");
+                let del = format!(":refs/heads/{old}");
+                let res = self.git.git_interactive(&["push", "-v", &remote, &src, &del]);
+                self.done("renamed", res.map(|()| String::new()));
+                return Ok(());
+            }
+        }
+        self.set_msg("renamed");
+        self.refresh();
+        Ok(())
+    }
+
+    /// What the section at point is in the refs buffer.
+    fn ref_thing(&self) -> Option<RefThing> {
+        match self.current_line().map(|l| &l.kind) {
+            Some(LineKind::Ref { kind: RefKind::Tag, .. }) => Some(RefThing::Tag),
+            Some(LineKind::Ref { .. }) => Some(RefThing::Branch),
+            Some(LineKind::Remote { .. }) => Some(RefThing::Remote),
+            _ => None,
+        }
+    }
+
+    /// The branch of the branch section at point (magit-section-value-if
+    /// 'branch).
+    fn branch_at_point(&self) -> Option<String> {
+        match self.current_line().map(|l| &l.kind) {
+            Some(LineKind::Ref { kind: RefKind::Local | RefKind::Remote, name }) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// magit-local-branch-at-point
+    fn local_branch_at_point(&self) -> Option<String> {
+        match self.current_line().map(|l| &l.kind) {
+            Some(LineKind::Ref { kind: RefKind::Local, name }) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// magit-tag-at-point
+    fn tag_at_point(&self) -> Option<String> {
+        match self.current_line().map(|l| &l.kind) {
+            Some(LineKind::Ref { kind: RefKind::Tag, name }) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// The default of magit-read-remote: magit-remote-at-point (the remote
+    /// section, or the remote of the remote branch section at point),
+    /// else magit-get-remote.
+    fn remote_default(&self) -> Option<String> {
+        let at = match self.current_line().map(|l| &l.kind) {
+            Some(LineKind::Remote { name }) => Some(name.clone()),
+            Some(LineKind::Ref { kind: RefKind::Remote, .. }) => self.sec(self.cur_sec()).parent.and_then(|parent| {
+                match &self.buf.all[self.sec(parent).start].kind {
+                    LineKind::Remote { name } => Some(name.clone()),
+                    _ => None,
+                }
+            }),
+            _ => None,
+        };
+        at.or_else(|| {
+            let branch = self.git.current_branch()?;
+            self.git.git_string(&["config", &format!("branch.{branch}.remote")]).ok().filter(|r| !r.is_empty() && r != ".")
+        })
+        .or_else(|| {
+            let rs = self.git.remotes();
+            if rs.len() == 1 {
+                rs.first().cloned()
+            } else {
+                rs.into_iter().find(|r| r == "origin")
+            }
+        })
+    }
+
+    /// magit-remote--cleanup-push-variables: remote.pushDefault and the
+    /// branch.*.pushRemote that are REMOTE are set to NEW, or unset.
+    fn remote_cleanup_push_variables(&self, remote: &str, new: Option<&str>) {
+        let set = |var: &str| match new {
+            Some(n) => self.git.git_ok(&["config", var, n]),
+            None => self.git.git_ok(&["config", "--unset", var]),
+        };
+        if self.git.git_string(&["config", "remote.pushDefault"]).ok().as_deref() == Some(remote) {
+            set("remote.pushDefault");
+        }
+        let pattern = format!("^{}$", regex_quote(remote));
+        for var in self.git.git_lines_pub(&["config", "--name-only", "--get-regexp", "^branch\\.[^.]*\\.pushRemote", &pattern]) {
+            set(&var);
+        }
+    }
+
+    /// magit-region-values of the ref sections of KINDS (at least two if
+    /// MULTIPLE), if the region selects such sections only.
+    fn region_refs(&self, kinds: &[RefKind], multiple: bool) -> Option<Vec<String>> {
+        if self.mark.is_none() || self.mark == Some(self.point()) {
+            return None;
+        }
+        let secs = self.region_sections(multiple)?;
+        secs.iter()
+            .map(|&s| match &self.buf.all[self.sec(s).start].kind {
+                LineKind::Ref { kind, name } if kinds.contains(kind) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// magit-branch-merged-p: BRANCH is merged into the current branch
     /// (never when HEAD is detached) and, if it has one, its upstream.
     fn branch_merged(&self, branch: &str) -> bool {
@@ -4789,6 +5048,10 @@ impl App {
     /// the commit at point the only one, else one that isn't current,
     /// else the previous branch.
     fn branch_prefer_other_default(&self) -> Option<String> {
+        // (magit-section-value-if 'branch)
+        if let Some(b) = self.branch_at_point() {
+            return Some(b);
+        }
         let current = self.git.current_branch();
         let atrev: Vec<String> = match self.commit_at_point() {
             Some(c) => self.git.git_lines(&[
@@ -4813,42 +5076,91 @@ impl App {
             .or_else(|| atrev.first().cloned())
     }
 
-    /// magit-branch-delete: delete a local or remote-tracking branch.
-    /// Deleting an unmerged branch has to be confirmed, unless forced by
-    /// a prefix argument. Deleting a remote-tracking branch offers to
-    /// delete the branch on the remote too; deleting the current branch
-    /// to detach HEAD or to check out another branch first.
+    /// magit-branch-delete: delete the branches selected in the refs
+    /// buffer, else one read (local or remote-tracking). Deleting an
+    /// unmerged branch has to be confirmed, unless forced by a prefix
+    /// argument. Deleting remote-tracking branches offers to delete the
+    /// branches on the remote too; deleting the current branch to detach
+    /// HEAD or to check out another branch first.
     fn branch_delete(&mut self) -> Result<()> {
         let mut force = self.prefix_arg.is_some();
         // (equal force '(4)): no confirmation for the current branch
         let forced = self.prefix_arg == Some(PrefixArg::Raw(4));
         let mut confirmed = false;
-        let mut choices = self.git.branches();
-        choices.extend(self.git.remote_branches());
-        let default = self.branch_prefer_other_default();
-        let prompt = if force { "Force delete branch" } else { "Delete branch" };
-        let Some(branch) = self.pick(prompt, &choices, default.as_deref())?.cloned() else {
-            return Ok(());
-        };
-        if !force && !self.branch_merged(&branch) {
-            if !self.confirm(&format!("Delete unmerged branch {branch}"))? {
-                return Ok(());
+        let mut branches = match self.region_refs(&[RefKind::Local, RefKind::Remote], true) {
+            Some(bs) if bs.len() > 1 => {
+                if !self.confirm(&format!("Delete {} branches", bs.len()))? {
+                    return Ok(());
+                }
+                bs
             }
-            force = true;
-            confirmed = true;
-        }
-        let Some(full) = self
-            .git
-            .git_string(&["rev-parse", "--verify", "--symbolic-full-name", &branch])
-            .ok()
-            .filter(|f| !f.is_empty())
-        else {
-            self.set_msg(&format!("{branch} is ambiguous; please cleanup using git directly"));
-            return Ok(());
+            _ => {
+                let mut choices = self.git.branches();
+                choices.extend(self.git.remote_branches());
+                let default = self.branch_prefer_other_default();
+                let prompt = if force { "Force delete branch" } else { "Delete branch" };
+                match self.pick(prompt, &choices, default.as_deref())? {
+                    Some(b) => vec![b.clone()],
+                    None => return Ok(()),
+                }
+            }
         };
-        if full.starts_with("refs/remotes/") {
-            return self.delete_remote_tracking_branch(&full, force);
+        if !force {
+            let unmerged: Vec<String> = branches.iter().filter(|b| !self.branch_merged(b)).cloned().collect();
+            if !unmerged.is_empty() {
+                let prompt = match unmerged.as_slice() {
+                    [b] => format!("Delete unmerged branch {b}"),
+                    _ => format!("Delete {} unmerged branches", unmerged.len()),
+                };
+                // 'noabort: declining deletes the merged ones only
+                if self.confirm(&prompt)? {
+                    force = true;
+                    confirmed = true;
+                } else {
+                    branches.retain(|b| !unmerged.contains(b));
+                    if branches.is_empty() {
+                        self.set_msg("Abort");
+                        return Ok(());
+                    }
+                }
+            }
         }
+        let fulls: Vec<Option<String>> = branches
+            .iter()
+            .map(|b| {
+                self.git.git_string(&["rev-parse", "--verify", "--symbolic-full-name", b]).ok().filter(|f| !f.is_empty())
+            })
+            .collect();
+        let ambiguous = fulls.iter().filter(|f| f.is_none()).count();
+        if ambiguous > 0 {
+            let what = if ambiguous == 1 {
+                let i = fulls.iter().position(Option::is_none).unwrap_or(0);
+                format!("{} is", branches[i])
+            } else if ambiguous == fulls.len() {
+                format!("These {ambiguous} names are")
+            } else {
+                format!("{ambiguous} of these names are")
+            };
+            self.set_msg(&format!("{what} ambiguous; please cleanup using git directly"));
+            return Ok(());
+        }
+        let fulls: Vec<String> = fulls.into_iter().flatten().collect();
+        if fulls[0].starts_with("refs/remotes/") {
+            return self.delete_remote_tracking_branches(&branches, &fulls, force);
+        }
+        if branches.len() > 1 {
+            let current = self.git.current_branch();
+            branches.retain(|b| Some(b) != current.as_ref());
+            for b in &branches {
+                let _ = self.git.git_ok(&["config", "--unset", &format!("branch.{b}.pushRemote")]);
+            }
+            let mut a = vec!["branch", if force { "-D" } else { "-d" }];
+            a.extend(branches.iter().map(String::as_str));
+            let res = self.git.git_interactive(&a);
+            self.done(&format!("deleted {}", branches.join(", ")), res.map(|()| String::new()));
+            return Ok(());
+        }
+        let branch = branches.remove(0);
         if self.git.current_branch().as_deref() == Some(branch.as_str()) {
             let mut target = self.indirect_upstream_branch(&branch);
             if target.is_none() || target.as_deref() == Some(branch.as_str()) {
@@ -4888,46 +5200,64 @@ impl App {
         Ok(())
     }
 
-    /// magit-branch-delete of the remote-tracking branch FULL: also on
-    /// the remote if confirmed (with FORCE without verifying), else just
-    /// the local ref.
-    fn delete_remote_tracking_branch(&mut self, full: &str, force: bool) -> Result<()> {
-        let short = &full["refs/remotes/".len()..];
+    /// magit-branch-delete of the remote-tracking BRANCHES (their full
+    /// refs FULLS, all of the remote of the first): also on the remote if
+    /// confirmed (with FORCE without verifying), else just the local refs.
+    fn delete_remote_tracking_branches(&mut self, branches: &[String], fulls: &[String], force: bool) -> Result<()> {
+        let short = &fulls[0]["refs/remotes/".len()..];
         let Some(remote) = self.git.remotes().into_iter().find(|r| short.starts_with(&format!("{r}/"))) else {
             self.set_msg(&format!("Invalid branch name {short}"));
             return Ok(());
         };
-        let name = &short[remote.len() + 1..];
-        let was = format!("Delete {full} (was {})", self.git.rev_short(full));
-        if !self.yes_no(&format!("Deleting local {full}.  Also delete on {remote}?"))? {
-            let res = self.git.git_interactive(&["update-ref", "-d", full]);
-            self.done(&was, res.map(|()| String::new()));
+        let offset = remote.len() + 1;
+        let was: Vec<String> = fulls.iter().map(|f| format!("Delete {f} (was {})", self.git.rev_short(f))).collect();
+        let prompt = match fulls {
+            [f] => format!("Deleting local {f}.  Also delete on {remote}?"),
+            _ => format!("Deleting {} local refs.  Also delete on {remote}?", fulls.len()),
+        };
+        if !self.yes_no(&prompt)? {
+            let mut res = Ok(());
+            for f in fulls {
+                res = res.and(self.git.git_interactive(&["update-ref", "-d", f]));
+            }
+            self.done(&was.join("; "), res.map(|()| String::new()));
             return Ok(());
         }
-        let refspec = format!("refs/heads/{name}");
+        let refspecs: Vec<String> = branches.iter().map(|b| format!("refs/heads/{}", &b[offset.min(b.len())..])).collect();
         let mut a = vec!["push", "--delete"];
         if force {
             a.push("--no-verify");
         }
-        a.extend([remote.as_str(), refspec.as_str()]);
+        a.push(&remote);
+        a.extend(refspecs.iter().map(String::as_str));
         if let Err(e) = self.git.git_interactive(&a) {
-            // magit-delete-remote-branch-sentinel: the branch no longer
-            // exists on the remote; delete just the remote-tracking ref
-            let on_remote = self
+            // magit-delete-remote-branch-sentinel: the branches that no
+            // longer exist on the remote; delete just their tracking refs
+            let on_remote: Vec<String> = self
                 .git
                 .git_lines_pub(&["ls-remote", "--heads", &remote])
                 .iter()
-                .any(|l| l.split('\t').nth(1) == Some(refspec.as_str()));
-            if on_remote || !self.git.git_ok(&["show-ref", "--verify", "--quiet", full]) {
+                .filter_map(|l| l.split('\t').nth(1).map(str::to_string))
+                .collect();
+            let gone: Vec<&String> = fulls
+                .iter()
+                .zip(&refspecs)
+                .filter(|(f, r)| !on_remote.contains(r) && self.git.git_ok(&["show-ref", "--verify", "--quiet", f]))
+                .map(|(f, _)| f)
+                .collect();
+            if gone.is_empty() {
                 self.set_msg(&format!("{e}"));
                 return Ok(());
             }
-            let res = self.git.git_interactive(&["update-ref", "-d", full]);
+            let mut res = Ok(());
+            for f in gone {
+                res = res.and(self.git.git_interactive(&["update-ref", "-d", f]));
+            }
             let msg = "Some remote branches no longer exist.  Deleting just the local tracking refs instead...";
             self.done(msg, res.map(|()| String::new()));
             return Ok(());
         }
-        self.done(&was, Ok(String::new()));
+        self.done(&was.join("; "), Ok(String::new()));
         Ok(())
     }
 
@@ -5017,6 +5347,7 @@ impl App {
             BufferMode::Stashes { .. } => "magit-stashes",
             BufferMode::Cherry { .. } => "magit-cherry",
             BufferMode::LogSelect { .. } => "magit-log-select",
+            BufferMode::Refs { .. } => "magit-refs",
             BufferMode::File { rev, file, .. } => return super::blame::buffer_name(rev, file),
         };
         format!("{m}: {repo}")
@@ -5211,6 +5542,8 @@ impl App {
             }
             LineKind::Stash { name, .. } => self.show_stash(&name),
             LineKind::Commit { hash, .. } => self.show_commit(&hash),
+            // magit-visit-ref (magit-visit-ref-behavior nil)
+            LineKind::Ref { name, .. } => self.show_commit(&name),
             _ => self.set_msg("There is no thing at point that could be visited"),
         }
         Ok(())
@@ -5759,6 +6092,7 @@ impl App {
                     | BufferMode::Reflog { .. }
                     | BufferMode::Stashes { .. }
                     | BufferMode::Cherry { .. }
+                    | BufferMode::Refs { .. }
                     | BufferMode::File { .. } => {
                         self.set_msg("Only diff buffers can be saved as patches");
                         return Ok(());

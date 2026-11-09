@@ -622,42 +622,61 @@ pub fn build_cherry(g: &Git, head: &str, upstream: &str, margin: &Margin) -> Sta
     }
     b.root_blank();
     // magit-insert-cherry-commits
-    let out = g.git_string(&["cherry", "-v", "--abbrev", upstream, head]).unwrap_or_default();
-    let cherries: Vec<(&str, &str, &str)> = out
-        .lines()
-        .rev()
-        .filter_map(|l| {
-            let (mark, rest) = l.split_once(' ')?;
-            let (hash, msg) = rest.split_once(' ').unwrap_or((rest, ""));
-            matches!(mark, "+" | "-").then_some((mark, hash, msg))
-        })
-        .collect();
-    let mut idents: Vec<(String, String)> = Vec::new();
-    // only when the margin is shown (magit-log-wash-rev, cherry style)
-    if !cherries.is_empty() && margin.enable {
-        let mut a = vec!["log", "--no-walk=unsorted", "--format=%aN%x00%ct"];
-        a.extend(cherries.iter().map(|c| c.1));
-        if let Ok(o) = g.git_output(&a) {
-            idents = String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| {
-                    let (a, d) = l.split_once('\0').unwrap_or((l, ""));
-                    (a.to_string(), d.to_string())
-                })
-                .collect();
-        }
-    }
+    let cherries = cherry_commits(g, upstream, head, margin.enable);
     let n = cherries.len();
     b.heading_hide("Cherry commits".into(), LineKind::SectionHeader { section: "cherries".into(), n }, "cherries", 0, n > 0, false);
     let now = now();
-    for (i, (mark, hash, msg)) in cherries.iter().enumerate() {
-        let kind = LineKind::Commit { section: "cherry".into(), hash: hash.to_string() };
-        b.line(format!("{mark} {hash} {msg}"), kind, &format!("commit:{hash}"), true, 1);
-        if let Some((author, date)) = idents.get(i) {
+    for c in &cherries {
+        let kind = LineKind::Commit { section: "cherry".into(), hash: c.hash.clone() };
+        b.line(format!("{} {} {}", c.mark, c.hash, c.msg), kind, &format!("commit:{}", c.hash), true, 1);
+        if let Some((author, date)) = &c.ident {
             b.margin(margin.author(author, date, now));
         }
     }
     let mut buf = StatusBuffer::new(b.lines, Vec::new(), String::new());
     buf.margin_width = margin.shown_width();
     buf
+}
+
+/// A line of `git cherry -v`: "+" (not in upstream) or "-" (an
+/// equivalent change is), the commit and its summary, and its author and
+/// date (for the margin).
+pub struct Cherry {
+    pub mark: String,
+    pub hash: String,
+    pub msg: String,
+    pub ident: Option<(String, String)>,
+}
+
+/// `git cherry -v --abbrev UPSTREAM HEAD` washed like magit-log-wash-log
+/// 'cherry (oldest last); with the authors and dates if MARGIN.
+pub fn cherry_commits(g: &Git, upstream: &str, head: &str, margin: bool) -> Vec<Cherry> {
+    let out = g.git_string(&["cherry", "-v", "--abbrev", upstream, head]).unwrap_or_default();
+    let mut cherries: Vec<Cherry> = out
+        .lines()
+        .rev()
+        .filter_map(|l| {
+            let (mark, rest) = l.split_once(' ')?;
+            let (hash, msg) = rest.split_once(' ').unwrap_or((rest, ""));
+            matches!(mark, "+" | "-").then(|| Cherry { mark: mark.into(), hash: hash.into(), msg: msg.into(), ident: None })
+        })
+        .collect();
+    // only when the margin is shown (magit-log-wash-rev, cherry style)
+    if !cherries.is_empty() && margin {
+        let mut a = vec!["log", "--no-walk=unsorted", "--format=%aN%x00%ct"];
+        a.extend(cherries.iter().map(|c| c.hash.as_str()));
+        if let Ok(o) = g.git_output(&a) {
+            let idents: Vec<(String, String)> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| {
+                    let (a, d) = l.split_once('\0').unwrap_or((l, ""));
+                    (a.to_string(), d.to_string())
+                })
+                .collect();
+            for (c, i) in cherries.iter_mut().zip(idents) {
+                c.ident = Some(i);
+            }
+        }
+    }
+    cherries
 }

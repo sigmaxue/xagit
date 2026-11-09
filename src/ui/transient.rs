@@ -481,6 +481,34 @@ pub fn file_dispatch_menu(in_file: bool, blaming: bool, status: bool) -> Menu {
     Menu { name: "file-dispatch".into(), title: "File dispatch".into(), groups }
 }
 
+/// magit-show-refs; "r" (magit-refs-set-show-commit-count) only in the
+/// refs buffer (:if-derived magit-refs-mode).
+pub fn show_refs_menu(in_refs: bool) -> Menu {
+    let mut actions = vec![
+        cmd("y", "Show refs, comparing them with HEAD", "show-refs-head"),
+        cmd("c", "Show refs, comparing them with current branch", "show-refs-current"),
+        cmd("o", "Show refs, comparing them with other branch", "show-refs-other"),
+    ];
+    if in_refs {
+        actions.push(cmd("r", "Show refs, changing commit count display", "refs-set-show-commit-count"));
+    }
+    Menu {
+        name: "show-refs-menu".into(),
+        title: "Show refs".into(),
+        groups: vec![
+            vec![
+                opt("-c", "Contains", "--contains=", Reader::String),
+                opt("-M", "Merged", "--merged=", Reader::String),
+                sw("-m", "Merged to HEAD", "--merged"),
+                opt("-N", "Not merged", "--no-merged=", Reader::String),
+                sw("-n", "Not merged to HEAD", "--no-merged"),
+                opt("-s", "Sort", "--sort=", choices(&["-committerdate", "-authordate", "committerdate", "authordate"])),
+            ],
+            actions,
+        ],
+    }
+}
+
 pub fn registry() -> BTreeMap<String, Menu> {
     let mut m = BTreeMap::new();
 
@@ -1125,6 +1153,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
     // file and blob buffers)
     m.insert("blame-menu".into(), blame_menu(true, true));
     m.insert("file-dispatch".into(), file_dispatch_menu(true, false, false));
+    m.insert("show-refs-menu".into(), show_refs_menu(true));
 
     // ------------------------------------------------ magit-submodule (o)
     m.insert(

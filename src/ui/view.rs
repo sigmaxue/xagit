@@ -31,6 +31,10 @@ pub enum LineKind {
     FileLine { line: usize, chunk: Option<usize> },
     /// the heading (or separator) shown before blame chunk CHUNK
     BlameHeading { chunk: usize },
+    /// a branch or tag section of the refs buffer
+    Ref { kind: super::refs::RefKind, name: String },
+    /// the heading of a remote's section in the refs buffer
+    Remote { name: String },
     Info,
 }
 
@@ -101,6 +105,9 @@ pub struct StatusBuffer {
     pub blame: Vec<super::blame::Chunk>,
     /// why blaming the file failed
     pub blame_error: Option<String>,
+    /// sections whose body is only inserted once they are shown
+    /// (magit-insert-section-body)
+    pub deferred: Vec<String>,
 }
 
 impl StatusBuffer {
@@ -117,6 +124,7 @@ impl StatusBuffer {
             margin_width: 0,
             blame: Vec::new(),
             blame_error: None,
+            deferred: Vec::new(),
         }
     }
 
