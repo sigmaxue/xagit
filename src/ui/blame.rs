@@ -29,10 +29,21 @@ pub struct Blame {
     pub recursive: bool,
     /// the arguments of the blame (magit-blame-arguments)
     pub args: Vec<String>,
+    /// magit-blame-read-only-mode: its keys are bound (not after
+    /// magit-blame-echo)
+    pub read_only: bool,
 }
 
 /// The identifiers of magit-blame-styles, cycled by `c`.
 pub const STYLES: [&str; 3] = ["headings", "highlight", "lines"];
+/// magit-blame-echo-style
+pub const ECHO_STYLE: usize = 2;
+
+/// show-message of the style: the summary of the chunk entered is
+/// echoed.
+pub fn style_shows_message(style: usize) -> bool {
+    STYLES[style] == "lines"
+}
 /// heading-format of the headings style
 const HEADING_FORMAT: &str = "%-20a %C %s";
 /// magit-blame-time-format

@@ -82,9 +82,10 @@ fn menus() {
     assert!(!keys.contains(&"q".to_string()), "q only while blaming");
     app.press("q").unwrap();
     assert_eq!(app.current_menu(), None);
-    // magit-blame: r and f only in blob buffers, q and c while blaming
+    // magit-blame: r and f only in blob buffers, m only in file buffers,
+    // q and c while blaming
     app.press("B").unwrap();
-    assert_eq!(app.menu_keys(), ["-w", "-r", "-P", "-M", "-C", "b"]);
+    assert_eq!(app.menu_keys(), ["-w", "-r", "-P", "-M", "-C", "b", "m"]);
     app.press("b").unwrap();
     press(&mut app, &["C-c", "M-g"]);
     assert!(app.menu_keys().contains(&"q".to_string()));

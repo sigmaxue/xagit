@@ -479,12 +479,15 @@ pub fn write_history(path: &std::path::Path, history: &History) -> std::io::Resu
 }
 
 /// magit-blame: "r" and "f" only in blob buffers (:if-nil
-/// buffer-file-name), "q" and the Refresh group only while BLAMING.
-pub fn blame_menu(blob: bool, blaming: bool) -> Menu {
+/// buffer-file-name), "m" only in file buffers not blamed or blamed
+/// READ_ONLY, "q" and the Refresh group only while BLAMING.
+pub fn blame_menu(blob: bool, blaming: bool, read_only: bool) -> Menu {
     let mut actions = vec![cmd("b", "Show commits adding lines", "blame-addition")];
     if blob {
         actions.push(cmd("r", "Show commits removing lines", "blame-removal"));
         actions.push(cmd("f", "Show last commits that still have lines", "blame-reverse"));
+    } else if !blaming || read_only {
+        actions.push(cmd("m", "Blame echo", "blame-echo"));
     }
     if blaming {
         actions.push(cmd("q", "Quit blaming", "blame-quit"));
@@ -507,15 +510,17 @@ pub fn blame_menu(blob: bool, blaming: bool) -> Menu {
 
 /// magit-file-dispatch (C-c M-g): the commands for the visited file or
 /// blob (IN_FILE), else the file commands and navigation ("g" not in the
-/// STATUS buffer). "q" only while BLAMING.
-pub fn file_dispatch_menu(in_file: bool, blaming: bool, status: bool) -> Menu {
+/// STATUS buffer). The blame commands as in `blame_menu` ("q" only while
+/// BLAMING).
+pub fn file_dispatch_menu(in_file: bool, blob: bool, blaming: bool, read_only: bool, status: bool) -> Menu {
     let groups = if in_file {
-        let mut blame = vec![
-            cmd("B", "Blame...", "blame-menu"),
-            cmd("b", "Blame", "blame-addition"),
-            cmd("r", "...removal", "blame-removal"),
-            cmd("f", "...reverse", "blame-reverse"),
-        ];
+        let mut blame = vec![cmd("B", "Blame...", "blame-menu"), cmd("b", "Blame", "blame-addition")];
+        if blob {
+            blame.push(cmd("r", "...removal", "blame-removal"));
+            blame.push(cmd("f", "...reverse", "blame-reverse"));
+        } else if !blaming || read_only {
+            blame.push(cmd("m", "Blame echo", "blame-echo"));
+        }
         if blaming {
             blame.push(cmd("q", "Quit blame", "blame-quit"));
         }
@@ -1234,8 +1239,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
 
     // ------------------------------------------------ magit-blame (B in
     // file and blob buffers)
-    m.insert("blame-menu".into(), blame_menu(true, true));
-    m.insert("file-dispatch".into(), file_dispatch_menu(true, false, false));
+    m.insert("blame-menu".into(), blame_menu(true, true, true));
+    m.insert("file-dispatch".into(), file_dispatch_menu(true, true, false, true, false));
     m.insert("show-refs-menu".into(), show_refs_menu(true));
 
     // ------------------------------------------------ magit-submodule (o)

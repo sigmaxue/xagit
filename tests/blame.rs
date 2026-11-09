@@ -209,3 +209,76 @@ fn blame_transient() {
     app.press("s").unwrap();
     assert_eq!(app.message(), "s is undefined");
 }
+
+#[test]
+fn blame_echo() {
+    let (_td, g) = blame_repo();
+    let mut app = App::new(g.clone());
+    visit_file(&mut app);
+    // the lines style, the summary of the chunk at point echoed
+    press(&mut app, &["C-n", "B", "m"]);
+    assert_eq!(app.current_menu(), None);
+    let t = texts(&app);
+    assert_eq!(t, [SEPARATOR, "a", SEPARATOR, "B", SEPARATOR, "c", SEPARATOR, "d", SEPARATOR, "e"]);
+    assert_eq!(app.file_line(), Some(2));
+    assert_eq!(app.message(), "\"two\"");
+    // only when entering another chunk
+    app.press("C-g").unwrap();
+    press(&mut app, &["C-n", "C-n"]);
+    assert_eq!(app.file_line(), Some(3));
+    assert_eq!(app.message(), "\"one\"");
+    app.press("C-g").unwrap();
+    app.press("C-n").unwrap();
+    assert_eq!(app.point_text(), SEPARATOR);
+    assert_eq!(app.message(), "\"three\"", "the separator is the start of the chunk");
+    press(&mut app, &["C-g", "C-n"]);
+    assert_eq!(app.point_text(), "d");
+    assert_eq!(app.message(), "Quit", "the same chunk");
+    // without magit-blame-read-only-mode
+    app.press("c").unwrap();
+    assert_eq!(app.message(), "c is undefined");
+    // m only while not blaming or read-only; c cycles from the transient
+    app.press("B").unwrap();
+    let keys = app.menu_keys();
+    assert!(!keys.contains(&"m".to_string()) && keys.contains(&"q".to_string()), "{keys:?}");
+    app.press("c").unwrap();
+    assert_eq!(texts(&app).len(), 10, "headings");
+    app.press("C-g").unwrap();
+    press(&mut app, &["C-c", "M-g"]);
+    assert!(!app.menu_keys().contains(&"m".to_string()));
+    app.press("C-g").unwrap();
+    // C-c C-q: magit-blame-quit
+    press(&mut app, &["C-c", "C-q"]);
+    assert_eq!(texts(&app), ["a", "B", "c", "d", "e"]);
+    // while blaming read-only: turn that off, in the lines style
+    press(&mut app, &["b", "B", "m"]);
+    assert_eq!(texts(&app)[0], SEPARATOR);
+    app.press("c").unwrap();
+    assert_eq!(app.message(), "c is undefined");
+    press(&mut app, &["C-c", "C-q"]);
+    // not in blob buffers
+    app.press("p").unwrap();
+    assert!(app.header_line().starts_with("f.txt.~"));
+    app.press("B").unwrap();
+    assert!(!app.menu_keys().contains(&"m".to_string()));
+    app.press("C-g").unwrap();
+    press(&mut app, &["C-c", "M-g"]);
+    let keys = app.menu_keys();
+    assert!(!keys.contains(&"m".to_string()) && keys.contains(&"r".to_string()), "{keys:?}");
+}
+
+#[test]
+fn blame_from_file_dispatch() {
+    let (_td, g) = blame_repo();
+    write(&g, "f.txt", "a\nB\n  c\nd\n");
+    let mut app = App::new(g);
+    visit_file(&mut app);
+    // r and f only in blob buffers
+    press(&mut app, &["C-c", "M-g"]);
+    let keys = app.menu_keys();
+    assert!(!keys.contains(&"r".to_string()) && keys.contains(&"m".to_string()), "{keys:?}");
+    // magit-blame-arguments: the value of magit-blame (-w)
+    app.press("b").unwrap();
+    let t = texts(&app);
+    assert!(t[4].ends_with(" one"), "{t:#?}");
+}

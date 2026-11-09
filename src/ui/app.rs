@@ -1,7 +1,7 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::{key_from_label, Key};
-use super::blame::{blob_ancestor, blob_successor, build_file, Blame, BlameType, STYLES};
+use super::blame::{blob_ancestor, blob_successor, build_file, style_shows_message, Blame, BlameType, ECHO_STYLE, STYLES};
 use super::transient::{
     blame_menu, diff_refresh_menu, file_dispatch_menu, log_refresh_menu, prefix_value, registry, resolve_menu,
     show_refs_menu, Action,
@@ -74,6 +74,9 @@ pub struct App {
     prefix_arg: Option<PrefixArg>,
     /// C-u / M-- was typed and digits are read (universal-argument-map)
     reading_arg: bool,
+    /// magit-blame-previous-chunk: (buffer, commit, first line) of the
+    /// chunk point was in after the last command
+    blame_previous_chunk: Option<(String, String, usize)>,
     /// magit--right-margin-config of the buffer of each mode (permanent)
     margins: HashMap<&'static str, Margin>,
     /// magit-refs-show-commit-count of the refs buffer
@@ -454,6 +457,7 @@ impl App {
             cc_prefix: false,
             prefix_arg: None,
             reading_arg: false,
+            blame_previous_chunk: None,
             margins: HashMap::new(),
             refs_counts: CommitCount::Nothing,
             message: String::new(),
@@ -1289,6 +1293,7 @@ impl App {
             return Ok(());
         }
         let r = self.dispatch_key(key);
+        self.blame_post_command();
         // the prefix argument is for one command; prefix keys (C-c, the
         // first keys of a transient's key sequence) pass it on
         if !self.cc_prefix && self.pending.is_empty() {
@@ -1531,20 +1536,22 @@ impl App {
             self.menus.insert(name.clone(), log_refresh_menu(full));
         }
         // suffixes with :if conditions on the visited file or blob
-        let (in_file, blob, blaming) = match &self.mode {
-            BufferMode::File { rev, blame, .. } => (true, rev != "{worktree}", blame.is_some()),
-            _ => (false, false, false),
+        let (in_file, blob, blaming, read_only) = match &self.mode {
+            BufferMode::File { rev, blame, .. } => {
+                (true, rev != "{worktree}", blame.is_some(), blame.as_ref().is_none_or(|b| b.read_only))
+            }
+            _ => (false, false, false, true),
         };
         if name == "show-refs-menu" {
             let refs = matches!(self.mode, BufferMode::Refs { .. });
             self.menus.insert(name.clone(), show_refs_menu(refs));
         }
         if name == "blame-menu" {
-            self.menus.insert(name.clone(), blame_menu(blob, blaming));
+            self.menus.insert(name.clone(), blame_menu(blob, blaming, read_only));
         }
         if name == "file-dispatch" {
             let status = self.mode == BufferMode::Status;
-            self.menus.insert(name.clone(), file_dispatch_menu(in_file, blaming, status));
+            self.menus.insert(name.clone(), file_dispatch_menu(in_file, blob, blaming, read_only, status));
         }
         // `d` starts with the arguments of the diff buffer shown, else the
         // current value of magit-diff-mode; `D` with the buffer's arguments.
@@ -1916,6 +1923,14 @@ impl App {
                 if menu.name == "log-menu" {
                     self.transient_log_args = Some(self.args_from(&active));
                 }
+                // magit-blame-arguments: outside magit-blame the value of
+                // that transient
+                let blame_cmd = matches!(cmd.as_str(), "blame-addition" | "blame-removal" | "blame-reverse" | "blame-echo");
+                let active = if blame_cmd && menu.name != "blame-menu" {
+                    self.prefix_args("blame-menu").into_iter().map(|a| (a, true)).collect()
+                } else {
+                    active
+                };
                 let r = self.run_command(&cmd, &active);
                 self.transient_diff_args = None;
                 self.transient_log_args = None;
@@ -2041,6 +2056,7 @@ impl App {
             "blame-addition" => self.blame(BlameType::Addition, args)?,
             "blame-removal" => self.blame(BlameType::Removal, args)?,
             "blame-reverse" => self.blame(BlameType::Final, args)?,
+            "blame-echo" => self.blame_echo(args)?,
             "blame-quit" => self.blame_quit(),
             // magit-file-dispatch
             "file-stage" | "file-unstage" | "file-untrack" | "file-rename" | "file-delete" | "file-checkout"
@@ -4728,15 +4744,16 @@ impl App {
                     self.set_msg("Chunk has no further history");
                     return Ok(());
                 };
-                // magit-blame-visit-other-file, keeping the style
-                let blame = Blame { typ, style: b.style, recursive: true, args };
+                // magit-blame-visit-other-file, keeping the style; a blob
+                // buffer is read-only
+                let blame = Blame { typ, style: b.style, recursive: true, args, read_only: true };
                 self.setup_buffer(BufferMode::File { rev: prev_rev, file: prev_file, blame: Some(blame) }, Vec::new());
                 self.goto_file_line(chunk.orig_line);
             }
             b => {
                 let style = b.map_or(0, |b| b.style);
                 let recursive = matches!(&self.mode, BufferMode::File { blame: Some(b), .. } if b.recursive);
-                let blame = Blame { typ, style, recursive, args };
+                let blame = Blame { typ, style, recursive, args, read_only: true };
                 self.mode = BufferMode::File { rev, file, blame: Some(blame) };
                 self.refresh();
                 self.goto_file_line(line);
@@ -4744,8 +4761,39 @@ impl App {
         }
         if let Some(e) = self.buf.blame_error.clone() {
             self.set_msg(&e);
-        } else {
-            self.blame_show_message();
+        }
+        Ok(())
+    }
+
+    /// magit-blame-echo: blame the additions in the lines style
+    /// (magit-blame-echo-style), the summary of the chunk at point echoed,
+    /// without magit-blame-read-only-mode; while blaming already, turn
+    /// that mode off and use that style.
+    fn blame_echo(&mut self, args: Vec<String>) -> Result<()> {
+        let BufferMode::File { rev, file, blame } = self.mode.clone() else {
+            self.set_msg("Buffer isn't visiting a file");
+            return Ok(());
+        };
+        if rev != "{worktree}" {
+            self.set_msg("Blob buffers aren't supported");
+            return Ok(());
+        }
+        let (line, _) = self.file_line_at_point().unwrap_or((1, None));
+        let blame = match blame {
+            Some(b) => Blame { style: ECHO_STYLE, read_only: false, ..b },
+            None => {
+                if !self.git.git_ok(&["ls-files", "--error-unmatch", "--", &file]) {
+                    self.set_msg("Buffer isn't visiting a tracked file");
+                    return Ok(());
+                }
+                Blame { typ: BlameType::Addition, style: ECHO_STYLE, recursive: false, args, read_only: false }
+            }
+        };
+        self.mode = BufferMode::File { rev, file, blame: Some(blame) };
+        self.refresh();
+        self.goto_file_line(line);
+        if let Some(e) = self.buf.blame_error.clone() {
+            self.set_msg(&e);
         }
         Ok(())
     }
@@ -4757,6 +4805,7 @@ impl App {
             self.set_msg("Not blaming");
             return;
         };
+        self.blame_previous_chunk = None;
         if b.recursive {
             self.kill_buffer();
             return;
@@ -4779,11 +4828,19 @@ impl App {
         self.goto_file_line(line);
     }
 
-    /// magit-blame-maybe-show-message: the summary of the chunk at point
-    /// in the lines style.
-    fn blame_show_message(&mut self) {
-        let lines_style = matches!(&self.mode, BufferMode::File { blame: Some(b), .. } if STYLES[b.style] == "lines");
-        if let Some(c) = self.current_blame_chunk().filter(|_| lines_style) {
+    /// magit-blame-goto-chunk-hook (in post-command-hook while blaming):
+    /// when point entered another chunk, magit-blame-maybe-show-message
+    /// echoes its summary if the style has show-message.
+    fn blame_post_command(&mut self) {
+        let BufferMode::File { blame: Some(b), .. } = &self.mode else { return };
+        let style = b.style;
+        let Some(c) = self.current_blame_chunk() else { return };
+        let id = (self.buffer_name_of(&self.mode), c.orig_rev.clone(), c.final_line);
+        if self.blame_previous_chunk.as_ref() == Some(&id) {
+            return;
+        }
+        self.blame_previous_chunk = Some(id);
+        if style_shows_message(style) {
             let msg = c.info.get("summary").cloned().unwrap_or_default();
             self.set_msg(&format!("{msg:?}"));
         }
@@ -4816,7 +4873,6 @@ impl App {
         if let Some(i) = start {
             self.cursor = i;
         }
-        self.blame_show_message();
     }
 
     /// magit-blob-previous (OLDER) / magit-blob-next
@@ -5784,11 +5840,11 @@ impl App {
     }
 
     /// The keys of a file or blob buffer: magit-blame-read-only-mode-map
-    /// while blaming, else magit-blob-mode-map. Returns whether KEY is
-    /// bound there.
+    /// while blaming (but not after magit-blame-echo), else
+    /// magit-blob-mode-map. Returns whether KEY is bound there.
     fn file_key(&mut self, key: &Key) -> Result<bool> {
         let BufferMode::File { blame, .. } = &self.mode else { return Ok(false) };
-        let blaming = blame.is_some();
+        let blaming = blame.as_ref().is_some_and(|b| b.read_only);
         let typ = blame.as_ref().map(|b| b.typ);
         let label = key.label();
         match label.as_str() {
@@ -5829,11 +5885,7 @@ impl App {
                 self.goto_file_line(line);
             }
             "C-n" | "down" | "C-p" | "up" => {
-                let before = self.current_blame_chunk().map(|c| c.final_line);
                 self.forward_line(if matches!(label.as_str(), "C-n" | "down") { 1 } else { -1 });
-                if blaming && self.current_blame_chunk().map(|c| c.final_line) != before {
-                    self.blame_show_message();
-                }
             }
             _ => return Ok(false),
         }
