@@ -1,7 +1,9 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::Key;
-use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader, RepoState};
+use super::transient::{
+    diff_refresh_menu, prefix_value, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader, RepoState,
+};
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
@@ -73,6 +75,8 @@ pub struct App {
     pub log_args: Vec<String>,
     /// answers used instead of reading from the terminal (tests)
     scripted: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// the TUI owns the terminal (`run`): it is handed over to editors
+    in_terminal: bool,
 }
 
 /// The major mode of a buffer: magit-status-mode, magit-diff-mode,
@@ -324,6 +328,7 @@ impl App {
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            in_terminal: false,
         };
         app.refresh();
         // magit-status-initial-section '(1): the first section after the headers
@@ -771,6 +776,7 @@ impl App {
     // ------------------------------------------------------------ event loop
 
     pub fn run(&mut self) -> Result<()> {
+        self.in_terminal = true;
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), EnterAlternateScreen);
         self.draw();
@@ -922,7 +928,7 @@ impl App {
         }
         // `d` starts with the arguments of the diff buffer shown, else the
         // current value of magit-diff-mode; `D` with the buffer's arguments
-        let shortlog_default = ["--numbered".to_string(), "--summary".to_string()];
+        let default: Vec<String> = prefix_value(&name).iter().map(|s| s.to_string()).collect();
         let preset: &[String] = match (name.as_str(), &self.mode) {
             ("diff-menu", BufferMode::Diff(_)) => &self.buf_args,
             ("diff-menu", _) => &self.diff_args,
@@ -930,8 +936,7 @@ impl App {
             ("diff-refresh-menu", _) => &self.buf_args,
             ("log-menu" | "log-refresh-menu", m) if m.is_log() => &self.buf_args,
             ("log-menu" | "log-refresh-menu", _) => &self.log_args,
-            ("shortlog-menu", _) => &shortlog_default,
-            _ => &[],
+            _ => &default,
         };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
         self.pending.clear();
@@ -994,6 +999,9 @@ impl App {
     /// Give the terminal to a program that needs it (the user's editor for a
     /// rebase todo list or commit message), then take it back.
     fn with_terminal<T>(&mut self, f: impl FnOnce(&Git) -> T) -> T {
+        if !self.in_terminal {
+            return f(&self.git);
+        }
         let _ = execute!(stdout(), LeaveAlternateScreen);
         let _ = disable_raw_mode();
         let r = f(&self.git);
@@ -1229,41 +1237,47 @@ impl App {
             "diff-less-context" => self.set_diff_context(|n| Some(n.saturating_sub(1))),
             "diff-default-context" => self.set_diff_context(|_| None),
 
-            // -------- commit menu
+            // -------- commit menu: the message is written in the editor
+            // (magit-run-git-with-editor); the terminal is handed over
             "commit-create" => {
-                // -C reuses a message as is, -c edits it in the editor
-                if args.iter().any(|a| a.starts_with("--reedit-message=")) {
-                    self.with_terminal(|g| g.commit(None, &args))?;
-                } else {
-                    let msg = if args.iter().any(|a| a.starts_with("--reuse-message=")) {
-                        None
-                    } else {
-                        self.read_line_prompt("Commit message", None)?
-                    };
-                    g!().commit(msg.as_deref(), &args)?;
-                }
-                self.set_msg("committed");
-                self.refresh();
+                let Some(args) = self.commit_assert(&args, false, false)? else {
+                    return Ok(());
+                };
+                let res = self.with_terminal(|g| g.commit_with_editor(&args, Editor::User));
+                self.done("committed", res.map(|()| String::new()));
             }
+            // magit-commit-extend (magit-commit-extend-override-date)
             "commit-extend" => {
-                g!().commit_extend(&args)?;
-                self.set_msg("extended HEAD commit");
-                self.refresh();
+                let Some(args) = self.commit_assert(&args, false, false)? else {
+                    return Ok(());
+                };
+                if !self.amend_assert("HEAD")? {
+                    return Ok(());
+                }
+                let res = g!().commit_extend(&args);
+                self.done("extended HEAD commit", res.map(|()| String::new()));
             }
             "commit-amend" => {
-                let msg = self.read_line_prompt("Amend message (empty keeps)", Some(""))?;
-                let m = msg.filter(|s| !s.is_empty());
-                g!().commit_amend(m.as_deref(), &args)?;
-                self.set_msg("amended HEAD commit");
-                self.refresh();
-            }
-            "commit-reword" => {
-                let msg = self.read_line_prompt("New message", None)?;
-                if let Some(m) = msg {
-                    g!().commit_reword(&m)?;
-                    self.set_msg("reworded HEAD commit");
-                    self.refresh();
+                if !self.amend_assert("HEAD")? {
+                    return Ok(());
                 }
+                let mut a = vec!["--amend".to_string()];
+                a.extend(args.iter().cloned());
+                let res = self.with_terminal(|g| g.commit_with_editor(&a, Editor::User));
+                self.done("amended HEAD commit", res.map(|()| String::new()));
+            }
+            // magit-commit-reword: the message only, not the staged changes
+            "commit-reword" => {
+                if !self.amend_assert("HEAD")? {
+                    return Ok(());
+                }
+                let mut a = vec!["--amend".to_string(), "--only".to_string()];
+                a.extend(args.iter().cloned());
+                if !a.iter().any(|x| x == "--allow-empty") {
+                    a.push("--allow-empty".into());
+                }
+                let res = self.with_terminal(|g| g.commit_with_editor(&a, Editor::User));
+                self.done("reworded HEAD commit", res.map(|()| String::new()));
             }
             // magit-commit-squash-internal: with magit-commit-squash-confirm
             // the target is always selected from the log, starting at the
@@ -1716,18 +1730,26 @@ impl App {
             }
 
             // -------- revert / cherry-pick
+            // magit-revert-and-commit / magit-revert-no-commit: the selected
+            // commits, else one read (magit-read-branch-or-commit)
             "revert" | "revert-no-commit" => {
-                let Some(r) = self.pick_recent_commit("Revert commit")? else {
-                    return Ok(());
-                };
                 let no_commit = cmd == "revert-no-commit";
-                g!().revert(&[r.clone()], &args, no_commit)?;
-                self.set_msg(if no_commit {
-                    "reverted changes in the working tree"
-                } else {
-                    "reverted"
-                });
-                self.refresh();
+                let commits = match self.region_commits() {
+                    Some(c) => c,
+                    None => {
+                        let prompt = if no_commit { "Revert changes" } else { "Revert commit" };
+                        let default = self.commit_at_point().map(|c| self.git.rev_short(&c)).or(g!().current_branch());
+                        let Some(r) = self.read_line_prompt(prompt, default.as_deref())? else {
+                            return Ok(());
+                        };
+                        vec![r]
+                    }
+                };
+                let mut a = args.clone();
+                if no_commit {
+                    a.insert(0, "--no-commit".into());
+                }
+                self.cherry_pick_run(commits, a, true)?;
             }
             "sequencer-continue" | "sequencer-skip" | "sequencer-abort" => {
                 let action = cmd.trim_start_matches("sequencer-");
@@ -1741,20 +1763,36 @@ impl App {
             "apply" => self.apply_cmd(&args)?,
             // magit-reverse / magit-revert-no-commit
             "reverse" => self.reverse_cmd()?,
+            // magit-cherry-copy / magit-cherry-apply: the selected commits
+            // (oldest first), else one read (magit-read-other-branch-or-commit)
             "cherry-pick" | "cherry-apply" => {
-                let log = g!().log(None, 30)?;
-                let revs: Vec<String> = log
-                    .iter()
-                    .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
-                    .collect();
-                if let Some(r) = self.pick("Cherry (hash)", &revs, None)? {
-                    match cmd {
-                        "cherry-pick" => g!().cherry_pick(&[r.clone()], &args)?,
-                        _ => g!().cherry_apply(&[r.clone()], &args)?,
+                let commits = match self.region_commits() {
+                    Some(mut c) => {
+                        c.reverse();
+                        c
                     }
-                    self.set_msg("done");
-                    self.refresh();
-                }
+                    None => {
+                        let prompt = if cmd == "cherry-pick" { "Cherry-pick" } else { "Apply changes from commit" };
+                        let current = g!().current_branch();
+                        let default = self
+                            .commit_at_point()
+                            .map(|c| self.git.rev_short(&c))
+                            .filter(|c| Some(c) != current.as_ref())
+                            .or_else(|| self.previous_branch());
+                        let Some(r) = self.read_line_prompt(prompt, default.as_deref())? else {
+                            return Ok(());
+                        };
+                        vec![r]
+                    }
+                };
+                let a = if cmd == "cherry-apply" {
+                    let mut a = vec!["--no-commit".to_string()];
+                    a.extend(args.iter().filter(|x| *x != "--ff").cloned());
+                    a
+                } else {
+                    args.clone()
+                };
+                self.cherry_pick_run(commits, a, false)?;
             }
 
             // -------- stash
@@ -2281,6 +2319,64 @@ impl App {
             BufferMode::Stash { stash } => Some(stash.clone()),
             _ => None,
         }
+    }
+
+    /// magit-region-values 'commit: the commits of the selected sibling
+    /// commit sections (at least two), top to bottom.
+    fn region_commits(&self) -> Option<Vec<String>> {
+        let secs = self.region_sections(true)?;
+        secs.iter()
+            .map(|&s| match &self.buf.all[self.sec(s).start].kind {
+                LineKind::Commit { hash, .. } => Some(hash.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The previously checked out branch (`@{-1}`), if any.
+    fn previous_branch(&self) -> Option<String> {
+        self.git
+            .git_string(&["rev-parse", "--abbrev-ref", "@{-1}"])
+            .ok()
+            .filter(|s| !s.is_empty() && s != "HEAD")
+    }
+
+    /// magit--cherry-pick: revert or cherry-pick COMMITS (a single "A..B"
+    /// is split), handling --mainline for merge commits.
+    fn cherry_pick_run(&mut self, commits: Vec<String>, args: Vec<String>, revert: bool) -> Result<()> {
+        let command = if revert { "revert" } else { "cherry-pick" };
+        let commits: Vec<String> = match commits.as_slice() {
+            [one] if one.contains("..") => one.split("..").map(String::from).collect(),
+            _ => commits,
+        };
+        let merges = commits.iter().filter(|c| self.git.is_merge_commit(c)).count();
+        let args = if merges == 0 {
+            args.into_iter().filter(|a| !a.starts_with("--mainline=")).collect()
+        } else if merges != commits.len() {
+            self.set_msg(&format!("Cannot {command} merge and non-merge commits at once"));
+            return Ok(());
+        } else if args.iter().any(|a| a.starts_with("--mainline=")) {
+            args
+        } else {
+            let n = loop {
+                let Some(s) = self.read_line_prompt("Replay merges relative to parent", None)? else {
+                    return Ok(());
+                };
+                if let Ok(n) = s.trim().parse::<u32>() {
+                    break n;
+                }
+            };
+            let mut a = vec![format!("--mainline={n}")];
+            a.extend(args);
+            a
+        };
+        let res = self.with_terminal(|g| g.sequencer_run(command, &args, &commits));
+        match res {
+            Ok(()) => self.set_msg(command),
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        self.refresh();
+        Ok(())
     }
 
     /// magit-log-select: show the log of the current branch to pick a

@@ -288,6 +288,21 @@ pub fn resolve_menu(name: &str, st: RepoState) -> String {
 }
 
 /// Build the menu registry — every menu mirrors a transient-define-prefix in Magit.
+/// The `:value` of Magit's transient prefixes: the arguments enabled when
+/// the menu is opened.
+pub fn prefix_value(name: &str) -> &'static [&'static str] {
+    match name {
+        "commit-menu" => &["--verbose"],
+        "remote-menu" => &["-f"],
+        "shortlog-menu" => &["--numbered", "--summary"],
+        "cherry-pick-menu" => &["--ff"],
+        "revert-menu" => &["--edit"],
+        "patches-menu" => &["--3way"],
+        "rebase-menu" => &["--autostash"],
+        _ => &[],
+    }
+}
+
 pub fn registry() -> BTreeMap<String, Menu> {
     let mut m = BTreeMap::new();
 

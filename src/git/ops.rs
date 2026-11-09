@@ -600,6 +600,22 @@ impl Git {
         self.git_interactive(&strs)
     }
 
+    /// magit-merge-commit-p: whether COMMIT has more than one parent.
+    pub fn is_merge_commit(&self, commit: &str) -> bool {
+        self.git_string(&["rev-list", "-1", "--parents", commit])
+            .map(|s| s.split_whitespace().count() > 2)
+            .unwrap_or(false)
+    }
+
+    /// magit-run-git-sequencer: `git <revert|cherry-pick> <args> <commits>`
+    /// with the user's editor for the messages.
+    pub fn sequencer_run(&self, command: &str, args: &[String], commits: &[String]) -> Result<()> {
+        let mut full: Vec<&str> = vec![command];
+        full.extend(args.iter().map(String::as_str));
+        full.extend(commits.iter().map(String::as_str));
+        self.git_with_editors(Editor::User, Editor::User, &full)
+    }
+
     /// magit-cherry-copy ("A A"): `git cherry-pick <args> <commits>`
     pub fn cherry_pick(&self, commits: &[String], args: &[String]) -> Result<()> {
         let mut full: Vec<String> = vec!["cherry-pick".into()];

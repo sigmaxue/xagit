@@ -92,7 +92,7 @@ fn nothing_to_fixup() {
     app.press("f").unwrap();
     match app.mode() {
         BufferMode::LogSelect { action: SelectAction::CommitSquash { args, .. }, .. } => {
-            assert_eq!(args, &["--all".to_string()])
+            assert_eq!(args, &["--all".to_string(), "--verbose".to_string()])
         }
         m => panic!("{m:?}"),
     }

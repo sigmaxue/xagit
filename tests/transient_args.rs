@@ -36,7 +36,7 @@ fn commit_reuse_message() {
     app.press("c").unwrap();
     app.script_answers(&["HEAD"]);
     press_all(&mut app, &["-", "C"]);
-    assert_eq!(app.active_switches(), ["--reuse-message=HEAD"]);
+    assert_eq!(app.active_switches(), ["--reuse-message=HEAD", "--verbose"]);
     app.press("c").unwrap();
     assert_eq!(g.git_string(&["log", "--format=%s"]).unwrap().trim(), "initial\ninitial");
 }
@@ -79,7 +79,7 @@ fn revert_merge_relative_to_mainline() {
     assert_eq!(app.message(), "Please enter a positive integer");
     app.script_answers(&["1"]);
     press_all(&mut app, &["-", "m"]);
-    assert_eq!(app.active_switches(), ["--mainline=1"]);
+    assert_eq!(app.active_switches(), ["--edit", "--mainline=1"]);
     app.script_answers(&[merge.as_str()]);
     app.press("v").unwrap();
     assert!(!exists(&g, "g.txt"), "reverting the merge relative to master drops side's file");

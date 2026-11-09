@@ -8,6 +8,9 @@ pub fn scratch_repo() -> (TempDir, Git) {
     let td = TempDir::new().unwrap();
     git_init(td.path());
     let g = Git::discover(td.path()).expect("tempdir should be a repo");
+    // commands that run the user's editor (magit-run-git-with-editor)
+    // accept the message git prepared
+    g.git_interactive(&["config", "core.editor", "true"]).unwrap();
     (td, g)
 }
 
