@@ -56,6 +56,11 @@ pub fn key_from_label(label: &str) -> Key {
         "ESC" | "esc" | "C-[" => Key { code: "esc".into(), ctrl: false },
         "SPC" | " " => Key { code: " ".into(), ctrl: false },
         l if l.starts_with("C-") => Key { code: l[2..].to_lowercase(), ctrl: true },
+        // Emacs function-key notation: <up> <down> <left> <right> ...
+        l if l.len() > 2 && l.starts_with('<') && l.ends_with('>') => Key {
+            code: l[1..l.len() - 1].to_string(),
+            ctrl: false,
+        },
         l => Key { code: l.to_string(), ctrl: false },
     }
 }

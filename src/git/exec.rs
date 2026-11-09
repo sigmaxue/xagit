@@ -177,6 +177,11 @@ impl Git {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
 
+    /// Run git quietly and report only whether it exited successfully.
+    pub fn git_ok(&self, args: &[&str]) -> bool {
+        self.git_output(args).map(|o| o.status.success()).unwrap_or(false)
+    }
+
     /// Run git and split stdout on NUL (for -z listings); skips empty entries.
     /// Falls back to newline splitting when the output contains no NUL bytes.
     pub fn git_lines(&self, args: &[&str]) -> Vec<String> {
@@ -214,6 +219,54 @@ impl Git {
             .current_dir(&self.toplevel)
             .output()
             .map_err(|e| anyhow!("failed to spawn git: {e}"))
+    }
+
+    /// Like `git_string`, but run in `dir` instead of the toplevel
+    /// (magit-git-command vs magit-git-command-topdir).
+    pub fn git_string_in(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        let out = Command::new(env_git())
+            .args(GLOBAL_ARGS)
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        if !out.status.success() {
+            bail!(
+                "git {} failed: {}",
+                args.first().unwrap_or(&""),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
+    }
+
+    /// Run git with `input` on stdin (e.g. `git apply -`).
+    pub fn git_with_input(&self, args: &[&str], input: &[u8]) -> Result<String> {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = Command::new(env_git())
+            .args(GLOBAL_ARGS)
+            .args(args)
+            .current_dir(&self.toplevel)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        child
+            .stdin
+            .take()
+            .context("git stdin unavailable")?
+            .write_all(input)?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            bail!(
+                "git {} failed: {}",
+                args.first().unwrap_or(&""),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
 
     /// Run git, inherit stdio so editors/hooks can run (magit-call-git).

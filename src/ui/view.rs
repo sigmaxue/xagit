@@ -98,8 +98,15 @@ fn push_files(lines: &mut Vec<BufferLine>, title: &str, files: &[crate::git::sta
         kind: LineKind::SectionHeader { section: section.into(), n: files.len() },
     });
     for f in files {
+        let text = if f.is_unmerged() {
+            format!("  unmerged   {}{}", f.path, f.conflict_desc())
+        } else if let Some(orig) = &f.orig_path {
+            format!("  {orig} -> {}", f.path)
+        } else {
+            format!("  {}", f.path)
+        };
         lines.push(BufferLine {
-            text: format!("  {}", f.path),
+            text,
             kind: LineKind::File { section: section.into(), path: f.path.clone() },
         });
     }

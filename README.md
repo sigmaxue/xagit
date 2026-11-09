@@ -21,7 +21,7 @@ cargo build --release
 | `q` / `Esc` | bury-buffer | 退出文本视图 / 退出程序 |
 | `TAB` | toggle-section | 折叠/展开 section |
 | `RET` | visit-thing | 查看光标处内容（diff / stash / 文件） |
-| `j` / `k` / 方向键 | 移动 | 上下移动 |
+| `j` / `C-n` / `C-p` / 方向键 | 移动 | 上下移动（`k` 与 Magit 一致为 discard，不用于移动） |
 | `s` / `u` | stage / unstage | 暂存 / 取消暂存光标处文件 |
 | `S` / `U` | stage-modified / unstage-all | 全部暂存 / 全部取消暂存 |
 | `k` | discard | 丢弃光标处变更（带确认） |
@@ -78,14 +78,14 @@ src/
 
 行为一致性来源：每个操作的 git 参数与 Magit Elisp docstring 中记录的一致（如 `magit-unstage-1` 无初始提交时用 `git rm --cached`、否则 `git reset HEAD --`；`magit-reset-index` 用 `git reset <commit> -- .` 等）。
 
-## 测试验收（108 项全部通过）
+## 测试验收（117 项全部通过）
 
 ```bash
 cargo test
 ```
 
-- `tests/keymaps.rs`（23 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言及「无 `unsupported` 占位」全量校验
-- `tests/git_ops.rs`（85 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性与 11 项附加功能行为测试：
+- `tests/keymaps.rs`（24 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言、「无 `unsupported` 占位」全量校验及状态缓冲区直接按键断言
+- `tests/git_ops.rs`（93 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性、11 项附加功能行为测试与 8 项 Magit 差异回归测试（ahead/behind、重命名、冲突、upstream、reverse、gitignore 子目录、工作目录命令）：
   - stage/unstage/discard × 9（含无初始提交场景）
   - commit 系列 × 9（create/extend/amend/reword/fixup/squash/instant-fixup/instant-squash/-a）
   - branch × 8（checkout/create/delete/rename/spinoff/spinout）

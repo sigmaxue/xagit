@@ -27,10 +27,79 @@ pub struct App {
     quit: bool,
     /// pending text-mode buffer shown instead of status (diff/log/show output)
     view_text: Option<(String, String)>, // (title, content)
+    /// directory ngit was started in (magit-git-command's default-directory)
+    pub cwd: std::path::PathBuf,
+}
+
+/// What a key does in the status buffer when no transient is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// q / ESC: leave the text view, or quit (magit-mode-bury-buffer)
+    Bury,
+    Refresh,
+    Down,
+    Up,
+    Toggle,
+    Visit,
+    Menu(&'static str),
+    Command(&'static str),
+}
+
+/// Status buffer key map (magit-status-mode-map + magit-mode-map).
+/// `k` is magit-discard (Magit has no vi-style `k` = up); move with
+/// arrows, `j`, or C-n / C-p.
+pub fn status_binding(key: &Key) -> Option<Binding> {
+    use Binding::*;
+    if key.ctrl {
+        return match key.code.as_str() {
+            "n" => Some(Down),
+            "p" => Some(Up),
+            _ => None,
+        };
+    }
+    Some(match key.code.as_str() {
+        "q" | "esc" => Bury,
+        "h" | "?" => Menu("dispatch"),
+        "g" => Refresh,
+        "j" | "down" => Down,
+        "up" => Up,
+        "tab" => Toggle,
+        "enter" => Visit,
+        "$" | "!" => Menu("run-menu"),
+        "s" => Command("stage"),
+        "S" => Command("stage-all"),
+        "u" => Command("unstage"),
+        "U" => Command("unstage-all"),
+        "k" => Command("discard"),
+        "K" => Command("untrack"),
+        "x" => Command("reset-quickly"),
+        "V" => Command("revert"),
+        "y" => Command("show-refs"),
+        ":" | "Q" => Command("git-command"),
+        "I" => Command("init"),
+        "C" => Command("clone"),
+        "c" => Menu("commit-menu"),
+        "b" => Menu("branch-menu"),
+        "f" => Menu("fetch-menu"),
+        "F" => Menu("pull-menu"),
+        "P" => Menu("push-menu"),
+        "m" => Menu("merge-menu"),
+        "M" => Menu("remote-menu"),
+        "r" => Menu("rebase-menu"),
+        "t" => Menu("tag-menu"),
+        "z" => Menu("stash-menu"),
+        "X" => Menu("reset-menu"),
+        "i" => Menu("gitignore-menu"),
+        "l" => Menu("log-menu"),
+        "d" => Menu("diff-menu"),
+        "A" => Menu("cherry-pick-menu"),
+        _ => return None,
+    })
 }
 
 impl App {
     pub fn new(git: Git) -> App {
+        let cwd = git.toplevel.clone();
         let mut app = App {
             git,
             menus: registry(),
@@ -40,6 +109,7 @@ impl App {
             message: String::new(),
             quit: false,
             view_text: None,
+            cwd,
         };
         app.refresh();
         app
@@ -216,6 +286,18 @@ impl App {
         self.lines.get(self.cursor)
     }
 
+    /// Pick one of the last 30 commits; returns the abbreviated hash.
+    fn pick_recent_commit(&mut self, prompt: &str) -> Result<Option<String>> {
+        let revs: Vec<String> = self
+            .git
+            .log(None, 30)?
+            .iter()
+            .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        Ok(self.pick(prompt, &revs, None)?.cloned())
+    }
+
     fn current_file(&self) -> Option<(String, String)> {
         match self.current_line() {
             Some(BufferLine { kind: LineKind::File { section, path }, .. }) => {
@@ -275,86 +357,33 @@ impl App {
                 return self.handle_transient_key(key, menu, active);
             }
         }
-        // global keys (magit-mode-map)
-        match key.code.as_str() {
-            "q" | "esc" => {
+        // status buffer bindings (magit-status-mode-map)
+        let Some(binding) = status_binding(&key) else {
+            return Ok(());
+        };
+        match binding {
+            Binding::Bury => {
                 if self.view_text.is_some() {
                     self.view_text = None;
                     self.set_msg("");
-                    return Ok(());
+                } else {
+                    self.quit = true;
                 }
-                self.quit = true;
-                return Ok(());
             }
-            "h" | "?" => {
-                self.open_menu("dispatch");
-                return Ok(());
-            }
-            "g" => {
+            Binding::Refresh => {
                 self.refresh();
                 self.set_msg("refreshed");
-                return Ok(());
             }
-            "j" | "down" => {
+            Binding::Down => {
                 if self.cursor + 1 < self.lines.len() {
                     self.cursor += 1;
                 }
-                return Ok(());
             }
-            "k" | "up" => {
-                self.cursor = self.cursor.saturating_sub(1);
-                return Ok(());
-            }
-            "tab" => {
-                self.toggle_section();
-                return Ok(());
-            }
-            "enter" => {
-                self.visit_thing()?;
-                return Ok(());
-            }
-            "$" => {
-                self.open_menu("run-menu");
-                return Ok(());
-            }
-            _ => {}
-        }
-        // direct Magit single-key bindings (magit-mode-map)
-        let command = match key.code.as_str() {
-            "s" => "stage".to_string(),
-            "S" => "stage-all".to_string(),
-            "u" => "unstage".to_string(),
-            "U" => "unstage-all".to_string(),
-            "k" => "discard".to_string(),
-            "K" => "untrack".to_string(),
-            "x" => "reset-quickly".to_string(),
-            "c" => "commit-menu".to_string(),
-            "b" => "branch-menu".to_string(),
-            "f" => "fetch-menu".to_string(),
-            "F" => "pull-menu".to_string(),
-            "P" => "push-menu".to_string(),
-            "m" => "merge-menu".to_string(),
-            "M" => "remote-menu".to_string(),
-            "r" => "rebase-menu".to_string(),
-            "t" => "tag-menu".to_string(),
-            "z" => "stash-menu".to_string(),
-            "X" => "reset-menu".to_string(),
-            "i" => "gitignore-menu".to_string(),
-            "l" => "log-menu".to_string(),
-            "d" => "diff-menu".to_string(),
-            "A" => "cherry-pick-menu".to_string(),
-            "V" => "revert".to_string(),
-            "y" => "show-refs".to_string(),
-            ":" | "Q" => "git-command".to_string(),
-            "!" => "run-menu".to_string(),
-            "I" => "init".to_string(),
-            "C" => "clone".to_string(),
-            _ => return Ok(()),
-        };
-        if command.ends_with("-menu") || command == "dispatch" {
-            self.open_menu(&command);
-        } else {
-            self.run_command(&command, &BTreeMap::new())?;
+            Binding::Up => self.cursor = self.cursor.saturating_sub(1),
+            Binding::Toggle => self.toggle_section(),
+            Binding::Visit => self.visit_thing()?,
+            Binding::Menu(m) => self.open_menu(m),
+            Binding::Command(c) => self.run_command(c, &BTreeMap::new())?,
         }
         Ok(())
     }
@@ -664,73 +693,91 @@ impl App {
                 }
             }
 
-            // -------- fetch/pull/push
-            "fetch-upstream" | "fetch-other" | "fetch-branch" | "fetch-all" => {
-                let remotes = g!().remotes();
-                match cmd {
-                    "fetch-all" => {
-                        let prune = args.iter().any(|a| a == "--prune");
-                        g!().fetch_all(prune)?;
-                        self.set_msg("fetched all remotes");
-                    }
-                    "fetch-upstream" => {
-                        if let Some(r) = remotes.first() {
-                            g!().fetch(r, &args)?;
-                            self.set_msg(&format!("fetched {r}"));
-                        } else {
-                            self.set_msg("no remote configured");
-                        }
-                    }
-                    _ => {
-                        if let Some(r) = self.pick("Fetch from remote", &remotes, None)? {
-                            g!().fetch(r, &args)?;
-                            self.set_msg(&format!("fetched {r}"));
-                        }
-                    }
+            // -------- fetch/pull/push (upstream = branch.<b>.remote / branch.<b>.merge)
+            "fetch-upstream" => {
+                match g!().fetch_upstream(&args) {
+                    Ok(r) => self.set_msg(&format!("fetched {r}")),
+                    Err(e) => self.set_msg(&format!("{e}")),
                 }
                 self.refresh();
             }
-            "pull-upstream" | "pull-other" => {
-                let remotes = g!().remotes();
-                let branch = g!().current_branch().unwrap_or_else(|| "HEAD".into());
-                if cmd == "pull-upstream" {
-                    if let Some(r) = remotes.first() {
-                        g!().pull(r, &branch, &args)?;
-                        self.set_msg("pulled");
-                    } else {
-                        self.set_msg("no remote configured");
-                    }
-                } else if let Some(r) = self.pick("Pull from remote", &remotes, None)? {
-                    g!().pull(r, &branch, &args)?;
-                    self.set_msg("pulled");
-                }
+            "fetch-all" => {
+                let prune = args.iter().any(|a| a == "--prune");
+                g!().fetch_all(prune)?;
+                self.set_msg("fetched all remotes");
                 self.refresh();
             }
-            "push-upstream" | "push-other" | "push-other-branch" => {
+            "fetch-other" | "fetch-branch" => {
                 let remotes = g!().remotes();
-                let branch = match g!().current_branch() {
-                    Some(b) => b,
-                    None => {
-                        self.set_msg("cannot push: detached HEAD");
-                        return Ok(());
-                    }
+                let Some(r) = self.pick("Fetch from remote", &remotes, None)?.cloned() else {
+                    return Ok(());
                 };
-                match cmd {
-                    "push-upstream" => {
-                        if let Some(r) = remotes.first() {
-                            g!().push(r, &branch, &args)?;
-                            self.set_msg("pushed");
-                        } else {
-                            self.set_msg("no remote configured");
-                        }
-                    }
-                    _ => {
-                        if let Some(r) = self.pick("Push to remote", &remotes, None)? {
-                            g!().push(r, &branch, &args)?;
-                            self.set_msg("pushed");
-                        }
-                    }
+                if cmd == "fetch-other" {
+                    g!().fetch(&r, &args)?;
+                    self.set_msg(&format!("fetched {r}"));
+                } else {
+                    let Some(b) = self.read_line_prompt(&format!("Fetch branch from {r}"), None)? else {
+                        return Ok(());
+                    };
+                    g!().fetch_branch(&r, &b, &args)?;
+                    self.set_msg(&format!("fetched {r} {b}"));
                 }
+                self.refresh();
+            }
+            "pull-upstream" => {
+                match g!().pull_upstream(&args) {
+                    Ok(()) => self.set_msg("pulled"),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+                self.refresh();
+            }
+            "pull-other" => {
+                let mut choices = g!().remote_branches();
+                choices.extend(g!().branches());
+                let Some(src) = self.pick("Pull from", &choices, None)?.cloned() else {
+                    return Ok(());
+                };
+                let (remote, branch) = g!().tracked_of(&src);
+                g!().pull(&remote, &branch, &args)?;
+                self.set_msg(&format!("pulled {src}"));
+                self.refresh();
+            }
+            "push-upstream" => {
+                match g!().push_upstream(&args) {
+                    Ok(()) => self.set_msg("pushed"),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+                self.refresh();
+            }
+            "push-other" | "push-other-branch" => {
+                let src = if cmd == "push-other" {
+                    match g!().current_branch() {
+                        Some(b) => b,
+                        None => {
+                            self.set_msg("cannot push: detached HEAD");
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    let bs = g!().branches();
+                    let Some(b) = self.pick("Push branch", &bs, None)?.cloned() else {
+                        return Ok(());
+                    };
+                    b
+                };
+                let default = g!().remotes().first().map(|r| format!("{r}/{src}"));
+                let Some(target) =
+                    self.read_line_prompt(&format!("Push {src} to (remote/branch)"), default.as_deref())?
+                else {
+                    return Ok(());
+                };
+                let (remote, dst) = g!().tracked_of(&target);
+                if remote == "." {
+                    self.set_msg(&format!("not a remote branch: {target}"));
+                    return Ok(());
+                }
+                g!().push_refspec(&remote, &src, &dst, &args)?;
+                self.set_msg(&format!("pushed {src} to {target}"));
                 self.refresh();
             }
             "push-tag" => {
@@ -853,17 +900,75 @@ impl App {
             }
 
             // -------- revert / cherry-pick
-            "revert" | "reverse" | "apply" => {
-                let log = g!().log(None, 30)?;
-                let revs: Vec<String> = log
-                    .iter()
-                    .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
-                    .collect();
-                if let Some(r) = self.pick("Revision (hash)", &revs, None)? {
-                    let no_commit = cmd != "revert";
-                    g!().revert(&[r.clone()], &[], no_commit)?;
-                    self.set_msg("done");
-                    self.refresh();
+            "revert" => {
+                let Some(r) = self.pick_recent_commit("Revert commit")? else {
+                    return Ok(());
+                };
+                g!().revert(&[r], &[], false)?;
+                self.set_msg("reverted");
+                self.refresh();
+            }
+            // magit-apply: apply the thing at point to the working tree
+            "apply" => {
+                let line = self.current_line().map(|l| l.kind.clone());
+                match line {
+                    Some(LineKind::Stash { name, .. }) => {
+                        g!().stash_apply(&name, true)?;
+                        self.set_msg(&format!("applied {name}"));
+                        self.refresh();
+                    }
+                    Some(LineKind::File { section, .. })
+                    | Some(LineKind::SectionHeader { section, .. })
+                        if section == "staged" || section == "unstaged" =>
+                    {
+                        self.set_msg("Change is already in the working tree");
+                    }
+                    Some(LineKind::File { section, .. })
+                    | Some(LineKind::SectionHeader { section, .. })
+                        if section == "untracked" =>
+                    {
+                        self.set_msg("Cannot apply untracked files (use w w for patch files)");
+                    }
+                    _ => {
+                        // no commit sections in the status buffer: prompt like magit-cherry-apply
+                        let Some(r) = self.pick_recent_commit("Apply changes from commit")? else {
+                            return Ok(());
+                        };
+                        g!().cherry_apply(&[r.clone()], &args)?;
+                        self.set_msg(&format!("applied {r} to the working tree"));
+                        self.refresh();
+                    }
+                }
+            }
+            // magit-reverse: reverse the change at point in the working tree
+            "reverse" => {
+                let line = self.current_line().map(|l| l.kind.clone());
+                match line {
+                    Some(LineKind::File { section, path }) if section == "staged" => {
+                        g!().reverse_staged(&[path.clone()])?;
+                        self.set_msg(&format!("reversed {path} in the working tree"));
+                        self.refresh();
+                    }
+                    Some(LineKind::SectionHeader { section, .. }) if section == "staged" => {
+                        g!().reverse_staged(&[])?;
+                        self.set_msg("reversed staged changes in the working tree");
+                        self.refresh();
+                    }
+                    Some(LineKind::File { section, .. })
+                    | Some(LineKind::SectionHeader { section, .. })
+                        if section == "unstaged" || section == "untracked" =>
+                    {
+                        self.set_msg(&format!("Cannot reverse {section} changes"));
+                    }
+                    _ => {
+                        // magit-revert-no-commit for a commit
+                        let Some(r) = self.pick_recent_commit("Reverse changes from commit")? else {
+                            return Ok(());
+                        };
+                        g!().revert(&[r.clone()], &[], true)?;
+                        self.set_msg(&format!("reversed {r} in the working tree"));
+                        self.refresh();
+                    }
                 }
             }
             "cherry-pick" | "cherry-apply" => {
@@ -954,24 +1059,44 @@ impl App {
 
             // -------- ignore / misc
             "ignore" => {
-                let Some(pattern) = self.read_line_prompt("Pattern to ignore", None)? else {
+                let Some(pattern) = self.read_line_prompt("Pattern to ignore (top dir)", None)? else {
                     return Ok(());
                 };
                 g!().ignore(&pattern)?;
                 self.set_msg("added to .gitignore");
                 self.refresh();
             }
-            "git-command" => {
+            "ignore-subdir" => {
+                let default = self
+                    .current_file()
+                    .and_then(|(_, p)| std::path::Path::new(&p).parent().map(|d| d.display().to_string()))
+                    .filter(|d| !d.is_empty());
+                let Some(dir) = self.read_line_prompt("Subdirectory", default.as_deref())? else {
+                    return Ok(());
+                };
+                let Some(pattern) = self.read_line_prompt(&format!("Pattern to ignore in {dir}"), None)? else {
+                    return Ok(());
+                };
+                g!().ignore_in_subdir(&dir, &pattern)?;
+                self.set_msg(&format!("added to {}/.gitignore", dir.trim_end_matches('/')));
+                self.refresh();
+            }
+            "git-command" | "git-command-cwd" => {
                 let Some(line) = self.read_line_prompt("git command (args after 'git')", Some("status"))? else {
                     return Ok(());
                 };
                 let parts: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
                 let strs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-                let out = g!().git_string(&strs);
+                let out = if cmd == "git-command-cwd" {
+                    g!().git_string_in(&self.cwd, &strs)
+                } else {
+                    g!().git_string(&strs)
+                };
                 match out {
                     Ok(o) => self.view_text = Some((format!("git {}", line), o)),
                     Err(e) => self.set_msg(&format!("{e}")),
                 }
+                self.refresh();
             }
             "show-refs" => {
                 let mut out = String::new();
@@ -1642,5 +1767,8 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
     let abs = dir.canonicalize().unwrap_or(dir);
     let git = Git::discover(&abs)?;
     let mut app = App::new(git);
+    if abs.is_dir() {
+        app.cwd = abs;
+    }
     app.run()
 }

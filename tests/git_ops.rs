@@ -61,12 +61,46 @@ fn status_sections_match_git() {
 
 #[test]
 fn status_branch_and_ahead_behind() {
-    let (td, g, _head) = repo_with_commit();
+    let (_td, g, _td2, g2) = remote_sandbox();
+    let cur = g.current_branch().unwrap();
     let st = Status::load(&g);
-    assert!(st.branch.is_some());
-    assert!(st.is_clean());
-    // ahead/behind require upstream; skip when none configured
-    let _ = td;
+    assert_eq!(st.branch.as_deref(), Some(cur.as_str()));
+    assert_eq!(st.upstream.as_deref(), Some(format!("origin/{cur}").as_str()));
+    assert_eq!((st.ahead, st.behind), (0, 0));
+
+    // one local commit -> "[ahead 1]"
+    write(&g, "local.txt", "l");
+    g.stage("local.txt").unwrap();
+    g.commit(Some("local"), &[]).unwrap();
+    let st = Status::load(&g);
+    assert_eq!((st.ahead, st.behind), (1, 0));
+
+    // one remote commit -> "[ahead 1, behind 1]"
+    write(&g2, "remote.txt", "r");
+    g2.stage("remote.txt").unwrap();
+    g2.commit(Some("remote"), &[]).unwrap();
+    g2.git_interactive(&["push", "-q", "origin", "HEAD"]).unwrap();
+    g.git_interactive(&["fetch", "-q", "origin"]).unwrap();
+    let st = Status::load(&g);
+    assert_eq!((st.ahead, st.behind), (1, 1));
+}
+
+#[test]
+fn branch_header_parsing() {
+    use ngit_lib::git::status::parse_branch_header as p;
+    let h = p("main...origin/main [ahead 12, behind 3]");
+    assert_eq!(h.branch.as_deref(), Some("main"));
+    assert_eq!(h.upstream.as_deref(), Some("origin/main"));
+    assert_eq!((h.ahead, h.behind, h.gone), (12, 3, false));
+    let h = p("main...origin/main [behind 2]");
+    assert_eq!((h.ahead, h.behind), (0, 2));
+    let h = p("feat...origin/feat [gone]");
+    assert!(h.gone);
+    let h = p("main");
+    assert_eq!((h.branch.as_deref(), h.upstream.as_deref()), (Some("main"), None));
+    let h = p("No commits yet on main");
+    assert_eq!(h.branch.as_deref(), Some("main"));
+    assert!(p("HEAD (no branch)").detached);
 }
 
 #[test]
@@ -78,8 +112,71 @@ fn status_parses_porcelain_renamed() {
     g.git_interactive(&["commit", "-m", "c2"]).unwrap();
     g.git_interactive(&["mv", "file.txt", "renamed.txt"]).unwrap();
     let st = Status::load(&g);
-    assert!(st.staged.iter().any(|f| f.path.contains("renamed.txt")));
-    assert!(st.staged.iter().any(|f| f.path.contains("file.txt")));
+    let f = st.staged.iter().find(|f| f.x == 'R').expect("rename entry");
+    // path is the real current path, the source is kept separately
+    assert_eq!(f.path, "renamed.txt");
+    assert_eq!(f.orig_path.as_deref(), Some("file.txt"));
+    assert!(!st.staged.iter().any(|f| f.path.contains("->")));
+}
+
+#[test]
+fn unstage_and_discard_staged_rename() {
+    let (_td, g, _head) = repo_with_commit();
+    g.git_interactive(&["mv", "file.txt", "renamed.txt"]).unwrap();
+    assert_eq!(g.staged_rename_source("renamed.txt").as_deref(), Some("file.txt"));
+
+    g.unstage("renamed.txt").unwrap();
+    let st = Status::load(&g);
+    assert!(st.staged.is_empty(), "both sides of the rename unstaged");
+    assert!(st.unstaged.iter().any(|f| f.path == "file.txt" && f.y == 'D'));
+    assert!(st.untracked.iter().any(|f| f.path == "renamed.txt"));
+
+    g.git_interactive(&["add", "-A"]).unwrap();
+    g.discard_staged("renamed.txt").unwrap();
+    assert_eq!(read(&g, "file.txt"), "hello\n");
+    assert!(!exists(&g, "renamed.txt"));
+    let st = Status::load(&g);
+    assert!(st.staged.is_empty());
+    assert!(st.unstaged.is_empty());
+    assert!(st.untracked.is_empty());
+
+    // rename into a subdirectory whose source dir no longer exists
+    std::fs::create_dir(g.toplevel.join("d")).unwrap();
+    write(&g, "d/a.txt", "a");
+    g.stage("d/a.txt").unwrap();
+    g.commit(Some("d"), &[]).unwrap();
+    g.git_interactive(&["mv", "d/a.txt", "b.txt"]).unwrap();
+    // git mv keeps the emptied directory; remove it to exercise parent creation
+    let _ = std::fs::remove_dir(g.toplevel.join("d"));
+    assert!(!g.toplevel.join("d").exists());
+    g.discard_staged("b.txt").unwrap();
+    assert_eq!(read(&g, "d/a.txt"), "a");
+    assert!(Status::load(&g).is_clean());
+}
+
+#[test]
+fn status_lists_conflicts_once_as_unmerged() {
+    let (_td, g, _head) = repo_with_commit();
+    let main = g.current_branch().unwrap();
+    g.git_interactive(&["checkout", "-q", "-b", "side"]).unwrap();
+    write(&g, "file.txt", "side\n");
+    g.stage("file.txt").unwrap();
+    g.commit(Some("side"), &[]).unwrap();
+    g.git_interactive(&["checkout", "-q", &main]).unwrap();
+    write(&g, "file.txt", "main\n");
+    g.stage("file.txt").unwrap();
+    g.commit(Some("main"), &[]).unwrap();
+    assert!(g.git_interactive(&["merge", "side"]).is_err());
+
+    let st = Status::load(&g);
+    assert!(st.staged.iter().all(|f| f.path != "file.txt"), "not in staged");
+    let u: Vec<_> = st.unstaged.iter().filter(|f| f.path == "file.txt").collect();
+    assert_eq!(u.len(), 1);
+    assert!(u[0].is_unmerged());
+    assert_eq!(u[0].conflict_desc(), "");
+
+    let lines = ngit_lib::ui::view::render_status(&g, &st);
+    assert!(lines.iter().any(|l| l.text.contains("unmerged   file.txt")));
 }
 
 // =============================================================== stage/unstage
@@ -171,6 +268,13 @@ fn discard_staged_resets_and_restores() {
     g.discard_staged("file.txt").unwrap();
     assert_eq!(read(&g, "file.txt"), "hello\n");
     assert!(g.staged_files().is_empty());
+
+    // a newly added file is unstaged and kept (not in HEAD, nothing to restore)
+    write(&g, "new.txt", "n");
+    g.stage("new.txt").unwrap();
+    g.discard_staged("new.txt").unwrap();
+    assert!(g.staged_files().is_empty());
+    assert!(exists(&g, "new.txt"));
 }
 
 // =============================================================== commit
@@ -1168,4 +1272,90 @@ fn subtree_add_prefixes_and_split() {
         .subtree_split("vendor/src", "split-branch")
         .unwrap()
         .is_empty());
+}
+
+// =============================================================== regression: magit diff audit
+
+/// Upstream comes from branch.<b>.remote/merge, not from the first remote.
+#[test]
+fn push_and_pull_use_configured_upstream() {
+    let (td, g, _td2, g2) = remote_sandbox();
+    let cur = g.current_branch().unwrap();
+    assert_eq!(g.upstream_of(&cur), Some(("origin".into(), cur.clone())));
+
+    // a decoy remote sorted before "origin" must not be used
+    g.remote_add("aaa", td.path().join("srv.git").to_str().unwrap(), false)
+        .unwrap();
+    // track a differently named remote branch
+    g.git_interactive(&["push", "-q", "origin", "HEAD:refs/heads/up-other"])
+        .unwrap();
+    g.git_interactive(&["fetch", "-q", "origin"]).unwrap();
+    g.git_interactive(&["branch", "--set-upstream-to=origin/up-other"])
+        .unwrap();
+    assert_eq!(g.upstream_of(&cur), Some(("origin".into(), "up-other".into())));
+
+    write(&g, "up.txt", "u");
+    g.stage("up.txt").unwrap();
+    g.commit(Some("to upstream"), &[]).unwrap();
+    g.push_upstream(&[]).unwrap();
+    let head = g.rev_parse("HEAD").unwrap();
+    let bare = Git::discover(&g2.toplevel).unwrap();
+    bare.git_interactive(&["fetch", "-q", "origin"]).unwrap();
+    assert_eq!(bare.rev_parse("origin/up-other").unwrap(), head);
+    assert_ne!(bare.rev_parse(&format!("origin/{cur}")).unwrap(), head);
+
+    // pull-upstream merges origin/up-other, not origin/<cur>
+    write(&g2, "remote-only.txt", "r");
+    g2.stage("remote-only.txt").unwrap();
+    g2.commit(Some("on main only"), &[]).unwrap();
+    g2.git_interactive(&["push", "-q", "origin", "HEAD"]).unwrap();
+    g.pull_upstream(&[]).unwrap();
+    assert!(!exists(&g, "remote-only.txt"));
+
+    assert_eq!(g.tracked_of("origin/up-other"), ("origin".into(), "up-other".into()));
+    assert_eq!(g.tracked_of(&cur), (".".into(), cur.clone()));
+}
+
+#[test]
+fn upstream_commands_fail_without_upstream() {
+    let (_td, g, _head) = repo_with_commit();
+    assert!(g.upstream_of(&g.current_branch().unwrap()).is_none());
+    assert!(g.push_upstream(&[]).is_err());
+    assert!(g.pull_upstream(&[]).is_err());
+    assert!(g.fetch_upstream(&[]).is_err());
+}
+
+/// magit-reverse on staged changes touches the working tree only.
+#[test]
+fn reverse_staged_changes_in_worktree_only() {
+    let (_td, g, _head) = repo_with_commit();
+    write(&g, "file.txt", "hello\nstaged\n");
+    g.stage("file.txt").unwrap();
+    g.reverse_staged(&["file.txt".to_string()]).unwrap();
+    assert_eq!(read(&g, "file.txt"), "hello\n");
+    let st = Status::load(&g);
+    assert!(st.staged.iter().any(|f| f.path == "file.txt"), "index untouched");
+    assert!(st.unstaged.iter().any(|f| f.path == "file.txt"));
+    assert!(g.reverse_staged(&["nothing.txt".to_string()]).is_err());
+}
+
+#[test]
+fn gitignore_in_subdirectory() {
+    let (_td, g, _head) = repo_with_commit();
+    std::fs::create_dir(g.toplevel.join("sub")).unwrap();
+    g.ignore_in_subdir("sub", "*.log").unwrap();
+    assert_eq!(read(&g, "sub/.gitignore"), "*.log\n");
+    assert!(!exists(&g, ".gitignore"));
+    g.ignore("*.tmp").unwrap();
+    assert_eq!(read(&g, ".gitignore"), "*.tmp\n");
+    assert!(g.ignore_in_subdir("missing", "x").is_err());
+}
+
+#[test]
+fn git_command_in_working_directory() {
+    let (_td, g, _head) = repo_with_commit();
+    let sub = g.toplevel.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    assert_eq!(g.git_string_in(&sub, &["rev-parse", "--show-prefix"]).unwrap(), "sub/");
+    assert_eq!(g.git_string(&["rev-parse", "--show-prefix"]).unwrap(), "");
 }

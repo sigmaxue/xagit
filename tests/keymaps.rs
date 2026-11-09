@@ -273,7 +273,7 @@ fn stash_popup_layout() {
 fn gitignore_popup_layout() {
     let m = menu("gitignore-menu");
     assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "ignore"));
-    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "ignore"));
+    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "ignore-subdir"));
 }
 
 /// magit-diff.el magit-diff prefix
@@ -301,7 +301,7 @@ fn log_popup_layout() {
 fn run_popup_layout() {
     let m = menu("run-menu");
     assert!(matches!(action_of(&m, "!"), Action::Command(c) if c == "git-command"));
-    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "git-command"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "git-command-cwd"));
 }
 
 /// magit-sequence.el:140 magit-cherry-pick prefix
@@ -417,4 +417,29 @@ fn remaining_extras_popup_layout() {
     assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-apply"));
     let c = menu("branch-config-menu");
     assert!(matches!(action_of(&c, "u"), Action::Command(c) if c == "branch-config-upstream"));
+}
+
+/// magit-status-mode-map: `k` is magit-discard, not vi-style "up".
+#[test]
+fn status_buffer_direct_keys() {
+    use ngit_lib::ui::app::{status_binding, Binding};
+    use ngit_lib::ui::keys::key_from_label;
+    let b = |l: &str| status_binding(&key_from_label(l));
+    assert_eq!(b("k"), Some(Binding::Command("discard")));
+    assert_eq!(b("K"), Some(Binding::Command("untrack")));
+    assert_eq!(b("s"), Some(Binding::Command("stage")));
+    assert_eq!(b("u"), Some(Binding::Command("unstage")));
+    assert_eq!(b("<up>"), Some(Binding::Up));
+    assert_eq!(b("C-p"), Some(Binding::Up));
+    assert_eq!(b("C-n"), Some(Binding::Down));
+    assert_eq!(b("j"), Some(Binding::Down));
+    assert_eq!(b("<tab>"), Some(Binding::Toggle));
+    assert_eq!(b("RET"), Some(Binding::Visit));
+    assert_eq!(b("q"), Some(Binding::Bury));
+    assert_eq!(b("c"), Some(Binding::Menu("commit-menu")));
+    assert_eq!(b("C-k"), None);
+    // no direct key may be shadowed: every target must be a menu or a command
+    for l in ["s", "S", "u", "U", "k", "K", "x", "V", "y", "c", "b", "f", "F", "P", "z", "i", "l", "d", "A"] {
+        assert!(b(l).is_some(), "{l} unbound");
+    }
 }

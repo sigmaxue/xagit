@@ -17,6 +17,89 @@ pub struct FileEntry {
     /// 'M' modified, 'A' added, 'D' deleted, 'R' renamed, 'C' copied, '?' untracked, '!' ignored
     pub x: char,
     pub y: char,
+    /// source path of a rename/copy (`path` is always the current path)
+    pub orig_path: Option<String>,
+}
+
+impl FileEntry {
+    /// Unmerged (conflicted) entry: DD AU UD UA DU AA UU.
+    pub fn is_unmerged(&self) -> bool {
+        is_unmerged(self.x, self.y)
+    }
+
+    /// Suffix Magit shows after "unmerged   <file>".
+    pub fn conflict_desc(&self) -> &'static str {
+        match (self.x, self.y) {
+            ('D', 'D') => " (both deleted)",
+            ('D', 'U') => " (deleted by us)",
+            ('U', 'D') => " (deleted by them)",
+            ('A', 'A') => " (both added)",
+            ('A', 'U') => " (added by us)",
+            ('U', 'A') => " (added by them)",
+            _ => "",
+        }
+    }
+}
+
+fn is_unmerged(x: char, y: char) -> bool {
+    matches!(
+        (x, y),
+        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
+    )
+}
+
+/// Parsed `## ...` header of `git status --porcelain=v1 --branch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchHeader {
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub gone: bool,
+}
+
+/// Parse the text after "## ", e.g. `main...origin/main [ahead 1, behind 2]`,
+/// `No commits yet on main`, `HEAD (no branch)`.
+pub fn parse_branch_header(rest: &str) -> BranchHeader {
+    let mut h = BranchHeader::default();
+    let rest = rest.trim();
+    if let Some(b) = rest
+        .strip_prefix("No commits yet on ")
+        .or_else(|| rest.strip_prefix("Initial commit on "))
+    {
+        h.branch = Some(b.trim().to_string());
+        return h;
+    }
+    if rest.starts_with("HEAD (no branch)") || rest.starts_with("No branch") {
+        h.detached = true;
+        return h;
+    }
+    let (refs, track) = match rest.find(" [") {
+        Some(i) => (&rest[..i], Some(&rest[i + 2..])),
+        None => (rest, None),
+    };
+    let mut it = refs.splitn(2, "...");
+    let local = it.next().unwrap_or("").trim();
+    if !local.is_empty() {
+        h.branch = Some(local.to_string());
+    }
+    if let Some(up) = it.next().map(str::trim).filter(|u| !u.is_empty()) {
+        h.upstream = Some(up.to_string());
+    }
+    if let Some(t) = track {
+        for part in t.trim_end_matches(']').split(',') {
+            let part = part.trim();
+            if let Some(n) = part.strip_prefix("ahead ") {
+                h.ahead = n.trim().parse().unwrap_or(0);
+            } else if let Some(n) = part.strip_prefix("behind ") {
+                h.behind = n.trim().parse().unwrap_or(0);
+            } else if part == "gone" {
+                h.gone = true;
+            }
+        }
+    }
+    h
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,57 +126,21 @@ impl Status {
             .git_string(&["status", "--porcelain=v1", "-z", "--branch"])
             .unwrap_or_default();
         let mut parts = header.split('\0');
-        if let Some(first) = parts.next() {
-            for line in first.lines() {
-                if let Some(rest) = line.strip_prefix("## ") {
-                    let mut it = rest.split("...");
-                    let local = it.next().unwrap_or("").trim().to_string();
-                    if local == "No commits yet" || local.starts_with("No branch") {
-                        // detached or unborn
-                        if local.starts_with("No branch") {
-                            st.detached_at = Some(g.rev_short("HEAD"));
-                        }
-                    } else {
-                        st.branch = Some(local.clone());
-                        if let Some(remote) = it.next() {
-                            let remote = remote
-                                .split_whitespace()
-                                .next()
-                                .unwrap_or("")
-                                .trim()
-                                .to_string();
-                            if !remote.is_empty() {
-                                st.upstream = Some(remote);
-                            }
-                        }
-                        // ahead/behind
-                        for tag in rest.split_whitespace() {
-                            if let Some(n) = tag.strip_prefix("[ahead ") {
-                                st.ahead = n.trim_end_matches(']').parse().unwrap_or(0);
-                            }
-                            if let Some(n) = tag.strip_prefix("[behind ") {
-                                st.behind = n.trim_end_matches(']').parse().unwrap_or(0);
-                            }
-                            if tag.starts_with("ahead") {
-                                if let Some(n) = tag.split_whitespace().nth(1) {
-                                    st.ahead = n.parse().unwrap_or(0);
-                                }
-                            }
-                            if tag.starts_with("behind") {
-                                if let Some(n) = tag.split_whitespace().nth(1) {
-                                    st.behind = n.parse().unwrap_or(0);
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Some(rest) = parts.next().and_then(|first| first.strip_prefix("## ")) {
+            let h = parse_branch_header(rest);
+            if h.detached {
+                st.detached_at = Some(g.rev_short("HEAD"));
             }
+            st.branch = h.branch;
+            st.upstream = h.upstream;
+            st.ahead = h.ahead;
+            st.behind = h.behind;
         }
 
         let porcelain = g
             .git_string(&["status", "--porcelain=v1", "-z"])
             .unwrap_or_default();
-        let mut chunks = porcelain.split('\0').peekable();
+        let mut chunks = porcelain.split('\0');
         while let Some(chunk) = chunks.next() {
             if chunk.len() < 3 {
                 continue;
@@ -102,41 +149,30 @@ impl Status {
             let x = bytes[0] as char;
             let y = bytes[1] as char;
             let path = chunk[3..].to_string();
-            let mut path = path;
-            // renames/copies come as "new\0old" when using -z? actually -z: "XY new\0old\0"
-            if x == 'R' || x == 'C' {
-                if let Some(old) = chunks.peek() {
-                    // consume the old-path part
-                    let oldp = old.to_string();
-                    chunks.next();
-                    path = format!("{oldp} -> {path}");
-                }
-            }
-            let entry = FileEntry {
+            // -z format: "XY <path>\0<orig>\0" when X or Y is R/C
+            let orig_path = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+                chunks.next().map(str::to_string)
+            } else {
+                None
+            };
+            let entry = |code: char| FileEntry {
                 path: path.clone(),
-                code: y,
+                code,
                 x,
                 y,
+                orig_path: orig_path.clone(),
             };
-            match (x, y) {
-                ('?', _) => st.untracked.push(entry),
-                (_, 'M') | (_, 'A') | (_, 'D') | (_, 'R') | (_, 'C') | (_, 'T') => {
-                    // y != ' ' means staged? NO: x = index, y = worktree
-                    // staged when x != ' ' && x != '?'
-                    if x != ' ' && x != '?' && x != '!' {
-                        st.staged.push(FileEntry { path: path.clone(), code: x, x, y });
-                    }
-                    if y != ' ' {
-                        st.unstaged.push(FileEntry { path: path.clone(), code: y, x, y });
-                    }
+            if x == '?' {
+                st.untracked.push(entry('?'));
+            } else if is_unmerged(x, y) {
+                // Magit lists conflicts once, in the unstaged section ("unmerged   file")
+                st.unstaged.push(entry('U'));
+            } else {
+                if x != ' ' && x != '!' {
+                    st.staged.push(entry(x));
                 }
-                _ => {
-                    if x != ' ' && x != '?' && x != '!' {
-                        st.staged.push(FileEntry { path: path.clone(), code: x, x, y });
-                    }
-                    if y != ' ' && y != '?' && y != '!' {
-                        st.unstaged.push(FileEntry { path: path.clone(), code: y, x, y });
-                    }
+                if y != ' ' && y != '!' {
+                    st.unstaged.push(entry(y));
                 }
             }
         }

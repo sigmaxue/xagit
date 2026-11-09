@@ -444,7 +444,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Instruct Git to ignore a file or pattern".into(),
             groups: vec![vec![
                 cmd("t", "in top dir", "ignore"),
-                cmd("s", "in subdirectory", "ignore"),
+                cmd("s", "in subdirectory", "ignore-subdir"),
             ]],
         },
     );
@@ -488,7 +488,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Run git or another command".into(),
             groups: vec![vec![
                 cmd("!", "in repository root", "git-command"),
-                cmd("p", "in working directory", "git-command"),
+                cmd("p", "in working directory", "git-command-cwd"),
             ]],
         },
     );

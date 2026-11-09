@@ -6,7 +6,6 @@
 use super::exec::Git;
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
 
 impl Git {
     // ---------------------------------------------------------------- staging
@@ -29,13 +28,35 @@ impl Git {
     }
 
     /// magit-unstage-1: before first commit `git rm --cached -- <file>`,
-    /// otherwise `git reset HEAD -- <file>`.
+    /// otherwise `git reset HEAD -- <file>`. A staged rename is unstaged as a
+    /// pair (source and destination), like Magit does for the rename section.
     pub fn unstage(&self, file: &str) -> Result<()> {
         if self.no_commit() {
-            self.git_interactive(&["rm", "--cached", "--", file])
-        } else {
-            self.git_interactive(&["reset", "HEAD", "--", file])
+            return self.git_interactive(&["rm", "--cached", "--", file]);
         }
+        match self.staged_rename_source(file) {
+            Some(src) => self.git_interactive(&["reset", "HEAD", "--", &src, file]),
+            None => self.git_interactive(&["reset", "HEAD", "--", file]),
+        }
+    }
+
+    /// Source path when `file` is the destination of a staged rename.
+    pub fn staged_rename_source(&self, file: &str) -> Option<String> {
+        let out = self
+            .git_string(&["diff", "--cached", "--name-status", "-M", "-z"])
+            .ok()?;
+        let mut it = out.split('\0');
+        while let Some(status) = it.next() {
+            if status.starts_with('R') || status.starts_with('C') {
+                let (src, dst) = (it.next()?, it.next()?);
+                if dst == file && status.starts_with('R') {
+                    return Some(src.to_string());
+                }
+            } else {
+                it.next();
+            }
+        }
+        None
     }
 
     /// magit-unstage-all ("U"): before first commit `git rm --cached -r .`,
@@ -64,13 +85,41 @@ impl Git {
         self.git_interactive(&["checkout", "--", file])
     }
 
-    /// magit-discard for staged change: reset then checkout.
+    /// magit-discard for staged change: reset then checkout. A staged rename
+    /// is undone like magit-discard-files--rename: `git mv <dst> <src>` when
+    /// the destination still exists, otherwise `rm --cached` + `reset`.
     pub fn discard_staged(&self, file: &str) -> Result<()> {
-        self.unstage(file)?;
-        if Path::new(file).exists() || true {
-            // file may be deleted in HEAD; ignore checkout failure
-            let _ = self.git_interactive(&["checkout", "HEAD", "--", file]);
+        if let Some(src) = self.staged_rename_source(file) {
+            if self.toplevel.join(file).exists() {
+                if let Some(parent) = self.toplevel.join(&src).parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                return self.git_interactive(&["mv", file, &src]);
+            }
+            self.git_interactive(&["rm", "--cached", "-q", "--", file])?;
+            return self.git_interactive(&["reset", "-q", "--", &src]);
         }
+        self.unstage(file)?;
+        // file may not exist in HEAD (newly added); then it just stays untracked
+        if self.git_ok(&["cat-file", "-e", &format!("HEAD:{file}")]) {
+            self.git_interactive(&["checkout", "HEAD", "--", file])?;
+        }
+        Ok(())
+    }
+
+    /// magit-reverse on staged changes: apply the staged diff in reverse to
+    /// the working tree only (`git apply --reverse --reject`), index untouched.
+    pub fn reverse_staged(&self, files: &[String]) -> Result<()> {
+        let mut a: Vec<&str> = vec!["diff", "--cached", "--no-color", "--binary", "--"];
+        a.extend(files.iter().map(|s| s.as_str()));
+        let patch = self.git_output(&a)?;
+        if !patch.status.success() {
+            bail!("git diff failed: {}", String::from_utf8_lossy(&patch.stderr).trim());
+        }
+        if patch.stdout.is_empty() {
+            bail!("nothing staged to reverse");
+        }
+        self.git_with_input(&["apply", "--reverse", "--reject", "-"], &patch.stdout)?;
         Ok(())
     }
 
@@ -299,6 +348,96 @@ impl Git {
 
     pub fn push_tag(&self, remote: &str, tag: &str) -> Result<()> {
         self.git_interactive(&["push", remote, &format!("refs/tags/{tag}")])
+    }
+
+    /// Configured upstream of `branch` as (remote, branch) from
+    /// `branch.<b>.remote` / `branch.<b>.merge`. Remote "." means local.
+    pub fn upstream_of(&self, branch: &str) -> Option<(String, String)> {
+        let remote = self
+            .git_string(&["config", &format!("branch.{branch}.remote")])
+            .ok()?
+            .trim()
+            .to_string();
+        let merge = self
+            .git_string(&["config", &format!("branch.{branch}.merge")])
+            .ok()?
+            .trim()
+            .to_string();
+        if remote.is_empty() || merge.is_empty() {
+            return None;
+        }
+        let merge = merge.strip_prefix("refs/heads/").unwrap_or(&merge).to_string();
+        Some((remote, merge))
+    }
+
+    fn current_upstream(&self) -> Result<(String, String, String)> {
+        let Some(branch) = self.current_branch() else {
+            bail!("no current branch (detached HEAD)");
+        };
+        let Some((remote, merge)) = self.upstream_of(&branch) else {
+            bail!("no upstream configured for {branch} (set it with b C u)");
+        };
+        Ok((branch, remote, merge))
+    }
+
+    fn run_args(&self, mut head: Vec<String>, args: &[String], tail: &[String]) -> Result<()> {
+        head.extend(args.iter().cloned());
+        head.extend(tail.iter().cloned());
+        let strs: Vec<&str> = head.iter().map(|s| s.as_str()).collect();
+        self.git_interactive(&strs)
+    }
+
+    /// magit-fetch-from-upstream: `git fetch <args> <upstream-remote>`; returns the remote.
+    pub fn fetch_upstream(&self, args: &[String]) -> Result<String> {
+        let (_, remote, _) = self.current_upstream()?;
+        self.run_args(vec!["fetch".into()], args, &[remote.clone()])?;
+        Ok(remote)
+    }
+
+    /// magit-fetch-branch: `git fetch <args> <remote> <branch>`
+    pub fn fetch_branch(&self, remote: &str, branch: &str, args: &[String]) -> Result<()> {
+        self.run_args(vec!["fetch".into()], args, &[remote.into(), branch.into()])
+    }
+
+    /// magit-pull-from-upstream: `git pull <args> <remote> <merge>`
+    pub fn pull_upstream(&self, args: &[String]) -> Result<()> {
+        let (_, remote, merge) = self.current_upstream()?;
+        self.pull(&remote, &merge, args)
+    }
+
+    /// magit-push-current-to-upstream:
+    /// `git push <args> <remote> refs/heads/<branch>:refs/heads/<merge>`
+    pub fn push_upstream(&self, args: &[String]) -> Result<()> {
+        let (branch, remote, merge) = self.current_upstream()?;
+        self.push_refspec(&remote, &branch, &merge, args)
+    }
+
+    /// magit-push-current / magit-push-other: push `src` to `<remote>/<dst>`.
+    pub fn push_refspec(&self, remote: &str, src: &str, dst: &str, args: &[String]) -> Result<()> {
+        let spec = format!("refs/heads/{src}:refs/heads/{dst}");
+        self.run_args(vec!["push".into()], args, &[remote.into(), spec])
+    }
+
+    pub fn remote_branches(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .git_lines(&["for-each-ref", "--format=%(refname:short)", "refs/remotes/"])
+            .into_iter()
+            .filter(|r| !r.ends_with("/HEAD"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// magit-get-tracked: "origin/foo" -> ("origin", "foo"), local "foo" -> (".", "foo").
+    pub fn tracked_of(&self, name: &str) -> (String, String) {
+        for r in self.remotes() {
+            if let Some(b) = name.strip_prefix(&format!("{r}/")) {
+                if !b.is_empty() {
+                    return (r, b.to_string());
+                }
+            }
+        }
+        (".".into(), name.to_string())
     }
 
     // ---------------------------------------------------------------- merge/rebase
@@ -619,9 +758,19 @@ impl Git {
 
     // ---------------------------------------------------------------- misc
 
-    /// magit-gitignore ("i t"): append pattern to .gitignore in toplevel
+    /// magit-gitignore-in-topdir ("i t"): append pattern to .gitignore in toplevel
     pub fn ignore(&self, pattern: &str) -> Result<()> {
-        let f = self.toplevel.join(".gitignore");
+        self.ignore_in_subdir("", pattern)
+    }
+
+    /// magit-gitignore-in-subdir ("i s"): append pattern to `<dir>/.gitignore`
+    /// (dir is relative to the toplevel and must already exist).
+    pub fn ignore_in_subdir(&self, dir: &str, pattern: &str) -> Result<()> {
+        let d = self.toplevel.join(dir.trim_matches('/'));
+        if !d.is_dir() {
+            bail!("not a directory: {dir}");
+        }
+        let f = d.join(".gitignore");
         let mut cur = fs::read_to_string(&f).unwrap_or_default();
         if !cur.ends_with('\n') && !cur.is_empty() {
             cur.push('\n');
