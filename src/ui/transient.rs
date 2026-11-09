@@ -230,7 +230,14 @@ pub fn diff_refresh_menu(stat: bool) -> Menu {
     Menu {
         name: "diff-refresh-menu".into(),
         title: "Change arguments of diff buffers".into(),
-        groups: vec![diff_switches(stat), vec![cmd("g", "Refresh", "diff-refresh")]],
+        groups: vec![
+            diff_switches(stat),
+            vec![
+                cmd("g", "buffer", "diff-refresh"),
+                cmd("s", "buffer and set defaults", "transient-set-and-exit"),
+                cmd("w", "buffer and save defaults", "transient-save-and-exit"),
+            ],
+        ],
     }
 }
 
@@ -301,6 +308,57 @@ pub fn prefix_value(name: &str) -> &'static [&'static str] {
         "rebase-menu" => &["--autostash"],
         _ => &[],
     }
+}
+
+/// transient-common-commands "Value commands", shown after `C-x`.
+pub const VALUE_COMMANDS: [(&str, &str); 5] = [
+    ("C-x s", "Set"),
+    ("C-x C-s", "Save"),
+    ("C-x C-k", "Reset"),
+    ("C-x p", "Previous value"),
+    ("C-x n", "Next value"),
+];
+
+/// transient-values-file: `~/.config/ngit/transient-values` (or under
+/// $XDG_CONFIG_HOME).
+pub fn default_values_file() -> Option<std::path::PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(x) => std::path::PathBuf::from(x),
+        None => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    };
+    Some(base.join("ngit").join("transient-values"))
+}
+
+/// Read transient-values: one prefix per line, its key followed by its
+/// arguments, separated by tabs. A missing file has no values.
+pub fn read_values(path: &std::path::Path) -> BTreeMap<String, Vec<String>> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let mut it = l.split('\t');
+            let key = it.next().unwrap_or_default().to_string();
+            (key, it.filter(|a| !a.is_empty()).map(String::from).collect())
+        })
+        .collect()
+}
+
+/// transient-save-values: write VALUES, sorted by key (nothing is written
+/// when there are no values and no file yet).
+pub fn write_values(path: &std::path::Path, values: &BTreeMap<String, Vec<String>>) -> std::io::Result<()> {
+    if values.is_empty() && !path.exists() {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text: String = values
+        .iter()
+        .map(|(k, v)| std::iter::once(k.as_str()).chain(v.iter().map(String::as_str)).collect::<Vec<_>>().join("\t") + "\n")
+        .collect();
+    std::fs::write(path, text)
 }
 
 pub fn registry() -> BTreeMap<String, Menu> {
@@ -795,7 +853,11 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Change arguments of log buffers".into(),
             groups: vec![
                 log_switches(),
-                vec![cmd("g", "Refresh", "log-refresh")],
+                vec![
+                    cmd("g", "buffer", "log-refresh"),
+                    cmd("s", "buffer and set defaults", "transient-set-and-exit"),
+                    cmd("w", "buffer and save defaults", "transient-save-and-exit"),
+                ],
                 vec![margin_toggle(), margin_cycle(), margin_details(), cmd("x", "Toggle shortstat", "margin-toggle-shortstat")],
             ],
         },

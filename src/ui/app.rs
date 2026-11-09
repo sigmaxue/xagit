@@ -3,6 +3,7 @@
 use super::keys::Key;
 use super::transient::{
     diff_refresh_menu, prefix_value, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader, RepoState,
+    VALUE_COMMANDS,
 };
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
@@ -77,6 +78,17 @@ pub struct App {
     scripted: std::cell::RefCell<std::collections::VecDeque<String>>,
     /// the TUI owns the terminal (`run`): it is handed over to editors
     in_terminal: bool,
+    /// values of transient prefixes set for this session (transient-set)
+    set_values: HashMap<String, Vec<String>>,
+    /// transient-values: the saved values (transient-save), kept in
+    /// `values_file`
+    saved_values: BTreeMap<String, Vec<String>>,
+    /// transient-values-file (none: values are not saved to a file)
+    values_file: Option<std::path::PathBuf>,
+    /// transient-history: the values used by each prefix, latest first
+    history: HashMap<String, Vec<Vec<String>>>,
+    /// the history of the transient shown and the position in it
+    menu_history: (Vec<Vec<String>>, usize),
 }
 
 /// The major mode of a buffer: magit-status-mode, magit-diff-mode,
@@ -329,6 +341,11 @@ impl App {
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
             in_terminal: false,
+            set_values: HashMap::new(),
+            saved_values: BTreeMap::new(),
+            values_file: None,
+            history: HashMap::new(),
+            menu_history: (Vec::new(), 0),
         };
         app.refresh();
         // magit-status-initial-section '(1): the first section after the headers
@@ -558,6 +575,11 @@ impl App {
                 popup.push(String::new());
                 popup.push(menu.title.clone());
                 popup.extend(menu.render(active).lines().map(|l| format!("  {l}")));
+                // transient-common-commands are shown after C-x
+                if self.pending.first().is_some_and(|k| k.ctrl && k.code == "x") {
+                    popup.push("  Value commands".into());
+                    popup.extend(VALUE_COMMANDS.iter().map(|(k, d)| format!("  {k:<8} {d}")));
+                }
                 popup.push("  q/C-g quit popup".into());
             }
         }
@@ -927,8 +949,13 @@ impl App {
             }
         }
         // `d` starts with the arguments of the diff buffer shown, else the
-        // current value of magit-diff-mode; `D` with the buffer's arguments
-        let default: Vec<String> = prefix_value(&name).iter().map(|s| s.to_string()).collect();
+        // current value of magit-diff-mode; `D` with the buffer's arguments.
+        // Other prefixes: the set, else the saved, else the default value.
+        let key = self.value_key(&name);
+        let default: Vec<String> = match self.set_values.get(&key).or(self.saved_values.get(&key)) {
+            Some(v) => v.clone(),
+            None => prefix_value(&key).iter().map(|s| s.to_string()).collect(),
+        };
         let preset: &[String] = match (name.as_str(), &self.mode) {
             ("diff-menu", BufferMode::Diff(_)) => &self.buf_args,
             ("diff-menu", _) => &self.diff_args,
@@ -939,8 +966,150 @@ impl App {
             _ => &default,
         };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
+        // transient--history-init: the current value, then those used before
+        let value = preset.to_vec();
+        let mut hist = vec![value.clone()];
+        hist.extend(self.history.get(&key).into_iter().flatten().filter(|v| **v != value).cloned());
+        self.menu_history = (hist, 0);
         self.pending.clear();
         self.stack.push((name, active));
+    }
+
+    /// Where the value of the prefix NAME is kept: the prefix itself
+    /// (its sequencer-in-progress variant shares it), or for the diff and
+    /// log prefixes the arguments of a major mode (magit-diff--set-value,
+    /// magit-log--set-value).
+    fn value_key(&self, name: &str) -> String {
+        let base = name.split('@').next().unwrap_or(name);
+        match base {
+            "diff-menu" => "magit-diff:magit-diff-mode",
+            "diff-refresh-menu" if self.mode == BufferMode::Status => "magit-diff:magit-status-mode",
+            "diff-refresh-menu" => "magit-diff:magit-diff-mode",
+            "log-menu" | "log-refresh-menu" => "magit-log:magit-log-mode",
+            b => b,
+        }
+        .to_string()
+    }
+
+    /// The default arguments of a major mode, if KEY is one.
+    fn mode_args(&mut self, key: &str) -> Option<&mut Vec<String>> {
+        match key {
+            "magit-diff:magit-status-mode" => Some(&mut self.status_args),
+            "magit-diff:magit-diff-mode" => Some(&mut self.diff_args),
+            "magit-log:magit-log-mode" => Some(&mut self.log_args),
+            _ => None,
+        }
+    }
+
+    /// The value of the prefix or major mode KEY before anything is set.
+    fn initial_value(key: &str) -> Vec<String> {
+        let v: &[&str] = match key {
+            "magit-diff:magit-status-mode" => &["--no-ext-diff", "--ignore-submodules=none"],
+            "magit-diff:magit-diff-mode" => &["--stat", "--no-ext-diff"],
+            "magit-log:magit-log-mode" => &["--graph", "-n256", "--decorate"],
+            k => prefix_value(k),
+        };
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// transient-values-file: read the saved values, including the default
+    /// arguments of the diff and log modes, and save to FILE from now on.
+    pub fn load_values(&mut self, file: std::path::PathBuf) {
+        self.saved_values = super::transient::read_values(&file);
+        self.values_file = Some(file);
+        let saved: Vec<(String, Vec<String>)> = self.saved_values.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, v) in saved {
+            if let Some(slot) = self.mode_args(&k) {
+                *slot = v;
+            }
+        }
+        self.refresh();
+    }
+
+    fn save_values(&mut self) {
+        if let Some(f) = &self.values_file {
+            if let Err(e) = super::transient::write_values(f, &self.saved_values) {
+                self.set_msg(&format!("Cannot save {}: {e}", f.display()));
+            }
+        }
+    }
+
+    /// transient--history-push
+    fn history_push(&mut self, key: &str, value: Vec<String>) {
+        let h = self.history.entry(key.to_string()).or_default();
+        h.retain(|v| *v != value);
+        h.insert(0, value);
+    }
+
+    /// transient-set (C-x s) / transient-save (C-x C-s): the value of the
+    /// transient shown becomes the value of the prefix for this session,
+    /// and with SAVE for future ones. For the diff and log prefixes it
+    /// becomes the arguments of the mode and of the buffer, which is
+    /// refreshed.
+    fn transient_set_value(&mut self, save: bool) {
+        let Some((name, active)) = self.stack.last().cloned() else {
+            return;
+        };
+        let args = self.args_from(&active);
+        let key = self.value_key(&name);
+        if let Some(slot) = self.mode_args(&key) {
+            *slot = args.clone();
+            let diff_buffer = matches!(self.mode, BufferMode::Diff(_) | BufferMode::Revision { .. } | BufferMode::Stash { .. });
+            if key.starts_with("magit-diff:") {
+                if self.mode == BufferMode::Status {
+                    self.status_args = args.clone();
+                } else if diff_buffer {
+                    self.buf_args = args.clone();
+                }
+            } else if self.mode.is_log() {
+                self.buf_args = args.clone();
+            }
+            self.refresh();
+        } else {
+            self.set_values.insert(key.clone(), args.clone());
+        }
+        if save {
+            self.saved_values.insert(key.clone(), args.clone());
+            self.save_values();
+        }
+        self.history_push(&key, args);
+    }
+
+    /// transient-reset (C-x C-k): forget the set and saved values; the
+    /// transient shown gets the default value.
+    fn transient_reset(&mut self) {
+        let Some((name, _)) = self.stack.last().cloned() else {
+            return;
+        };
+        let key = self.value_key(&name);
+        let value = Self::initial_value(&key);
+        self.set_values.remove(&key);
+        if let Some(slot) = self.mode_args(&key) {
+            *slot = value.clone();
+        }
+        if self.saved_values.remove(&key).is_some() {
+            self.save_values();
+        }
+        self.history_push(&key, value.clone());
+        self.set_active(value);
+    }
+
+    /// transient-history-prev (C-x p, OLDER) / -next (C-x n).
+    fn transient_history(&mut self, older: bool) {
+        let (hist, pos) = &self.menu_history;
+        let pos = if older { pos + 1 } else { pos.wrapping_sub(1) };
+        let Some(value) = hist.get(pos).cloned() else {
+            self.set_msg("End of history");
+            return;
+        };
+        self.menu_history.1 = pos;
+        self.set_active(value);
+    }
+
+    fn set_active(&mut self, value: Vec<String>) {
+        if let Some(top) = self.stack.last_mut() {
+            top.1 = value.into_iter().map(|a| (a, true)).collect();
+        }
     }
 
     fn repo_state(&self) -> RepoState {
@@ -1016,6 +1185,26 @@ impl App {
         menu: Menu,
         mut active: BTreeMap<String, bool>,
     ) -> Result<()> {
+        // transient-common-commands: the value commands under C-x
+        let cx = Key { code: "x".into(), ctrl: true };
+        if self.pending == [cx.clone()] {
+            self.pending.clear();
+            match (key.ctrl, key.code.as_str()) {
+                (false, "s") => self.transient_set_value(false),
+                (true, "s") => self.transient_set_value(true),
+                (true, "k") => self.transient_reset(),
+                (false, "p") => self.transient_history(true),
+                (false, "n") => self.transient_history(false),
+                // transient-quit-seq
+                (true, "g") => {}
+                _ => self.set_msg(&format!("C-x {} is undefined", key.label())),
+            }
+            return Ok(());
+        }
+        if key == cx && self.pending.is_empty() {
+            self.pending.push(key);
+            return Ok(());
+        }
         if key.code == "q" || key.code == "esc" || (key.ctrl && key.code == "g") {
             self.pending.clear();
             self.stack.pop();
@@ -1087,8 +1276,17 @@ impl App {
             }
             // the margin commands are transient: the menu stays
             Action::Command(cmd) if cmd.starts_with("margin-") => self.margin_command(&cmd),
+            // magit-diff-refresh / magit-log-refresh "s" and "w": refresh
+            // the buffer and set or save the defaults
+            Action::Command(cmd) if cmd == "transient-set-and-exit" || cmd == "transient-save-and-exit" => {
+                self.transient_set_value(cmd == "transient-save-and-exit");
+                self.stack.pop();
+            }
             Action::Command(cmd) => {
                 self.stack.pop();
+                // transient--export
+                let key = self.value_key(&menu.name);
+                self.history_push(&key, self.args_from(&active));
                 if menu.name == "diff-menu" {
                     self.transient_diff_args = Some(self.args_from(&active));
                 }
@@ -4670,6 +4868,9 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
     let mut app = App::new(git);
     if abs.is_dir() {
         app.cwd = abs;
+    }
+    if let Some(f) = super::transient::default_values_file() {
+        app.load_values(f);
     }
     app.run()
 }
