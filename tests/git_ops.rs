@@ -995,3 +995,105 @@ fn libgit2_refs_match_git_cli() {
     assert_eq!(lg.tags().unwrap(), g.tags());
     assert_eq!(lg.remotes().unwrap(), g.remotes());
 }
+
+// =============================================================== magit extras
+
+fn repo_with_history(n: usize) -> (TempDir, Git) {
+    let (td, g, _head) = repo_with_commit();
+    for i in 2..=n {
+        write(&g, "file.txt", &format!("v{i}\n"));
+        g.stage_all().unwrap();
+        g.commit(Some(&format!("c{i}")), &[]).unwrap();
+    }
+    (td, g)
+}
+
+#[test]
+fn bisect_start_mark_log_and_reset() {
+    let (_td, g) = repo_with_history(4);
+    assert!(!g.bisect_active());
+    let goods = vec!["HEAD~3".to_string()];
+    g.bisect_start(Some("HEAD"), &goods).unwrap();
+    assert!(g.bisect_active());
+    g.bisect_mark("skip", Some("HEAD")).unwrap();
+    let log = g.bisect_log().unwrap();
+    assert!(log.contains("bisect start"));
+    assert!(log.contains("bisect skip"));
+    g.bisect_reset(None).unwrap();
+    assert!(!g.bisect_active());
+    assert!(g.bisect_log().is_err());
+}
+
+#[test]
+fn bisect_mark_bad_and_good() {
+    let (_td, g) = repo_with_history(3);
+    g.bisect_start(None, &[]).unwrap();
+    g.bisect_mark("bad", Some("HEAD")).unwrap();
+    g.bisect_mark("good", Some("HEAD~2")).unwrap();
+    let log = g.bisect_log().unwrap();
+    assert!(log.contains("bisect bad"));
+    assert!(log.contains("bisect good"));
+    g.bisect_reset(None).unwrap();
+    assert!(g.bisect_mark("bad", Some("HEAD")).is_err());
+}
+
+#[test]
+fn worktree_add_list_remove() {
+    let (_td, g, _head) = repo_with_commit();
+    let extra = TempDir::new().unwrap();
+    let path = extra.path().join("linked");
+    let p = path.to_str().unwrap();
+    g.worktree_add(p, None, false, None).unwrap();
+    // git reports canonical paths (/private/var/... on macOS), not the symlinked one
+    let canon = path.canonicalize().unwrap();
+    let cp = canon.to_str().unwrap();
+    assert!(g.worktree_paths().iter().any(|x| x == cp));
+    assert!(g.worktree_list().unwrap().contains("linked"));
+    g.worktree_remove(p, true).unwrap();
+    assert!(!g.worktree_paths().iter().any(|x| x == cp));
+}
+
+#[test]
+fn submodule_add_list_deinit_remove() {
+    let (_td, g, _head) = repo_with_commit();
+    let src = TempDir::new().unwrap();
+    git_init(src.path());
+    std::fs::write(src.path().join("a"), "x").unwrap();
+    let sg = Git::discover(src.path()).unwrap();
+    sg.git_interactive(&["add", "."]).unwrap();
+    sg.commit(Some("initial"), &[]).unwrap();
+
+    g.submodule_add(src.path().to_str().unwrap(), "sub").unwrap();
+    assert_eq!(g.submodule_paths(), vec!["sub".to_string()]);
+    assert!(g.submodule_list().unwrap().contains("sub"));
+    g.submodule_init().unwrap();
+    g.submodule_sync().unwrap();
+    g.submodule_deinit("sub").unwrap();
+    g.submodule_remove("sub").unwrap();
+    assert!(g.submodule_paths().is_empty());
+}
+
+#[test]
+fn notes_add_show_list_remove() {
+    let (_td, g, head) = repo_with_commit();
+    g.notes_add(&head, "a note").unwrap();
+    assert!(g.notes_show("HEAD").unwrap().contains("a note"));
+    assert!(g.notes_list().unwrap().contains(&head));
+    g.notes_remove(&head).unwrap();
+    assert!(g.notes_show("HEAD").is_err());
+    g.notes_prune().unwrap();
+}
+
+#[test]
+fn diff_range_file_and_change() {
+    let (_td, g) = repo_with_history(2);
+    let d = g.diff_range("HEAD~1", "HEAD").unwrap();
+    assert!(d.contains("v2"));
+    let c = g.diff_change("HEAD").unwrap();
+    assert!(c.contains("v2"));
+
+    write(&g, "file.txt", "working\n");
+    assert!(g.diff_file("file.txt", false).unwrap().contains("working"));
+    g.stage("file.txt").unwrap();
+    assert!(g.diff_file("file.txt", true).unwrap().contains("working"));
+}

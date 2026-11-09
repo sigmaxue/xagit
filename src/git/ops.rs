@@ -705,3 +705,257 @@ impl Command_proxy {
         g.git_interactive(args)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Magit extras: bisect / worktree / submodule / notes / ediff.
+// Like every other command here these go through the git CLI, so the extra
+// features keep the exact same semantics as their Magit counterparts.
+
+impl Git {
+    // ---- bisect (magit-bisect)
+
+    pub fn bisect_active(&self) -> bool {
+        self.gitdir.join("BISECT_LOG").exists()
+    }
+
+    /// `git bisect start [bad] [good...]`
+    pub fn bisect_start(&self, bad: Option<&str>, good: &[String]) -> Result<String> {
+        let mut a: Vec<String> = vec!["bisect".into(), "start".into()];
+        if let Some(b) = bad {
+            a.push(b.into());
+        }
+        a.extend(good.iter().cloned());
+        self.git_fmt(&a)
+    }
+
+    /// `git bisect bad|good|skip [rev]`
+    pub fn bisect_mark(&self, state: &str, rev: Option<&str>) -> Result<String> {
+        if !matches!(state, "bad" | "good" | "skip") {
+            bail!("invalid bisect state: {state}");
+        }
+        let mut a: Vec<String> = vec!["bisect".into(), state.into()];
+        if let Some(r) = rev {
+            a.push(r.into());
+        }
+        self.git_fmt(&a)
+    }
+
+    /// `git bisect reset [rev]`
+    pub fn bisect_reset(&self, rev: Option<&str>) -> Result<String> {
+        let mut a: Vec<String> = vec!["bisect".into(), "reset".into()];
+        if let Some(r) = rev {
+            a.push(r.into());
+        }
+        self.git_fmt(&a)
+    }
+
+    /// `git bisect log` — also serves as magit-bisect-visualize's text view.
+    pub fn bisect_log(&self) -> Result<String> {
+        self.git_fmt(&["bisect".into(), "log".into()])
+    }
+
+    /// `git bisect run sh -c <command>`
+    pub fn bisect_run(&self, command: &str) -> Result<String> {
+        self.git_fmt(&[
+            "bisect".into(),
+            "run".into(),
+            "sh".into(),
+            "-c".into(),
+            command.into(),
+        ])
+    }
+
+    // ---- worktree (magit-worktree)
+
+    pub fn worktree_list(&self) -> Result<String> {
+        self.git_fmt(&["worktree".into(), "list".into()])
+    }
+
+    /// Paths from `git worktree list --porcelain`.
+    pub fn worktree_paths(&self) -> Vec<String> {
+        self.git_lines(&["worktree", "list", "--porcelain"])
+            .iter()
+            .filter_map(|l| l.strip_prefix("worktree ").map(str::to_string))
+            .collect()
+    }
+
+    /// `git worktree add [-b <branch>] <path> [commit-ish]`
+    pub fn worktree_add(
+        &self,
+        path: &str,
+        branch: Option<&str>,
+        new_branch: bool,
+        start: Option<&str>,
+    ) -> Result<String> {
+        let mut a: Vec<String> = vec!["worktree".into(), "add".into()];
+        if new_branch {
+            let Some(b) = branch else {
+                bail!("worktree branch requires a branch name")
+            };
+            a.push("-b".into());
+            a.push(b.into());
+        }
+        a.push(path.into());
+        match start {
+            Some(s) => a.push(s.into()),
+            None if !new_branch => {
+                if let Some(b) = branch {
+                    a.push(b.into());
+                }
+            }
+            None => {}
+        }
+        self.git_fmt(&a)
+    }
+
+    pub fn worktree_move(&self, from: &str, to: &str) -> Result<String> {
+        self.git_fmt(&["worktree".into(), "move".into(), from.into(), to.into()])
+    }
+
+    pub fn worktree_remove(&self, path: &str, force: bool) -> Result<String> {
+        let mut a: Vec<String> = vec!["worktree".into(), "remove".into()];
+        if force {
+            a.push("--force".into());
+        }
+        a.push(path.into());
+        self.git_fmt(&a)
+    }
+
+    pub fn worktree_prune(&self) -> Result<String> {
+        self.git_fmt(&["worktree".into(), "prune".into(), "--verbose".into()])
+    }
+
+    // ---- submodule (magit-submodule)
+
+    pub fn submodule_list(&self) -> Result<String> {
+        self.git_fmt(&["submodule".into(), "status".into()])
+    }
+
+    /// Paths declared in .gitmodules.
+    pub fn submodule_paths(&self) -> Vec<String> {
+        self.git_lines(&[
+            "config",
+            "-f",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ])
+        .iter()
+        .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
+        .collect()
+    }
+
+    /// `git -c protocol.file.allow=always submodule add <url> <path>`
+    /// (the file protocol exception keeps local submodules usable).
+    pub fn submodule_add(&self, url: &str, path: &str) -> Result<String> {
+        self.git_fmt(&[
+            "-c".into(),
+            "protocol.file.allow=always".into(),
+            "submodule".into(),
+            "add".into(),
+            url.into(),
+            path.into(),
+        ])
+    }
+
+    pub fn submodule_init(&self) -> Result<String> {
+        self.git_fmt(&["submodule".into(), "init".into()])
+    }
+
+    pub fn submodule_update(&self, init: bool, recursive: bool) -> Result<String> {
+        let mut a: Vec<String> = vec![
+            "-c".into(),
+            "protocol.file.allow=always".into(),
+            "submodule".into(),
+            "update".into(),
+        ];
+        if init {
+            a.push("--init".into());
+        }
+        if recursive {
+            a.push("--recursive".into());
+        }
+        self.git_fmt(&a)
+    }
+
+    pub fn submodule_sync(&self) -> Result<String> {
+        self.git_fmt(&["submodule".into(), "sync".into(), "--recursive".into()])
+    }
+
+    pub fn submodule_deinit(&self, path: &str) -> Result<String> {
+        self.git_fmt(&[
+            "submodule".into(),
+            "deinit".into(),
+            "-f".into(),
+            "--".into(),
+            path.into(),
+        ])
+    }
+
+    /// magit-submodule-remove: `git rm -f -- <path>` plus .git/modules cleanup.
+    pub fn submodule_remove(&self, path: &str) -> Result<String> {
+        let out = self.git_fmt(&["rm".into(), "-f".into(), "--".into(), path.into()])?;
+        let modules = self.gitdir.join("modules").join(path);
+        if modules.is_dir() {
+            std::fs::remove_dir_all(&modules)
+                .with_context(|| format!("removing {}", modules.display()))?;
+        }
+        Ok(out)
+    }
+
+    // ---- notes (magit-notes)
+
+    pub fn notes_list(&self) -> Result<String> {
+        self.git_fmt(&["notes".into(), "list".into()])
+    }
+
+    pub fn notes_show(&self, rev: &str) -> Result<String> {
+        self.git_fmt(&["notes".into(), "show".into(), rev.into()])
+    }
+
+    /// Single-line note input (TUI prompts are one line, like commit messages).
+    pub fn notes_add(&self, rev: &str, message: &str) -> Result<String> {
+        self.git_fmt(&[
+            "notes".into(),
+            "add".into(),
+            "-f".into(),
+            "-m".into(),
+            message.into(),
+            rev.into(),
+        ])
+    }
+
+    pub fn notes_remove(&self, rev: &str) -> Result<String> {
+        self.git_fmt(&["notes".into(), "remove".into(), rev.into()])
+    }
+
+    pub fn notes_prune(&self) -> Result<String> {
+        self.git_fmt(&["notes".into(), "prune".into()])
+    }
+
+    // ---- ediff / diff views
+
+    pub fn diff_range(&self, from: &str, to: &str) -> Result<String> {
+        self.git_fmt(&["diff".into(), "--no-color".into(), from.into(), to.into()])
+    }
+
+    pub fn diff_file(&self, file: &str, cached: bool) -> Result<String> {
+        let mut a: Vec<String> = vec!["diff".into(), "--no-color".into()];
+        if cached {
+            a.push("--cached".into());
+        }
+        a.push("--".into());
+        a.push(file.into());
+        self.git_fmt(&a)
+    }
+
+    /// Diff (change): the patch of one commit.
+    pub fn diff_change(&self, rev: &str) -> Result<String> {
+        self.git_fmt(&[
+            "show".into(),
+            "--no-color".into(),
+            "--format=fuller".into(),
+            rev.into(),
+        ])
+    }
+}

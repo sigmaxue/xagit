@@ -323,3 +323,53 @@ fn key_labels() {
     assert!(key_from_label("C-g").ctrl);
     assert_eq!(key_from_label("SPC").code, " ");
 }
+
+/// bisect/worktree/submodule/notes/ediff are no longer marked unsupported.
+#[test]
+fn extra_features_popup_layout() {
+    let reg = registry();
+    let extras = [
+        "bisect-menu",
+        "worktree-menu",
+        "submodule-menu",
+        "notes-menu",
+        "ediff-menu",
+    ];
+    for name in extras {
+        assert!(reg.contains_key(name), "{name} missing");
+        let m = reg.get(name).unwrap();
+        assert!(!m.groups.is_empty());
+        for e in m.groups.iter().flatten() {
+            assert!(
+                !matches!(&e.action, Action::Command(c) if c == "unsupported"),
+                "{name} key {} still unsupported",
+                e.key
+            );
+        }
+    }
+
+    let d = menu("dispatch");
+    for (key, target) in [
+        ("B", "bisect-menu"),
+        ("Z", "worktree-menu"),
+        ("o", "submodule-menu"),
+        ("T", "notes-menu"),
+        ("E", "ediff-menu"),
+        ("e", "ediff-dwim"),
+        ("D", "diff-change"),
+    ] {
+        assert!(matches!(action_of(&d, key), Action::Command(c) if c == target), "{key}");
+    }
+
+    let b = menu("bisect-menu");
+    assert!(matches!(action_of(&b, "B"), Action::Command(c) if c == "bisect-start"));
+    assert!(matches!(action_of(&b, "g"), Action::Command(c) if c == "bisect-good"));
+    let w = menu("worktree-menu");
+    assert!(matches!(action_of(&w, "k"), Action::Command(c) if c == "worktree-delete"));
+    let s = menu("submodule-menu");
+    assert!(matches!(action_of(&s, "a"), Action::Command(c) if c == "submodule-add"));
+    let n = menu("notes-menu");
+    assert!(matches!(action_of(&n, "T"), Action::Command(c) if c == "notes-edit"));
+    let e = menu("ediff-menu");
+    assert!(matches!(action_of(&e, "e"), Action::Command(c) if c == "ediff-dwim"));
+}

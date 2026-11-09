@@ -1049,7 +1049,8 @@ impl App {
 
             "unsupported" => self.set_msg("command not supported in this build"),
 
-            _ => self.set_msg(&format!("unknown command: {cmd}")),
+            // Magit extras (bisect/worktree/submodule/notes/ediff)
+            _ => self.run_extra(cmd)?,
         }
         Ok(())
     }
@@ -1214,6 +1215,253 @@ impl Git {
             .status()?;
         if !st.success() {
             anyhow::bail!("git {} failed: {}", args.first().unwrap_or(&""), st);
+        }
+        Ok(())
+    }
+}
+
+/// Magit extras: bisect / worktree / submodule / notes / ediff.
+/// Kept out of `run_command`'s main dispatch so each feature stays together.
+impl App {
+    fn show(&mut self, title: &str, res: Result<String>) {
+        match res {
+            Ok(out) if out.trim().is_empty() => self.set_msg("(no output)"),
+            Ok(out) => self.view_text = Some((title.into(), out)),
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+    }
+
+    fn done(&mut self, ok_msg: &str, res: Result<String>) {
+        match res {
+            Ok(out) => {
+                let first = out.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                self.set_msg(if first.is_empty() { ok_msg } else { first });
+                self.refresh();
+            }
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+    }
+
+    fn run_extra(&mut self, cmd: &str) -> Result<()> {
+        match cmd {
+            // ---- bisect
+            "bisect-start" => {
+                let Some(bad) = self.read_line_prompt("Bisect bad revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                let good = self.read_line_prompt("Bisect good revisions (space separated)", None)?;
+                let goods: Vec<String> = good
+                    .as_deref()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                let res = self.git.bisect_start(Some(&bad), &goods);
+                self.done("bisect started", res);
+            }
+            "bisect-bad" | "bisect-good" | "bisect-skip" => {
+                let state = match cmd {
+                    "bisect-bad" => "bad",
+                    "bisect-good" => "good",
+                    _ => "skip",
+                };
+                let rev = self.read_line_prompt(&format!("Bisect {state} revision"), Some("HEAD"))?;
+                let res = self.git.bisect_mark(state, rev.as_deref());
+                self.done(&format!("bisect {state}"), res);
+            }
+            "bisect-reset" => {
+                let rev = self.read_line_prompt("Reset to revision (empty = pre-bisect HEAD)", None)?;
+                let res = self.git.bisect_reset(rev.as_deref());
+                self.done("bisect reset", res);
+            }
+            "bisect-log" => {
+                let res = self.git.bisect_log();
+                self.show("bisect log", res);
+            }
+            "bisect-run" => {
+                let Some(command) = self.read_line_prompt("Bisect run shell command", None)? else {
+                    return Ok(());
+                };
+                let res = self.git.bisect_run(&command);
+                self.show("bisect run", res);
+            }
+
+            // ---- worktree
+            "worktree-list" => {
+                let res = self.git.worktree_list();
+                self.show("worktrees", res);
+            }
+            "worktree-checkout" | "worktree-branch" => {
+                let Some(path) = self.read_line_prompt("Worktree path", None)? else {
+                    return Ok(());
+                };
+                let is_new = cmd == "worktree-branch";
+                let branch = self.read_line_prompt(
+                    if is_new { "New branch name" } else { "Checkout branch/revision (empty = HEAD)" },
+                    None,
+                )?;
+                let res = self.git.worktree_add(&path, branch.as_deref(), is_new, None);
+                self.done("worktree added", res);
+            }
+            "worktree-move" => {
+                let paths = self.git.worktree_paths();
+                let Some(from) = self.pick("Move worktree", &paths, None)?.cloned() else {
+                    return Ok(());
+                };
+                let Some(to) = self.read_line_prompt("New path", None)? else {
+                    return Ok(());
+                };
+                let res = self.git.worktree_move(&from, &to);
+                self.done("worktree moved", res);
+            }
+            "worktree-delete" => {
+                let paths = self.git.worktree_paths();
+                let Some(path) = self.pick("Delete worktree", &paths, None)?.cloned() else {
+                    return Ok(());
+                };
+                if !self.yes_no(&format!("Delete worktree {path}?"))? {
+                    return Ok(());
+                }
+                let force = self.yes_no("Force delete (dirty worktree)?")?;
+                let res = self.git.worktree_remove(&path, force);
+                self.done("worktree removed", res);
+            }
+            "worktree-prune" => {
+                let res = self.git.worktree_prune();
+                self.done("worktrees pruned", res);
+            }
+
+            // ---- submodule
+            "submodule-list" => {
+                let res = self.git.submodule_list();
+                self.show("submodules", res);
+            }
+            "submodule-add" => {
+                let Some(url) = self.read_line_prompt("Submodule url", None)? else {
+                    return Ok(());
+                };
+                let Some(path) = self.read_line_prompt("Submodule path", None)? else {
+                    return Ok(());
+                };
+                let res = self.git.submodule_add(&url, &path);
+                self.done("submodule added", res);
+            }
+            "submodule-init" => {
+                let res = self.git.submodule_init();
+                self.done("submodules initialized", res);
+            }
+            "submodule-update" | "submodule-update-recursive" => {
+                let recursive = cmd == "submodule-update-recursive";
+                let res = self.git.submodule_update(true, recursive);
+                self.done("submodules updated", res);
+            }
+            "submodule-sync" => {
+                let res = self.git.submodule_sync();
+                self.done("submodules synced", res);
+            }
+            "submodule-deinit" | "submodule-remove" => {
+                let paths = self.git.submodule_paths();
+                let Some(path) = self.pick("Submodule", &paths, None)?.cloned() else {
+                    return Ok(());
+                };
+                if !self.yes_no(&format!("{cmd} {path}?"))? {
+                    return Ok(());
+                }
+                let res = if cmd == "submodule-deinit" {
+                    self.git.submodule_deinit(&path)
+                } else {
+                    self.git.submodule_remove(&path)
+                };
+                self.done("submodule updated", res);
+            }
+
+            // ---- notes
+            "notes-list" => {
+                let res = self.git.notes_list();
+                self.show("notes", res);
+            }
+            "notes-edit" => {
+                let Some(rev) = self.read_line_prompt("Note for revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                let Some(msg) = self.read_line_prompt("Note text (one line)", None)? else {
+                    return Ok(());
+                };
+                let res = self.git.notes_add(&rev, &msg);
+                self.done("note saved", res);
+            }
+            "notes-show" => {
+                let Some(rev) = self.read_line_prompt("Show note for revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                let res = self.git.notes_show(&rev);
+                self.show(&format!("notes {rev}"), res);
+            }
+            "notes-remove" => {
+                let Some(rev) = self.read_line_prompt("Remove note from revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                if !self.yes_no(&format!("Remove note from {rev}?"))? {
+                    return Ok(());
+                }
+                let res = self.git.notes_remove(&rev);
+                self.done("note removed", res);
+            }
+            "notes-prune" => {
+                let res = self.git.notes_prune();
+                self.done("notes pruned", res);
+            }
+
+            // ---- ediff / diff views (text buffers instead of Emacs sessions)
+            "ediff-dwim" => {
+                let cur = self.current_file();
+                let res: Result<String> = match cur {
+                    Some((section, path)) if section == "untracked" => Ok(format!(
+                        "New file: {path}\n\n{}",
+                        std::fs::read_to_string(self.git.toplevel.join(&path))
+                            .unwrap_or_default()
+                    )),
+                    Some((section, path)) => self.git.diff_file(&path, section == "staged"),
+                    None => self.git.diff_unstaged(),
+                };
+                self.show("ediff dwim", res);
+            }
+            "ediff-unstaged" | "ediff-staged" => {
+                let res = if cmd == "ediff-staged" {
+                    self.git.diff_staged()
+                } else {
+                    self.git.diff_unstaged()
+                };
+                self.show("ediff", res);
+            }
+            "ediff-range" => {
+                let Some(from) = self.read_line_prompt("Diff from revision", Some("HEAD~1"))? else {
+                    return Ok(());
+                };
+                let Some(to) = self.read_line_prompt("Diff to revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                let res = self.git.diff_range(&from, &to);
+                self.show(&format!("{from}..{to}"), res);
+            }
+            "ediff-commit" | "diff-change" => {
+                let log = self.git.log(None, 30)?;
+                let revs: Vec<String> = log
+                    .iter()
+                    .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+                    .collect();
+                let Some(rev) = self.pick("Commit", &revs, None)?.cloned() else {
+                    return Ok(());
+                };
+                let res = if cmd == "diff-change" {
+                    self.git.diff_change(&rev)
+                } else {
+                    self.git.show_commit(&rev)
+                };
+                self.show(&format!("commit {rev}"), res);
+            }
+
+            _ => self.set_msg(&format!("unknown command: {cmd}")),
         }
         Ok(())
     }

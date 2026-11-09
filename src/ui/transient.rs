@@ -122,13 +122,13 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("A", "Apply", "cherry-pick-menu"),
                     cmd("b", "Branch", "branch-menu"),
-                    cmd("B", "Bisect", "unsupported"),
+                    cmd("B", "Bisect", "bisect-menu"),
                     cmd("c", "Commit", "commit-menu"),
                     cmd("C", "Clone", "clone"),
                     cmd("d", "Diff", "diff-menu"),
-                    cmd("D", "Diff (change)", "unsupported"),
-                    cmd("e", "Ediff (dwim)", "unsupported"),
-                    cmd("E", "Ediff", "unsupported"),
+                    cmd("D", "Diff (change)", "diff-change"),
+                    cmd("e", "Ediff (dwim)", "ediff-dwim"),
+                    cmd("E", "Ediff", "ediff-menu"),
                     cmd("f", "Fetch", "fetch-menu"),
                     cmd("F", "Pull", "pull-menu"),
                     cmd("h", "Help", "help"),
@@ -143,7 +143,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("L", "Log (change)", "unsupported"),
                     cmd("m", "Merge", "merge-menu"),
                     cmd("M", "Remote", "remote-menu"),
-                    cmd("o", "Submodule", "unsupported"),
+                    cmd("o", "Submodule", "submodule-menu"),
                     cmd("O", "Subtree", "unsupported"),
                     cmd("P", "Push", "push-menu"),
                     cmd("q", "Bury buffer", "quit"),
@@ -152,7 +152,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("r", "Rebase", "rebase-menu"),
                     cmd("t", "Tag", "tag-menu"),
-                    cmd("T", "Note", "unsupported"),
+                    cmd("T", "Note", "notes-menu"),
                     cmd("V", "Revert", "revert"),
                     cmd("w", "Apply patches", "unsupported"),
                     cmd("W", "Format patches", "unsupported"),
@@ -160,7 +160,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("y", "Show Refs", "show-refs"),
                     cmd("Y", "Cherries", "unsupported"),
                     cmd("z", "Stash", "stash-menu"),
-                    cmd("Z", "Worktree", "unsupported"),
+                    cmd("Z", "Worktree", "worktree-menu"),
                     cmd("!", "Run", "run-menu"),
                 ],
                 vec![
@@ -508,6 +508,112 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("A", "Pick", "cherry-pick"),
                     cmd("a", "Apply", "cherry-apply"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-bisect (B)
+    m.insert(
+        "bisect-menu".into(),
+        Menu {
+            name: "bisect-menu".into(),
+            title: "Bisect".into(),
+            groups: vec![
+                vec![
+                    cmd("B", "Start", "bisect-start"),
+                    cmd("b", "Bad", "bisect-bad"),
+                    cmd("g", "Good", "bisect-good"),
+                    cmd("s", "Skip", "bisect-skip"),
+                ],
+                vec![
+                    cmd("r", "Reset", "bisect-reset"),
+                    cmd("u", "Run", "bisect-run"),
+                    cmd("l", "Log", "bisect-log"),
+                    cmd("v", "Visualize", "bisect-log"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-worktree (Z)
+    m.insert(
+        "worktree-menu".into(),
+        Menu {
+            name: "worktree-menu".into(),
+            title: "Worktree".into(),
+            groups: vec![
+                vec![
+                    cmd("b", "Checkout", "worktree-checkout"),
+                    cmd("c", "Branch", "worktree-branch"),
+                    cmd("m", "Move", "worktree-move"),
+                    cmd("k", "Delete", "worktree-delete"),
+                ],
+                vec![
+                    cmd("p", "Prune", "worktree-prune"),
+                    cmd("l", "List", "worktree-list"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-submodule (o)
+    m.insert(
+        "submodule-menu".into(),
+        Menu {
+            name: "submodule-menu".into(),
+            title: "Submodule".into(),
+            groups: vec![
+                vec![
+                    cmd("a", "Add", "submodule-add"),
+                    cmd("i", "Init", "submodule-init"),
+                    cmd("u", "Update", "submodule-update"),
+                    cmd("U", "Update recursively", "submodule-update-recursive"),
+                    cmd("s", "Sync", "submodule-sync"),
+                ],
+                vec![
+                    cmd("d", "Deinit", "submodule-deinit"),
+                    cmd("r", "Remove", "submodule-remove"),
+                    cmd("l", "List", "submodule-list"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-notes (T)
+    m.insert(
+        "notes-menu".into(),
+        Menu {
+            name: "notes-menu".into(),
+            title: "Notes".into(),
+            groups: vec![vec![
+                cmd("T", "Edit", "notes-edit"),
+                cmd("s", "Show", "notes-show"),
+                cmd("r", "Remove", "notes-remove"),
+                cmd("l", "List", "notes-list"),
+                cmd("p", "Prune", "notes-prune"),
+            ]],
+        },
+    );
+
+    // ------------------------------------------------ magit-ediff (E)
+    // No Emacs ediff session in a terminal: show the corresponding diff text
+    // in the existing text buffer instead.
+    m.insert(
+        "ediff-menu".into(),
+        Menu {
+            name: "ediff-menu".into(),
+            title: "Ediff (text diff view)".into(),
+            groups: vec![
+                vec![
+                    cmd("e", "Dwim (thing at point)", "ediff-dwim"),
+                    cmd("u", "Unstaged", "ediff-unstaged"),
+                    cmd("s", "Staged", "ediff-staged"),
+                ],
+                vec![
+                    cmd("c", "Commit", "ediff-commit"),
+                    cmd("r", "Ranges", "ediff-range"),
+                    cmd("D", "Change", "diff-change"),
                 ],
             ],
         },
