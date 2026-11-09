@@ -130,6 +130,9 @@ fn commit_popup_layout() {
     assert!(matches!(action_of(&m, "w"), Action::Command(c) if c == "commit-reword"));
     assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "commit-fixup"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "commit-squash"));
+    assert!(matches!(action_of(&m, "A"), Action::Command(c) if c == "commit-alter"));
+    assert!(matches!(action_of(&m, "n"), Action::Command(c) if c == "commit-augment"));
+    assert!(matches!(action_of(&m, "W"), Action::Command(c) if c == "commit-revise"));
     assert!(matches!(action_of(&m, "F"), Action::Command(c) if c == "commit-instant-fixup"));
     assert!(matches!(action_of(&m, "S"), Action::Command(c) if c == "commit-instant-squash"));
 }

@@ -208,6 +208,11 @@ impl Git {
         self.git_lines(&["diff", "--name-only", "-z"])
     }
 
+    /// magit-unmerged-files
+    pub fn unmerged_files(&self) -> Vec<String> {
+        self.git_lines(&["diff-files", "--name-only", "--diff-filter=U", "-z"])
+    }
+
     pub fn untracked_files(&self) -> Vec<String> {
         self.git_lines(&["ls-files", "--others", "--exclude-standard", "-z"])
     }

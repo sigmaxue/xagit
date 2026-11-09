@@ -77,7 +77,8 @@ pub struct App {
 
 /// The major mode of a buffer: magit-status-mode, magit-diff-mode,
 /// magit-revision-mode, magit-stash-mode, magit-log-mode,
-/// magit-reflog-mode, magit-stashes-mode or magit-cherry-mode.
+/// magit-reflog-mode, magit-stashes-mode, magit-cherry-mode or
+/// magit-log-select-mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BufferMode {
     Status,
@@ -88,6 +89,24 @@ pub enum BufferMode {
     Reflog { refname: String },
     Stashes { refname: String },
     Cherry { head: String, upstream: String },
+    /// magit-log-select: the log of REV, from which a commit is picked
+    /// for ACTION (magit-log-select-pick-function); MSG is the usage
+    LogSelect { rev: String, action: SelectAction, msg: String },
+}
+
+/// What is done with the commit picked in a log-select buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectAction {
+    /// magit-rebase-interactive / -edit-commit / -reword-commit /
+    /// -remove-commit (CMD is the ngit command)
+    Rebase { cmd: String, args: Vec<String> },
+    /// magit-rebase-subset onto NEWBASE
+    RebaseSubset { newbase: String, args: Vec<String> },
+    /// magit-rebase-autosquash
+    RebaseAutosquash { args: Vec<String> },
+    /// magit-commit-squash-internal with OPTION ("--fixup=", "--squash=",
+    /// "--fixup=amend:" or "--fixup=reword:")
+    CommitSquash { option: String, args: Vec<String>, edit: bool, rebase: bool },
 }
 
 impl BufferMode {
@@ -96,11 +115,18 @@ impl BufferMode {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 
+    /// magit-log-mode and the modes derived from it with its log
+    /// arguments (magit-log-select-mode)
+    fn is_log(&self) -> bool {
+        matches!(self, BufferMode::Log { .. } | BufferMode::LogSelect { .. })
+    }
+
     /// magit--right-margin-option: the buffers with a right margin.
     fn margin_option(&self) -> Option<&'static str> {
         Some(match self {
             BufferMode::Status => "status",
             BufferMode::Log { .. } => "log",
+            BufferMode::LogSelect { .. } => "log-select",
             BufferMode::Reflog { .. } => "reflog",
             BufferMode::Stashes { .. } => "stashes",
             BufferMode::Cherry { .. } => "cherry",
@@ -373,6 +399,13 @@ impl App {
             BufferMode::Revision { rev, files } => build_revision(&self.git, rev, &self.buf_args, files),
             BufferMode::Stash { stash } => build_stash(&self.git, stash, &self.buf_args),
             BufferMode::Log { revs, files } => build_log(&self.git, revs, &self.buf_args, files, &margin),
+            BufferMode::LogSelect { rev, msg, .. } => {
+                // magit-log-select-refresh-buffer; the header line shows
+                // the usage (magit-log-select-show-usage)
+                let mut buf = build_log(&self.git, std::slice::from_ref(rev), &self.buf_args, &[], &margin);
+                buf.title = msg.clone();
+                buf
+            }
             BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args, &margin),
             BufferMode::Stashes { refname } => build_stashes(&self.git, refname, &margin),
             BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream, &margin),
@@ -772,8 +805,11 @@ impl App {
             }
         }
         if std::mem::take(&mut self.cc_prefix) {
-            match (&self.mode, key.ctrl, key.code.as_str()) {
-                (BufferMode::Log { .. }, true, "n") => self.log_move_to_parent(),
+            let select = matches!(self.mode, BufferMode::LogSelect { .. });
+            match (key.ctrl, key.code.as_str()) {
+                (true, "n") if self.mode.is_log() => self.log_move_to_parent(),
+                (true, "c") if select => return self.log_select_pick(),
+                (true, "k") if select => self.bury_buffer(),
                 _ => self.set_msg(&format!("C-c {} is undefined", key.label())),
             }
             return Ok(());
@@ -783,9 +819,20 @@ impl App {
             self.set_msg("C-c-");
             return Ok(());
         }
+        // magit-log-select-mode-map
+        if matches!(self.mode, BufferMode::LogSelect { .. }) && self.view_text.is_none() && !key.ctrl {
+            match key.code.as_str() {
+                "." | "e" => return self.log_select_pick(),
+                "q" => {
+                    self.bury_buffer();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         // magit-log-mode-map (also the parent of magit-reflog-mode-map and
-        // so of magit-stashes-mode-map)
-        if matches!(self.mode, BufferMode::Log { .. } | BufferMode::Reflog { .. } | BufferMode::Stashes { .. })
+        // so of magit-stashes-mode-map, and of magit-log-select-mode-map)
+        if (self.mode.is_log() || matches!(self.mode, BufferMode::Reflog { .. } | BufferMode::Stashes { .. }))
             && self.view_text.is_none()
             && !key.ctrl
         {
@@ -881,7 +928,7 @@ impl App {
             ("diff-menu", _) => &self.diff_args,
             ("diff-refresh-menu", BufferMode::Status) => &self.status_args,
             ("diff-refresh-menu", _) => &self.buf_args,
-            ("log-menu" | "log-refresh-menu", BufferMode::Log { .. }) => &self.buf_args,
+            ("log-menu" | "log-refresh-menu", m) if m.is_log() => &self.buf_args,
             ("log-menu" | "log-refresh-menu", _) => &self.log_args,
             ("shortlog-menu", _) => &shortlog_default,
             _ => &[],
@@ -1218,37 +1265,49 @@ impl App {
                     self.refresh();
                 }
             }
-            "commit-fixup" => {
-                let branches = g!().branches();
-                if let Some(rev) = self.pick("Fixup commit (branch or hash)", &branches, None)? {
-                    g!().commit_fixup(rev)?;
-                    self.set_msg("created fixup commit");
-                    self.refresh();
+            // magit-commit-squash-internal: with magit-commit-squash-confirm
+            // the target is always selected from the log, starting at the
+            // commit at point
+            "commit-fixup" | "commit-squash" | "commit-alter" | "commit-augment" | "commit-revise"
+            | "commit-instant-fixup" | "commit-instant-squash" => {
+                let (option, edit, nopatch, rebase) = match cmd {
+                    "commit-fixup" => ("--fixup=", false, false, false),
+                    "commit-squash" => ("--squash=", false, false, false),
+                    "commit-alter" => ("--fixup=amend:", true, false, false),
+                    "commit-augment" => ("--squash=", true, false, false),
+                    "commit-revise" => ("--fixup=reword:", true, true, false),
+                    "commit-instant-fixup" => ("--fixup=", false, false, true),
+                    _ => ("--squash=", false, false, true),
+                };
+                let Some(args) = self.commit_assert(&args, nopatch, !edit)? else {
+                    return Ok(());
+                };
+                let commit = self.commit_at_point();
+                if let Some(c) = &commit {
+                    if rebase && !self.git.is_ancestor(c, "HEAD") {
+                        let prompt = format!(
+                            "{} isn't an ancestor of HEAD.  [c]reate without rebasing, [s]elect other, [a]bort",
+                            self.git.rev_short(c)
+                        );
+                        let answer = self.read_line_prompt(&prompt, None)?.unwrap_or_default();
+                        let rebase = match answer.chars().next() {
+                            Some('c') => false,
+                            Some('s') => true,
+                            _ => {
+                                self.set_msg("Quit");
+                                return Ok(());
+                            }
+                        };
+                        let action = SelectAction::CommitSquash { option: option.into(), args, edit, rebase };
+                        let initial = (!rebase).then(|| c.clone());
+                        let msg = format!("Type %p on a commit to {} into it,", &option[2..]);
+                        self.log_select(action, Some(&msg), initial);
+                        return Ok(());
+                    }
                 }
-            }
-            "commit-squash" => {
-                let branches = g!().branches();
-                if let Some(rev) = self.pick("Squash into (branch or hash)", &branches, None)? {
-                    g!().commit_squash(rev)?;
-                    self.set_msg("created squash commit");
-                    self.refresh();
-                }
-            }
-            "commit-instant-fixup" => {
-                let branches = g!().branches();
-                if let Some(rev) = self.pick("Instant fixup into", &branches, None)? {
-                    g!().commit_instant_fixup(rev)?;
-                    self.set_msg("instant fixup done");
-                    self.refresh();
-                }
-            }
-            "commit-instant-squash" => {
-                let branches = g!().branches();
-                if let Some(rev) = self.pick("Instant squash into", &branches, None)? {
-                    g!().commit_instant_squash(rev)?;
-                    self.set_msg("instant squash done");
-                    self.refresh();
-                }
+                let action = SelectAction::CommitSquash { option: option.into(), args, edit, rebase };
+                let msg = format!("Type %p on a commit to {} into it,", &option[2..]);
+                self.log_select(action, Some(&msg), commit);
             }
 
             // -------- branch menu
@@ -1552,19 +1611,15 @@ impl App {
                 }
                 self.refresh();
             }
-            "rebase-autosquash" => {
-                let default = g!().autosquash_base();
-                let Some(base) =
-                    self.read_line_prompt("Autosquash commits after", default.as_deref().or(Some("HEAD~10")))?
-                else {
-                    return Ok(());
-                };
-                match g!().rebase_autosquash_with(&base, &args) {
-                    Ok(()) => self.set_msg("autosquashed"),
-                    Err(e) => self.set_msg(&format!("{e}")),
+            // magit-rebase-autosquash: the commits after the merge-base
+            // with the upstream, else after one selected from the log
+            "rebase-autosquash" => match g!().autosquash_base() {
+                Some(base) => self.rebase_autosquash(&base, &args)?,
+                None => {
+                    let msg = "Type %p on a commit to squash into it and then rebase as necessary,";
+                    self.log_select(SelectAction::RebaseAutosquash { args: args.clone() }, Some(msg), None);
                 }
-                self.refresh();
-            }
+            },
             "rebase-upstream" | "rebase-other" => {
                 let bs = g!().branches();
                 if cmd == "rebase-upstream" {
@@ -1822,7 +1877,7 @@ impl App {
             | "log-all" | "log-change" => self.log_view(cmd)?,
             // magit-log-refresh (L g): new arguments for the log buffer shown
             "log-refresh" => match self.mode {
-                BufferMode::Log { .. } => {
+                BufferMode::Log { .. } | BufferMode::LogSelect { .. } => {
                     self.buf_args = args.clone();
                     self.refresh();
                 }
@@ -2031,16 +2086,18 @@ impl App {
             BufferMode::Revision { rev, .. } => Dwim::Commit(rev.clone()),
             // [commit], [file commit], [hunk file commit]: the diffs of a
             // commit in a log use its hash as their group
-            BufferMode::Log { .. } | BufferMode::Reflog { .. } => match line.map(|l| &l.kind) {
-                Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
-                Some(
-                    LineKind::File { section, .. }
-                    | LineKind::Hunk { section, .. }
-                    | LineKind::DiffLine { section, .. }
-                    | LineKind::Meta { section, .. },
-                ) => Dwim::Commit(section.clone()),
-                _ => Dwim::None,
-            },
+            BufferMode::Log { .. } | BufferMode::LogSelect { .. } | BufferMode::Reflog { .. } => {
+                match line.map(|l| &l.kind) {
+                    Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
+                    Some(
+                        LineKind::File { section, .. }
+                        | LineKind::Hunk { section, .. }
+                        | LineKind::DiffLine { section, .. }
+                        | LineKind::Meta { section, .. },
+                    ) => Dwim::Commit(section.clone()),
+                    _ => Dwim::None,
+                }
+            }
             BufferMode::Stashes { .. } | BufferMode::Cherry { .. } => match line.map(|l| &l.kind) {
                 Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
                 Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
@@ -2099,7 +2156,7 @@ impl App {
     fn log_arguments(&self) -> Vec<String> {
         match (&self.transient_log_args, &self.mode) {
             (Some(a), _) => a.clone(),
-            (None, BufferMode::Log { .. }) => self.buf_args.clone(),
+            (None, m) if m.is_log() => self.buf_args.clone(),
             (None, _) => self.log_args.clone(),
         }
     }
@@ -2211,6 +2268,220 @@ impl App {
     fn log_set_commit_limit(&mut self, f: Limit) {
         self.buf_args = set_commit_limit(&self.buf_args, f);
         self.refresh();
+    }
+
+    /// magit-commit-at-point: the commit section at point, else the
+    /// revision of a revision or stash buffer.
+    fn commit_at_point(&self) -> Option<String> {
+        if let Some(LineKind::Commit { hash, .. }) = self.current_line().map(|l| &l.kind) {
+            return Some(hash.clone());
+        }
+        match &self.mode {
+            BufferMode::Revision { rev, .. } => Some(rev.clone()),
+            BufferMode::Stash { stash } => Some(stash.clone()),
+            _ => None,
+        }
+    }
+
+    /// magit-log-select: show the log of the current branch to pick a
+    /// commit for ACTION, at INITIAL, else at the first commit that is not
+    /// a squash!, fixup! or amend! commit. MSG is the usage, "%p" and "%q"
+    /// standing for the keys that pick and quit.
+    fn log_select(&mut self, action: SelectAction, msg: Option<&str>, initial: Option<String>) {
+        let msg = match msg {
+            Some(m) if m.ends_with(',') => format!("{m} or %q to abort"),
+            Some(m) => m.to_string(),
+            None => "Type %p to select commit at point, or %q to abort".to_string(),
+        };
+        let msg = msg.replace("%p", "C-c C-c").replace("%q", "C-c C-k");
+        let rev = self.git.current_branch().unwrap_or_else(|| "HEAD".into());
+        let args = ["--graph", "-n256", "--decorate"].map(String::from).to_vec();
+        self.setup_buffer(BufferMode::LogSelect { rev, action, msg: msg.clone() }, args);
+        match initial {
+            Some(c) => {
+                self.log_goto_commit(&c);
+            }
+            None => {
+                let commits: Vec<String> = self
+                    .lines
+                    .iter()
+                    .filter(|l| l.heading && l.depth == 0)
+                    .filter_map(|l| match &l.kind {
+                        LineKind::Commit { hash, .. } => Some(hash.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let target = commits.iter().find(|h| {
+                    let s = self.git.git_string(&["log", "-1", "--format=%s", h]).unwrap_or_default();
+                    !["squash!", "fixup!", "amend!"].iter().any(|p| s.starts_with(p))
+                });
+                if let Some(h) = target.cloned() {
+                    self.log_goto_commit(&h);
+                }
+            }
+        }
+        self.set_msg(&msg);
+    }
+
+    /// magit-log-select-pick: bury the log-select buffer and act on the
+    /// commit at point.
+    fn log_select_pick(&mut self) -> Result<()> {
+        let BufferMode::LogSelect { action, .. } = self.mode.clone() else { return Ok(()) };
+        let Some(LineKind::Commit { hash, .. }) = self.current_line().map(|l| l.kind.clone()) else {
+            return Ok(());
+        };
+        let commit = self.git.rev_short(&hash);
+        self.bury_buffer();
+        match action {
+            SelectAction::Rebase { cmd, args } => self.rebase_commit(&cmd, &commit, &args),
+            SelectAction::RebaseSubset { newbase, args } => {
+                let res = self.git.rebase_subset(&newbase, &format!("{commit}^"), &args);
+                self.after_rebase(res);
+                Ok(())
+            }
+            SelectAction::RebaseAutosquash { args } => self.rebase_autosquash(&commit, &args),
+            SelectAction::CommitSquash { option, args, edit, rebase } => {
+                self.commit_squash(&option, &commit, &args, edit, rebase)
+            }
+        }
+    }
+
+    /// magit-rebase-interactive-1 for the interactive rebase CMD of COMMIT
+    /// and the commits above it (magit-rebase-remove-commit passes NOASSERT).
+    fn rebase_commit(&mut self, cmd: &str, commit: &str, args: &[String]) -> Result<()> {
+        if cmd != "rebase-remove-commit" && !self.rebase_assert(commit, cmd != "rebase-reword-commit", args)? {
+            return Ok(());
+        }
+        let res = match cmd {
+            "rebase-interactive" => {
+                self.with_terminal(|g| g.rebase_interactive(commit, args, Editor::User, Editor::User))
+            }
+            "rebase-edit-commit" => self.git.rebase_edit_commit(commit, args),
+            "rebase-reword-commit" => self.with_terminal(|g| g.rebase_reword_commit(commit, args, Editor::User)),
+            _ => self.git.rebase_remove_commit(commit, args),
+        };
+        self.after_rebase(res);
+        Ok(())
+    }
+
+    /// magit-rebase-autosquash after BASE (exact, no assertions).
+    fn rebase_autosquash(&mut self, base: &str, args: &[String]) -> Result<()> {
+        if !self.git.is_ancestor(base, "HEAD") {
+            self.set_msg(&format!("{base} isn't an ancestor of HEAD"));
+            return Ok(());
+        }
+        let res = self.git.rebase_autosquash_with(base, args);
+        self.after_rebase(res);
+        Ok(())
+    }
+
+    /// magit-commit-assert: the arguments to commit with, None if there is
+    /// nothing to commit (or the in-progress rebase was continued instead).
+    /// NOPATCH: no changes are needed; not STRICT: amending arguments make
+    /// a commit without changes possible.
+    fn commit_assert(&mut self, args: &[String], nopatch: bool, strict: bool) -> Result<Option<Vec<String>>> {
+        let unstaged = !self.git.unstaged_files().is_empty();
+        let amending = ["--amend", "--allow-empty", "--reset-author", "--signoff"]
+            .iter()
+            .any(|a| args.iter().any(|x| x == a))
+            || args.iter().any(|x| x.starts_with("--author=") || x.starts_with("--date="));
+        if nopatch
+            || self.git.anything_staged()
+            || (unstaged && args.iter().any(|a| a == "--all"))
+            || (!strict && amending)
+        {
+            return Ok(Some(args.to_vec()));
+        }
+        if self.git.rebase_in_progress()
+            && !unstaged
+            && self.yes_no("Nothing staged.  Continue in-progress rebase?")?
+        {
+            let res = self.git.rebase_continue();
+            self.after_rebase(res);
+            return Ok(None);
+        }
+        if self.git.gitdir.join("MERGE_MSG").exists() {
+            if !self.git.unmerged_files().is_empty() {
+                self.set_msg("Unresolved conflicts");
+                return Ok(None);
+            }
+            if unstaged && !self.yes_no("Proceed with merge despite unstaged changes?")? {
+                self.set_msg("Abort");
+                return Ok(None);
+            }
+            return Ok(Some(args.to_vec()));
+        }
+        if !unstaged {
+            self.set_msg("Nothing staged (or unstaged)");
+            return Ok(None);
+        }
+        // magit-commit-ask-to-stage
+        if self.yes_no("Nothing staged.  Commit all uncommitted changes?")? {
+            let mut a = vec!["--all".to_string()];
+            a.extend(args.iter().cloned());
+            return Ok(Some(a));
+        }
+        Ok(None)
+    }
+
+    /// magit-commit-squash-internal once COMMIT is confirmed: create the
+    /// squash commit (OPTION followed by COMMIT), then with REBASE squash
+    /// it into COMMIT right away.
+    fn commit_squash(&mut self, option: &str, commit: &str, args: &[String], edit: bool, rebase: bool) -> Result<()> {
+        if self.git.is_ancestor(commit, "HEAD") && !self.rebase_assert(commit, true, args)? {
+            return Ok(());
+        }
+        let mut a = vec![if edit { "--edit" } else { "--no-edit" }.to_string(), format!("{option}{commit}")];
+        if rebase {
+            a.push("--no-gpg-sign".into());
+            a.extend(args.iter().filter(|x| !x.starts_with("--gpg-sign=")).cloned());
+        } else {
+            a.extend(args.iter().cloned());
+        }
+        let res = if edit {
+            self.with_terminal(|g| g.commit_with_editor(&a, Editor::User))
+        } else {
+            self.git.commit(None, &a)
+        };
+        if let Err(e) = res {
+            self.set_msg(&format!("{e}"));
+            self.refresh();
+            return Ok(());
+        }
+        if !rebase {
+            self.refresh();
+            return Ok(());
+        }
+        // magit-commit-amend-assert, then magit-rebase-interactive-1 with
+        // the autosquash arguments, no editor and no assertions
+        if !self.amend_assert(commit)? {
+            self.refresh();
+            return Ok(());
+        }
+        let ra = ["--autosquash", "--autostash", "--keep-empty"].map(String::from);
+        let res = self.git.rebase_interactive(commit, &ra, Editor::Accept, Editor::Accept);
+        self.after_rebase(res);
+        Ok(())
+    }
+
+    /// magit-commit-amend-assert: confirm modifying a published COMMIT.
+    fn amend_assert(&mut self, commit: &str) -> Result<bool> {
+        let published: Vec<&str> = PUBLISHED_BRANCHES
+            .iter()
+            .copied()
+            .filter(|b| self.git.rev_verify(b) && self.git.is_ancestor(commit, b))
+            .collect();
+        if published.is_empty() {
+            return Ok(true);
+        }
+        let ok = self.yes_no(&format!(
+            "This commit has already been published to {}.\nDo you really want to modify it?",
+            published.join(", ")
+        ))?;
+        if !ok {
+            self.set_msg("Abort");
+        }
+        Ok(ok)
     }
 
     /// `j` in log buffers (magit-log-move-to-revision).
@@ -3141,7 +3412,7 @@ impl App {
         let (old, new) = match (&self.mode, self.diff_type(group)) {
             (BufferMode::Revision { rev, .. }, _) => (abbrev(&format!("{rev}^")), abbrev_if_oid(&self.git, rev)),
             // a diff inside a log: its group is the commit
-            (BufferMode::Log { .. } | BufferMode::Reflog { .. }, _) => {
+            (BufferMode::Log { .. } | BufferMode::LogSelect { .. } | BufferMode::Reflog { .. }, _) => {
                 (abbrev(&format!("{group}^")), abbrev_if_oid(&self.git, group))
             }
             (BufferMode::Stash { stash }, _) => {
@@ -3851,6 +4122,7 @@ impl App {
                     BufferMode::Stash { stash } => (Some(format!("{stash}^..{stash}")), None, Vec::new()),
                     BufferMode::Status
                     | BufferMode::Log { .. }
+                    | BufferMode::LogSelect { .. }
                     | BufferMode::Reflog { .. }
                     | BufferMode::Stashes { .. }
                     | BufferMode::Cherry { .. } => {
@@ -3953,46 +4225,30 @@ impl App {
             "cherry-harvest" | "cherry-donate" | "cherry-spinout" | "cherry-spinoff" => {
                 self.cherry_move_cmd(cmd, args)?
             }
+            // the commit at point, else one selected from the log
+            // (magit-rebase-interactive-1)
             "rebase-interactive" | "rebase-edit-commit" | "rebase-reword-commit" | "rebase-remove-commit" => {
-                let prompt = match cmd {
-                    "rebase-interactive" => "Rebase this commit and all commits above it",
-                    "rebase-edit-commit" => "Edit commit",
-                    "rebase-reword-commit" => "Reword commit",
-                    _ => "Remove commit",
-                };
-                let Some(commit) = self.pick_recent_commit(prompt)? else {
-                    return Ok(());
-                };
-                // magit-rebase-remove-commit passes NOASSERT
-                if cmd != "rebase-remove-commit"
-                    && !self.rebase_assert(&commit, cmd != "rebase-reword-commit", args)?
-                {
-                    return Ok(());
+                match self.commit_at_point() {
+                    Some(commit) => self.rebase_commit(cmd, &commit, args)?,
+                    None => {
+                        let msg = match cmd {
+                            "rebase-interactive" => "Type %p on a commit to rebase it and all commits above it,",
+                            "rebase-edit-commit" => "Type %p on a commit to edit it,",
+                            "rebase-reword-commit" => "Type %p on a commit to reword its message,",
+                            _ => "Type %p on a commit to remove it,",
+                        };
+                        let action = SelectAction::Rebase { cmd: cmd.to_string(), args: args.to_vec() };
+                        self.log_select(action, Some(msg), None);
+                    }
                 }
-                let res = match cmd {
-                    "rebase-interactive" => {
-                        self.with_terminal(|g| g.rebase_interactive(&commit, args, Editor::User, Editor::User))
-                    }
-                    "rebase-edit-commit" => self.git.rebase_edit_commit(&commit, args),
-                    "rebase-reword-commit" => {
-                        self.with_terminal(|g| g.rebase_reword_commit(&commit, args, Editor::User))
-                    }
-                    _ => self.git.rebase_remove_commit(&commit, args),
-                };
-                self.after_rebase(res);
             }
             "rebase-subset" => {
                 let default = self.git.upstream_shortname();
                 let Some(newbase) = self.read_line_prompt("Rebase subset onto", default.as_deref())? else {
                     return Ok(());
                 };
-                let Some(start) =
-                    self.pick_recent_commit(&format!("Rebase this commit and the commits above it onto {newbase}"))?
-                else {
-                    return Ok(());
-                };
-                let res = self.git.rebase_subset(&newbase, &format!("{start}^"), args);
-                self.after_rebase(res);
+                let msg = format!("Type %p on a commit to rebase it and commits above it onto {newbase},");
+                self.log_select(SelectAction::RebaseSubset { newbase, args: args.to_vec() }, Some(&msg), None);
             }
             "rebase-edit-todo" => {
                 let res = self.with_terminal(|g| g.rebase_edit_todo(Editor::User));

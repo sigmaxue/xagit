@@ -137,6 +137,14 @@ impl Git {
         self.git_interactive(&strs)
     }
 
+    /// `git commit ARGS` with the message written in MESSAGE
+    /// (magit-run-git-with-editor).
+    pub fn commit_with_editor(&self, args: &[String], message: Editor) -> Result<()> {
+        let mut full: Vec<&str> = vec!["commit"];
+        full.extend(args.iter().map(String::as_str));
+        self.git_with_editors(Editor::User, message, &full)
+    }
+
     /// magit-commit-extend ("c e"): `git commit --amend --no-edit <args>`
     pub fn commit_extend(&self, args: &[String]) -> Result<()> {
         let mut full: Vec<String> = vec!["commit".into(), "--amend".into(), "--no-edit".into()];
