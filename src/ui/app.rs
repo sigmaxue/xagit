@@ -57,6 +57,9 @@ pub struct App {
     log_select_args: Vec<String>,
     /// buffers below the one shown (the status buffer under a diff buffer)
     buried: Vec<SavedBuffer>,
+    /// buffers buried with `q`: not below any other, but still around
+    /// (at the end of the buffer list, the last buried last)
+    background: Vec<SavedBuffer>,
     /// the arguments of the `d` transient while one of its suffixes runs
     /// (magit-diff-arguments when transient-current-command is magit-diff)
     transient_diff_args: Option<Vec<String>>,
@@ -396,6 +399,7 @@ impl App {
             status_log_args: status_log_args(),
             log_select_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             buried: Vec::new(),
+            background: Vec::new(),
             transient_diff_args: None,
             transient_log_args: None,
             cc_prefix: false,
@@ -540,18 +544,23 @@ impl App {
     /// buffer of that mode (or burying the buffer shown).
     fn setup_buffer(&mut self, mode: BufferMode, args: Vec<String>) {
         self.view_text = None;
-        let same = self.mode == mode;
+        let mut same = self.mode == mode;
         if !self.mode.same_kind(&mode) {
-            let saved = SavedBuffer {
-                mode: std::mem::replace(&mut self.mode, BufferMode::Status),
-                args: std::mem::take(&mut self.buf_args),
-                buf: std::mem::take(&mut self.buf),
-                vis: std::mem::take(&mut self.vis),
-                cursor: self.cursor,
-                scroll: self.scroll,
-            };
+            let saved = self.take_current();
             self.buried.retain(|b| !b.mode.same_kind(&mode));
             self.buried.push(saved);
+            // magit-mode-get-buffer: a buried buffer of MODE is reused,
+            // with its sections' visibility and point
+            if let Some(i) = self.background.iter().position(|b| b.mode == mode) {
+                let b = self.background.remove(i);
+                self.buf = b.buf;
+                self.vis = b.vis;
+                self.lines = self.buf.visible(&self.vis);
+                self.cursor = b.cursor.min(self.lines.len().saturating_sub(1));
+                self.scroll = b.scroll;
+                same = true;
+            }
+            self.background.retain(|b| !b.mode.same_kind(&mode));
         } else if !same {
             self.vis.clear();
         }
@@ -566,22 +575,44 @@ impl App {
         self.refresh();
     }
 
+    /// The buffer shown, taken out (its mode left as Status).
+    fn take_current(&mut self) -> SavedBuffer {
+        SavedBuffer {
+            mode: std::mem::replace(&mut self.mode, BufferMode::Status),
+            args: std::mem::take(&mut self.buf_args),
+            buf: std::mem::take(&mut self.buf),
+            vis: std::mem::take(&mut self.vis),
+            cursor: self.cursor,
+            scroll: self.scroll,
+        }
+    }
+
     /// magit-mode-bury-buffer (q): with two prefix arguments kill all
-    /// Magit buffers of the repository (and so quit), else bury (with a
-    /// prefix argument kill) the buffer shown.
+    /// Magit buffers of the repository (and so quit), with one kill the
+    /// buffer shown, else bury it (magit-mode-quit-window): the buffer
+    /// below is shown and the buried one stays around (J, or setting up
+    /// a buffer of its mode, shows it again).
     fn mode_bury_buffer(&mut self) {
         if self.prefix_numeric() >= 16 {
             self.view_text = None;
             self.buried.clear();
+            self.background.clear();
             self.quit = true;
             return;
         }
-        self.bury_buffer();
+        if self.prefix_arg.is_some() || self.view_text.is_some() || self.buried.is_empty() {
+            self.kill_buffer();
+            return;
+        }
+        let current = self.take_current();
+        self.kill_buffer();
+        self.background.retain(|b| !b.mode.same_kind(&current.mode));
+        self.background.push(current);
     }
 
-    /// Leave the text view, else show the buffer below (refreshed), else
-    /// quit.
-    fn bury_buffer(&mut self) {
+    /// Leave the text view, else kill the buffer shown and show the
+    /// buffer below (refreshed), else quit.
+    fn kill_buffer(&mut self) {
         if self.view_text.take().is_some() {
             self.set_msg("");
             return;
@@ -1010,7 +1041,7 @@ impl App {
             match (key.ctrl, key.code.as_str()) {
                 (true, "n") if self.mode.is_log() => self.log_move_to_parent(),
                 (true, "c") if select => return self.log_select_pick(),
-                (true, "k") if select => self.bury_buffer(),
+                (true, "k") if select => self.kill_buffer(),
                 // magit-blame-mode-map
                 (true, "q") if blaming => self.blame_quit(),
                 // the global binding of magit-file-dispatch
@@ -1033,7 +1064,7 @@ impl App {
             match key.code.as_str() {
                 "." | "e" => return self.log_select_pick(),
                 "q" => {
-                    self.bury_buffer();
+                    self.kill_buffer();
                     return Ok(());
                 }
                 _ => {}
@@ -1858,23 +1889,7 @@ impl App {
                     }
                 }
             }
-            // magit-branch-delete: with a prefix argument force, else
-            // confirm deleting an unmerged branch
-            "branch-delete" => {
-                let mut force = self.prefix_arg.is_some();
-                let bs = g!().branches();
-                let prompt = if force { "Force delete branch" } else { "Delete branch" };
-                if let Some(b) = self.pick(prompt, &bs, None)?.cloned() {
-                    if !force && !self.branch_merged(&b) {
-                        if !self.confirm(&format!("Delete unmerged branch {b}"))? {
-                            return Ok(());
-                        }
-                        force = true;
-                    }
-                    let res = g!().git_interactive(&["branch", if force { "-D" } else { "-d" }, &b]);
-                    self.done(&format!("deleted {b}"), res.map(|()| String::new()));
-                }
-            }
+            "branch-delete" => self.branch_delete()?,
 
             // -------- remote menu
             "remote-add" => {
@@ -2931,7 +2946,7 @@ impl App {
             return Ok(());
         };
         let commit = self.git.rev_short(&hash);
-        self.bury_buffer();
+        self.kill_buffer();
         match action {
             SelectAction::Rebase { cmd, args } => self.rebase_commit(&cmd, &commit, &args),
             SelectAction::RebaseSubset { newbase, args } => {
@@ -4291,7 +4306,7 @@ impl App {
             return;
         };
         if b.recursive {
-            self.bury_buffer();
+            self.kill_buffer();
             return;
         }
         let (line, _) = self.file_line_at_point().unwrap_or((1, None));
@@ -4727,15 +4742,193 @@ impl App {
     /// magit-branch-merged-p: BRANCH is merged into the current branch
     /// (never when HEAD is detached) and, if it has one, its upstream.
     fn branch_merged(&self, branch: &str) -> bool {
-        let upstream = self
-            .git
-            .git_string(&["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
-            .ok()
-            .filter(|u| !u.is_empty());
-        if upstream.is_some_and(|u| !self.git.is_ancestor(branch, &u)) {
+        match self.git.current_branch() {
+            Some(c) => self.branch_merged_into(branch, Some(&c)),
+            None => false,
+        }
+    }
+
+    /// magit-branch-merged-p with TARGET; None: into any other local
+    /// branch.
+    fn branch_merged_into(&self, branch: &str, target: Option<&str>) -> bool {
+        if self.upstream_branch(branch).is_some_and(|u| !self.git.is_ancestor(branch, &u)) {
             return false;
         }
-        self.git.current_branch().is_some_and(|c| self.git.is_ancestor(branch, &c))
+        match target {
+            Some(t) => self.git.is_ancestor(branch, t),
+            None => self
+                .git
+                .git_lines(&["for-each-ref", "--contains", branch, "--format=%(refname:short)", "refs/heads"])
+                .iter()
+                .any(|b| b != branch),
+        }
+    }
+
+    /// magit-get-upstream-branch
+    fn upstream_branch(&self, branch: &str) -> Option<String> {
+        self.git
+            .git_string(&["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+            .ok()
+            .filter(|u| !u.is_empty())
+    }
+
+    /// magit-get-indirect-upstream-branch (forced): the upstream of
+    /// BRANCH if it is the remote branch of the same name and can be
+    /// fast-forwarded to BRANCH.
+    fn indirect_upstream_branch(&self, branch: &str) -> Option<String> {
+        let remote = self.git.git_string(&["config", &format!("branch.{branch}.remote")]).ok()?;
+        if remote.is_empty() || remote == "." {
+            return None;
+        }
+        let upstream = self.upstream_branch(branch)?;
+        (upstream.strip_prefix(&format!("{remote}/")) == Some(branch) && self.git.is_ancestor(&upstream, branch))
+            .then_some(upstream)
+    }
+
+    /// The default of magit-read-branch-prefer-other: of the branches at
+    /// the commit at point the only one, else one that isn't current,
+    /// else the previous branch.
+    fn branch_prefer_other_default(&self) -> Option<String> {
+        let current = self.git.current_branch();
+        let atrev: Vec<String> = match self.commit_at_point() {
+            Some(c) => self.git.git_lines(&[
+                "for-each-ref",
+                "--points-at",
+                &c,
+                "--format=%(refname:short)",
+                "refs/heads",
+                "refs/remotes",
+            ]),
+            None => Vec::new(),
+        };
+        let previous = self
+            .git
+            .git_string(&["rev-parse", "--abbrev-ref", "@{-1}"])
+            .ok()
+            .filter(|b| !b.is_empty() && b != "HEAD");
+        (atrev.len() == 1)
+            .then(|| atrev[0].clone())
+            .or_else(|| atrev.iter().find(|b| Some(*b) != current.as_ref()).cloned())
+            .or(previous)
+            .or_else(|| atrev.first().cloned())
+    }
+
+    /// magit-branch-delete: delete a local or remote-tracking branch.
+    /// Deleting an unmerged branch has to be confirmed, unless forced by
+    /// a prefix argument. Deleting a remote-tracking branch offers to
+    /// delete the branch on the remote too; deleting the current branch
+    /// to detach HEAD or to check out another branch first.
+    fn branch_delete(&mut self) -> Result<()> {
+        let mut force = self.prefix_arg.is_some();
+        // (equal force '(4)): no confirmation for the current branch
+        let forced = self.prefix_arg == Some(PrefixArg::Raw(4));
+        let mut confirmed = false;
+        let mut choices = self.git.branches();
+        choices.extend(self.git.remote_branches());
+        let default = self.branch_prefer_other_default();
+        let prompt = if force { "Force delete branch" } else { "Delete branch" };
+        let Some(branch) = self.pick(prompt, &choices, default.as_deref())?.cloned() else {
+            return Ok(());
+        };
+        if !force && !self.branch_merged(&branch) {
+            if !self.confirm(&format!("Delete unmerged branch {branch}"))? {
+                return Ok(());
+            }
+            force = true;
+            confirmed = true;
+        }
+        let Some(full) = self
+            .git
+            .git_string(&["rev-parse", "--verify", "--symbolic-full-name", &branch])
+            .ok()
+            .filter(|f| !f.is_empty())
+        else {
+            self.set_msg(&format!("{branch} is ambiguous; please cleanup using git directly"));
+            return Ok(());
+        };
+        if full.starts_with("refs/remotes/") {
+            return self.delete_remote_tracking_branch(&full, force);
+        }
+        if self.git.current_branch().as_deref() == Some(branch.as_str()) {
+            let mut target = self.indirect_upstream_branch(&branch);
+            if target.is_none() || target.as_deref() == Some(branch.as_str()) {
+                target = self.git.main_branch();
+            }
+            let target = target.filter(|t| *t != branch);
+            let prompt = match &target {
+                Some(t) => format!("Branch {branch} is checked out.  [d]etach HEAD & delete, [c]heckout {t} & delete, [a]bort"),
+                None => format!("Branch {branch} is checked out.  [d]etach HEAD & delete, [a]bort"),
+            };
+            let answer = self.read_line_prompt(&prompt, None)?.unwrap_or_default();
+            let checkout = match (answer.chars().next(), &target) {
+                (Some('d'), _) => None,
+                (Some('c'), Some(t)) => Some(t.clone()),
+                _ => {
+                    self.set_msg("Abort");
+                    return Ok(());
+                }
+            };
+            if !forced
+                && !confirmed
+                && !self.branch_merged_into(&branch, checkout.as_deref())
+                && !self.confirm(&format!("Delete unmerged branch {branch}"))?
+            {
+                return Ok(());
+            }
+            match &checkout {
+                Some(t) => self.git.git_interactive(&["checkout", "-q", t])?,
+                None => self.git.git_interactive(&["checkout", "-q", "--detach"])?,
+            }
+            force = true;
+        }
+        // magit-branch-unset-pushRemote
+        let _ = self.git.git_ok(&["config", "--unset", &format!("branch.{branch}.pushRemote")]);
+        let res = self.git.git_interactive(&["branch", if force { "-D" } else { "-d" }, &branch]);
+        self.done(&format!("deleted {branch}"), res.map(|()| String::new()));
+        Ok(())
+    }
+
+    /// magit-branch-delete of the remote-tracking branch FULL: also on
+    /// the remote if confirmed (with FORCE without verifying), else just
+    /// the local ref.
+    fn delete_remote_tracking_branch(&mut self, full: &str, force: bool) -> Result<()> {
+        let short = &full["refs/remotes/".len()..];
+        let Some(remote) = self.git.remotes().into_iter().find(|r| short.starts_with(&format!("{r}/"))) else {
+            self.set_msg(&format!("Invalid branch name {short}"));
+            return Ok(());
+        };
+        let name = &short[remote.len() + 1..];
+        let was = format!("Delete {full} (was {})", self.git.rev_short(full));
+        if !self.yes_no(&format!("Deleting local {full}.  Also delete on {remote}?"))? {
+            let res = self.git.git_interactive(&["update-ref", "-d", full]);
+            self.done(&was, res.map(|()| String::new()));
+            return Ok(());
+        }
+        let refspec = format!("refs/heads/{name}");
+        let mut a = vec!["push", "--delete"];
+        if force {
+            a.push("--no-verify");
+        }
+        a.extend([remote.as_str(), refspec.as_str()]);
+        if let Err(e) = self.git.git_interactive(&a) {
+            // magit-delete-remote-branch-sentinel: the branch no longer
+            // exists on the remote; delete just the remote-tracking ref
+            let on_remote = self
+                .git
+                .git_lines_pub(&["ls-remote", "--heads", &remote])
+                .iter()
+                .any(|l| l.split('\t').nth(1) == Some(refspec.as_str()));
+            if on_remote || !self.git.git_ok(&["show-ref", "--verify", "--quiet", full]) {
+                self.set_msg(&format!("{e}"));
+                return Ok(());
+            }
+            let res = self.git.git_interactive(&["update-ref", "-d", full]);
+            let msg = "Some remote branches no longer exist.  Deleting just the local tracking refs instead...";
+            self.done(msg, res.map(|()| String::new()));
+            return Ok(());
+        }
+        self.done(&was, Ok(String::new()));
+        Ok(())
     }
 
     /// magit-which-function: the name of the definition around point.
@@ -4831,22 +5024,29 @@ impl App {
 
     /// magit-display-repository-buffer (J, and G of magit-file-dispatch)
     fn display_repository_buffer(&mut self) -> Result<()> {
-        let mut names: Vec<String> = self.buried.iter().rev().map(|b| self.buffer_name_of(&b.mode)).collect();
-        names.insert(0, self.buffer_name_of(&self.mode));
+        // magit-mode-get-buffers in buffer-list order: the buffer shown,
+        // those below it, then the buried ones
+        let mut names = vec![self.buffer_name_of(&self.mode)];
+        names.extend(self.buried.iter().rev().map(|b| self.buffer_name_of(&b.mode)));
+        names.extend(self.background.iter().map(|b| self.buffer_name_of(&b.mode)));
         let status = self.buffer_name_of(&BufferMode::Status);
         let default = names.contains(&status).then_some(status);
         let Some(name) = self.read_choice("Display magit buffer", &names, default.as_deref())? else {
             return Ok(());
         };
         if let Some(i) = self.buried.iter().position(|b| self.buffer_name_of(&b.mode) == name) {
-            self.raise_buried(i);
+            let b = self.buried.remove(i);
+            self.raise_buffer(b);
+        } else if let Some(i) = self.background.iter().position(|b| self.buffer_name_of(&b.mode) == name) {
+            let b = self.background.remove(i);
+            self.raise_buffer(b);
         }
         Ok(())
     }
 
-    /// Show the buried buffer I, burying the buffer shown.
-    fn raise_buried(&mut self, i: usize) {
-        let b = self.buried.remove(i);
+    /// Show the buffer B (taken from below or from the buried ones) over
+    /// the buffer shown.
+    fn raise_buffer(&mut self, b: SavedBuffer) {
         let saved = SavedBuffer {
             mode: std::mem::replace(&mut self.mode, b.mode),
             args: std::mem::replace(&mut self.buf_args, b.args),
@@ -4869,7 +5069,11 @@ impl App {
             self.view_text = None;
             self.refresh();
         } else if let Some(i) = self.buried.iter().position(|b| b.mode.same_kind(&mode)) {
-            self.raise_buried(i);
+            let b = self.buried.remove(i);
+            self.raise_buffer(b);
+        } else if let Some(i) = self.background.iter().position(|b| b.mode.same_kind(&mode)) {
+            let b = self.background.remove(i);
+            self.raise_buffer(b);
         } else {
             self.setup_buffer(mode, Vec::new());
         }
@@ -4942,7 +5146,7 @@ impl App {
             }
             "B" => self.open_menu("blame-menu"),
             "q" if blaming => self.blame_quit(),
-            "q" => self.bury_buffer(),
+            "q" => self.kill_buffer(),
             "n" if blaming => self.blame_goto_chunk(true, false),
             "p" if blaming => self.blame_goto_chunk(false, false),
             "N" if blaming => self.blame_goto_chunk(true, true),
