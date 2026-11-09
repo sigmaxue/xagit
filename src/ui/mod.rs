@@ -4,6 +4,8 @@ pub mod diffbuf;
 pub mod keys;
 pub mod logbuf;
 pub mod minibuf;
+pub mod options;
 pub mod refs;
+pub mod regexp;
 pub mod transient;
 pub mod view;

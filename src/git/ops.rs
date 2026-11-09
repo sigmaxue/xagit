@@ -1430,7 +1430,7 @@ impl Git {
 
     // ---- cherry-pick / revert sequencer (magit-sequencer-*)
 
-    fn sequencer_command(&self) -> Result<&'static str> {
+    pub fn sequencer_command(&self) -> Result<&'static str> {
         if self.revert_in_progress() {
             return Ok("revert");
         }

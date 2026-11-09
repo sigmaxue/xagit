@@ -12,6 +12,7 @@ use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
 };
 use super::minibuf::{add_to_history, Completion, LineEditor, Step};
+use super::options::Options;
 use super::refs::{build_refs, deferred_ref, CommitCount, RefKind};
 use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
@@ -111,6 +112,8 @@ pub struct App {
     infix_history: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
     /// transient-history-file
     history_file: Option<std::path::PathBuf>,
+    /// the user options (magit-no-confirm and friends)
+    options: Options,
     /// the prompts answered so far (tests)
     prompts: std::cell::RefCell<Vec<String>>,
     /// the TUI owns the terminal (`run`): it is handed over to editors
@@ -474,6 +477,7 @@ impl App {
             screen: std::cell::RefCell::new(Vec::new()),
             infix_history: std::cell::RefCell::new(BTreeMap::new()),
             history_file: None,
+            options: Options::default(),
             prompts: std::cell::RefCell::new(Vec::new()),
             in_terminal: false,
             set_values: HashMap::new(),
@@ -573,7 +577,8 @@ impl App {
             BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream, &margin),
             BufferMode::File { rev, file, blame } => build_file(&self.git, rev, file, blame.as_ref()),
             BufferMode::Refs { upstream } => {
-                build_refs(&self.git, upstream, &self.buf_args, self.refs_counts, &self.vis, &margin)
+                let show = |r: &str| self.options.show_ref(r);
+                build_refs(&self.git, upstream, &self.buf_args, self.refs_counts, &self.vis, &margin, &show)
             }
         }
     }
@@ -1625,6 +1630,23 @@ impl App {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Use the user OPTIONS.
+    pub fn set_options(&mut self, options: Options) {
+        self.options = options;
+        self.refresh();
+    }
+
+    /// Read the user options from FILE (if it exists), reporting the
+    /// lines in error.
+    pub fn load_options(&mut self, file: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(file) else { return };
+        let (options, errors) = Options::parse(&text);
+        self.set_options(options);
+        if !errors.is_empty() {
+            self.set_msg(&format!("{}:{}", file.display(), errors.join("; ")));
+        }
+    }
+
     /// transient-values-file: read the saved values, including the default
     /// arguments of the diff and log modes, and save to FILE from now on.
     pub fn load_values(&mut self, file: std::path::PathBuf) {
@@ -2509,7 +2531,15 @@ impl App {
                 }
                 self.refresh();
             }
+            // magit-merge-abort
             "merge-abort" => {
+                if !g!().merge_in_progress() {
+                    self.set_msg("No merge in progress");
+                    return Ok(());
+                }
+                if !self.confirm("abort-merge", "Abort merge")? {
+                    return Ok(());
+                }
                 g!().merge_abort()?;
                 self.set_msg("merge aborted");
                 self.refresh();
@@ -2557,7 +2587,11 @@ impl App {
                 self.set_msg("rebase skipped");
                 self.refresh();
             }
+            // magit-rebase-abort
             "rebase-abort" => {
+                if !self.confirm("abort-rebase", "Abort this rebase")? {
+                    return Ok(());
+                }
                 g!().rebase_abort()?;
                 self.set_msg("rebase aborted");
                 self.refresh();
@@ -2620,7 +2654,7 @@ impl App {
             "tag-delete" => {
                 let tags = match self.region_refs(&[RefKind::Tag], false) {
                     Some(tags) => {
-                        if !self.confirm(&format!("Delete {} tags", tags.len()))? {
+                        if !self.confirm("t", &format!("Delete {} tags", tags.len()))? {
                             return Ok(());
                         }
                         tags
@@ -2664,6 +2698,20 @@ impl App {
             }
             "sequencer-continue" | "sequencer-skip" | "sequencer-abort" => {
                 let action = cmd.trim_start_matches("sequencer-");
+                // magit-sequencer-abort
+                if action == "abort" {
+                    let (a, p) = match g!().sequencer_command() {
+                        Ok("revert") => ("abort-revert", "Really abort revert"),
+                        Ok(_) => ("abort-cherry-pick", "Really abort cherry-pick"),
+                        Err(_) => {
+                            self.set_msg("No cherry-pick or revert in progress");
+                            return Ok(());
+                        }
+                    };
+                    if !self.confirm(a, p)? {
+                        return Ok(());
+                    }
+                }
                 match g!().sequencer(action) {
                     Ok(()) => self.set_msg(&format!("sequencer {action}")),
                     Err(e) => self.set_msg(&format!("{e}")),
@@ -2745,7 +2793,7 @@ impl App {
                         "stash-apply" => g!().stash_apply(s, true)?,
                         "stash-pop" => g!().stash_pop(s, true)?,
                         "stash-drop" => {
-                            if self.yes_no(&format!("Drop {s}?"))? {
+                            if self.confirm_noabort("drop-stashes", &format!("Drop {s}"))? {
                                 g!().stash_drop(s)?;
                             } else {
                                 return Ok(());
@@ -3557,14 +3605,10 @@ impl App {
         if published.is_empty() {
             return Ok(true);
         }
-        let ok = self.yes_no(&format!(
-            "This commit has already been published to {}.\nDo you really want to modify it?",
-            published.join(", ")
-        ))?;
-        if !ok {
-            self.set_msg("Abort");
-        }
-        Ok(ok)
+        self.confirm(
+            "amend-published",
+            &format!("This commit has already been published to {}.\nDo you really want to modify it", published.join(", ")),
+        )
     }
 
     /// `j` in log buffers (magit-log-move-to-revision).
@@ -4115,21 +4159,30 @@ impl App {
         }
     }
 
-    /// magit-confirm: "PROMPT? (y/n)"; a "no" leaves "Abort" in the echo area.
-    fn confirm(&mut self, prompt: &str) -> Result<bool> {
-        let ok = self.yes_no(&format!("{prompt}?"))?;
+    /// magit-confirm: ask PROMPT (with "?") unless ACTION is in
+    /// magit-no-confirm ("t": always ask); declining shows "Abort".
+    fn confirm(&mut self, action: &str, prompt: &str) -> Result<bool> {
+        let ok = self.confirm_noabort(action, prompt)?;
         if !ok {
             self.set_msg("Abort");
         }
         Ok(ok)
     }
 
+    /// magit-confirm with NOABORT: declining isn't an error.
+    fn confirm_noabort(&mut self, action: &str, prompt: &str) -> Result<bool> {
+        if self.options.no_confirm(action) {
+            return Ok(true);
+        }
+        self.yes_no(&format!("{prompt}?"))
+    }
+
     /// magit-confirm-files: `PROMPT "file"` or the file list and `PROMPT N files`.
-    fn confirm_files(&mut self, prompt: &str, files: &[String]) -> Result<bool> {
+    fn confirm_files(&mut self, action: &str, prompt: &str, files: &[String]) -> Result<bool> {
         match files {
             [] => Ok(true),
-            [f] => self.confirm(&format!("{prompt} \"{f}\"")),
-            fs => self.confirm(&format!("{}\n\n{prompt} {} files", fs.join("\n"), fs.len())),
+            [f] => self.confirm(action, &format!("{prompt} \"{f}\"")),
+            fs => self.confirm(action, &format!("{}\n\n{prompt} {} files", fs.join("\n"), fs.len())),
         }
     }
 
@@ -4256,7 +4309,7 @@ impl App {
     /// `git add --all .` (also new files), confirming when something is
     /// staged already.
     fn stage_modified(&mut self) -> Result<()> {
-        if self.git.anything_staged() && !self.confirm("Stage all changes")? {
+        if self.git.anything_staged() && !self.confirm("stage-all-changes", "Stage all changes")? {
             return Ok(());
         }
         if self.prefix_arg.is_some() {
@@ -4347,7 +4400,7 @@ impl App {
             return Ok(());
         }
         let others = !self.git.unstaged_files().is_empty() || !self.git.untracked_files().is_empty();
-        if others && !self.confirm("Unstage all changes")? {
+        if others && !self.confirm("unstage-all-changes", "Unstage all changes")? {
             return Ok(());
         }
         self.git.unstage_all()?;
@@ -4361,7 +4414,7 @@ impl App {
     fn discard_cmd(&mut self) -> Result<()> {
         match self.current_line().map(|l| l.kind.clone()) {
             Some(LineKind::Stash { name, .. }) => {
-                if self.yes_no(&format!("Drop {name}?"))? {
+                if self.confirm_noabort("drop-stashes", &format!("Drop {name}"))? {
                     self.git.stash_drop(&name)?;
                     self.set_msg("stash dropped");
                     self.refresh();
@@ -4369,7 +4422,7 @@ impl App {
                 return Ok(());
             }
             Some(LineKind::SectionHeader { section, .. }) if section == "stashes" => {
-                if self.confirm("Drop all stashes in refs/stash")? {
+                if self.confirm("drop-stashes", "Drop all stashes in refs/stash")? {
                     self.git.stash_clear()?;
                     self.refresh();
                 }
@@ -4396,7 +4449,7 @@ impl App {
             _ => {}
         }
         if let Some((path, scope)) = Self::hunk_scope(&sel) {
-            if !self.confirm(&Self::hunk_prompt("Discard", &sel))? {
+            if !self.confirm("discard", &Self::hunk_prompt("Discard", &sel))? {
                 return Ok(());
             }
             let fd = self.file_diff(&group, &path)?;
@@ -4404,7 +4457,7 @@ impl App {
         } else {
             let files = self.sel_paths(&sel);
             let prompt = if typ == "untracked" { "Delete".to_string() } else { format!("Discard {typ} changes in") };
-            if !self.confirm_files(&prompt, &files)? {
+            if !self.confirm_files("discard", &prompt, &files)? {
                 return Ok(());
             }
             for f in &files {
@@ -4458,7 +4511,7 @@ impl App {
             a.push("--reject");
         }
         if let Some((path, scope)) = Self::hunk_scope(sel) {
-            if !self.confirm(&Self::hunk_prompt("Reverse", sel))? {
+            if !self.confirm("reverse", &Self::hunk_prompt("Reverse", sel))? {
                 return Ok(());
             }
             let fd = self.file_diff(&group, &path)?;
@@ -4468,7 +4521,7 @@ impl App {
                 .sel_paths(sel)
                 .into_iter()
                 .partition(|f| self.buf.diff(&group, f).is_some_and(|d| d.binary));
-            if !self.confirm_files("Reverse", &files)? {
+            if !self.confirm_files("reverse", "Reverse", &files)? {
                 return Ok(());
             }
             let fds = files.iter().map(|f| self.file_diff(&group, f)).collect::<Result<Vec<_>>>()?;
@@ -5011,7 +5064,7 @@ impl App {
                             self.set_msg("Already untracked");
                             return Ok(());
                         }
-                        if !self.confirm_files("Untrack", &files)? {
+                        if !self.confirm_files("untrack", "Untrack", &files)? {
                             return Ok(());
                         }
                         files
@@ -5080,7 +5133,7 @@ impl App {
             "file-delete" => {
                 let files = match self.region_files() {
                     Some(files) => {
-                        if !self.confirm_files("Delete", &files)? {
+                        if !self.confirm_files("delete", "Delete", &files)? {
                             return Ok(());
                         }
                         files
@@ -5478,7 +5531,7 @@ impl App {
         let mut confirmed = false;
         let mut branches = match self.region_refs(&[RefKind::Local, RefKind::Remote], true) {
             Some(bs) if bs.len() > 1 => {
-                if !self.confirm(&format!("Delete {} branches", bs.len()))? {
+                if !self.confirm("t", &format!("Delete {} branches", bs.len()))? {
                     return Ok(());
                 }
                 bs
@@ -5502,7 +5555,7 @@ impl App {
                     _ => format!("Delete {} unmerged branches", unmerged.len()),
                 };
                 // 'noabort: declining deletes the merged ones only
-                if self.confirm(&prompt)? {
+                if self.confirm_noabort("delete-unmerged-branch", &prompt)? {
                     force = true;
                     confirmed = true;
                 } else {
@@ -5575,7 +5628,7 @@ impl App {
             if !forced
                 && !confirmed
                 && !self.branch_merged_into(&branch, checkout.as_deref())
-                && !self.confirm(&format!("Delete unmerged branch {branch}"))?
+                && !self.confirm("delete-unmerged-branch", &format!("Delete unmerged branch {branch}"))?
             {
                 return Ok(());
             }
@@ -5590,6 +5643,79 @@ impl App {
         let res = self.git.git_interactive(&["branch", if force { "-D" } else { "-d" }, &branch]);
         self.done(&format!("deleted {branch}"), res.map(|()| String::new()));
         Ok(())
+    }
+
+    /// magit-visit-ref on the ref NAME of KIND in the refs buffer, as
+    /// magit-visit-ref-behavior says, else like magit-show-commit.
+    fn visit_ref(&mut self, kind: RefKind, name: &str) -> Result<()> {
+        let o = &self.options;
+        let (focus, create, any, branch) =
+            (o.visit_ref("focus-on-ref"), o.visit_ref("create-branch"), o.visit_ref("checkout-any"), o.visit_ref("checkout-branch"));
+        let behavior = !o.visit_ref_behavior.is_empty();
+        let prefix = self.prefix_arg.is_some();
+        let checkout = |app: &mut Self, args: &[&str], focus: &str| -> Result<()> {
+            let res = app.git.git_interactive(args);
+            if let BufferMode::Refs { upstream } = &mut app.mode {
+                *upstream = focus.to_string();
+            }
+            app.refresh();
+            if let Err(e) = res {
+                app.set_msg(&format!("{e}"));
+            }
+            Ok(())
+        };
+        if prefix && focus {
+            // magit-refs-setup-buffer with the ref at point
+            if let BufferMode::Refs { upstream } = &mut self.mode {
+                *upstream = name.to_string();
+            }
+            self.prefix_arg = None;
+            self.refresh();
+            return Ok(());
+        }
+        if prefix && behavior {
+            // magit-show-commit without prompting
+            self.prefix_arg = None;
+            return self.diff_view("commit");
+        }
+        if create && kind == RefKind::Remote {
+            let branch = name.split_once('/').map_or(name, |(_, b)| b).to_string();
+            if !self.git.git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
+                return checkout(self, &["checkout", "-b", &branch, name], &branch);
+            }
+            if self.git.rev_parse(&branch).ok() == self.git.rev_parse(name).ok() {
+                return checkout(self, &["checkout", &branch], &branch);
+            }
+            let prompt = format!(
+                "Branch {branch} already exists.\n  [c]heckout {branch} as-is\n  [r]reset {branch} to {name} and checkout {branch}\n  [a]bort "
+            );
+            return match self.read_char_choice(&prompt, &['c', 'r', 'a'])? {
+                Some('c') => checkout(self, &["checkout", &branch], &branch),
+                Some('r') => checkout(self, &["checkout", "-B", &branch, name], &branch),
+                _ => {
+                    self.set_msg("Abort");
+                    Ok(())
+                }
+            };
+        }
+        if any || (branch && kind == RefKind::Local) {
+            return checkout(self, &["checkout", name], name);
+        }
+        self.diff_view("commit")
+    }
+
+    /// read-char-choice: one of CHOICES (none: C-g).
+    fn read_char_choice(&mut self, prompt: &str, choices: &[char]) -> Result<Option<char>> {
+        loop {
+            let Some(ans) = self.read_line_hist(prompt, None, Hist::None, None)? else {
+                return Ok(None);
+            };
+            let mut it = ans.trim().chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) if choices.contains(&c) => return Ok(Some(c)),
+                _ => continue,
+            }
+        }
     }
 
     /// magit-branch-unset-pushRemote
@@ -5627,7 +5753,7 @@ impl App {
             return Ok(());
         };
         if refspecs.len() == 1
-            && self.yes_no(&format!("Also delete remote {remote} (no pull-request branch remains)?"))?
+            && self.confirm_noabort("delete-pr-remote", &format!("Also delete remote {remote} (no pull-request branch remains)"))?
         {
             self.git.git_interactive(&["remote", "rm", &remote])?;
         } else {
@@ -5649,10 +5775,10 @@ impl App {
         let offset = remote.len() + 1;
         let was: Vec<String> = fulls.iter().map(|f| format!("Delete {f} (was {})", self.git.rev_short(f))).collect();
         let prompt = match fulls {
-            [f] => format!("Deleting local {f}.  Also delete on {remote}?"),
-            _ => format!("Deleting {} local refs.  Also delete on {remote}?", fulls.len()),
+            [f] => format!("Deleting local {f}.  Also delete on {remote}"),
+            _ => format!("Deleting {} local refs.  Also delete on {remote}", fulls.len()),
         };
-        if !self.yes_no(&prompt)? {
+        if !self.confirm_noabort("delete-branch-on-remote", &prompt)? {
             let mut res = Ok(());
             for f in fulls {
                 res = res.and(self.git.git_interactive(&["update-ref", "-d", f]));
@@ -5977,6 +6103,7 @@ impl App {
             // revision with a prefix argument; magit-visit-ref
             // (magit-visit-ref-behavior nil) like magit-show-commit
             LineKind::Stash { .. } => self.diff_view("stash")?,
+            LineKind::Ref { kind, name } if matches!(self.mode, BufferMode::Refs { .. }) => self.visit_ref(kind, &name)?,
             LineKind::Commit { .. } | LineKind::Ref { .. } => self.diff_view("commit")?,
             _ => self.set_msg("There is no thing at point that could be visited"),
         }
@@ -6236,8 +6363,11 @@ impl App {
                 self.done(&format!("bisect {state}"), res);
             }
             "bisect-reset" => {
-                let rev = self.read_rev("Reset to revision (empty = pre-bisect HEAD)", None)?;
-                let res = self.git.bisect_reset(rev.as_deref());
+                // magit-bisect-reset
+                if !self.confirm("reset-bisect", "Reset bisect")? {
+                    return Ok(());
+                }
+                let res = self.git.bisect_reset(None);
                 self.done("bisect reset", res);
             }
             "bisect-log" => {
@@ -6353,7 +6483,7 @@ impl App {
                 let Some(path) = self.pick("Remove submodule", &paths, None)?.cloned() else {
                     return Ok(());
                 };
-                if !self.yes_no(&format!("Remove submodule {path}?"))? {
+                if !self.confirm("remove-modules", &format!("Remove submodule {path}"))? {
                     return Ok(());
                 }
                 let res = self.git.submodule_remove(&path);
@@ -6737,12 +6867,14 @@ impl App {
             .all(|b| self.git.rev_parse(b).ok().as_deref() == Some(target.as_str()));
         if !published.is_empty()
             && !(delay_edit_confirm && all_at_commit)
-            && !self.yes_no(&format!(
-                "Some of these commits have already been published to {}. Do you really want to modify them?",
-                published.join(", ")
-            ))?
+            && !self.confirm(
+                "rebase-published",
+                &format!(
+                    "Some of these commits have already been published to {}. Do you really want to modify them",
+                    published.join(", ")
+                ),
+            )?
         {
-            self.set_msg("Abort");
             return Ok(false);
         }
         if !args.iter().any(|a| a.starts_with("--rebase-merges")) {
@@ -6976,6 +7108,9 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
     let mut app = App::new(git);
     if abs.is_dir() {
         app.cwd = abs;
+    }
+    if let Some(f) = super::options::default_options_file() {
+        app.load_options(&f);
     }
     if let Some(f) = super::transient::default_values_file() {
         app.load_values(f);

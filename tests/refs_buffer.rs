@@ -313,3 +313,108 @@ fn buffer_name() {
     app.press("J").unwrap();
     assert!(matches!(app.mode(), BufferMode::Refs { .. }), "{}", app.message());
 }
+
+fn options(text: &str) -> ngit_lib::ui::options::Options {
+    let (o, e) = ngit_lib::ui::options::Options::parse(text);
+    assert!(e.is_empty(), "{e:?}");
+    o
+}
+
+#[test]
+fn filter_alist() {
+    let (_o, _td, g) = repo();
+    let mut app = refs(&g);
+    // the first matching entry decides; remote branches by their full
+    // name; the tags heading counts all tags
+    app.set_options(options(
+        "magit-refs-filter-alist ^origin/master$ t\nmagit-refs-filter-alist master nil\n\
+         magit-refs-filter-alist ^v[0-9] nil",
+    ));
+    let t = texts(&app);
+    assert_eq!(t[0], "Branches (1)");
+    assert_eq!(t[1], "  topic           topic work");
+    assert!(t[3].ends_with(") (2)"), "{}", t[3]);
+    assert_eq!(t[4..7], ["  feature         feature work", "  master          initial", ""]);
+    assert_eq!(t[7..], ["Tags (1)", ""]);
+    // the detached HEAD is always shown
+    git(&g, &["checkout", "-q", "--detach", "master"]);
+    app.set_options(options("magit-refs-filter-alist . nil"));
+    let t = texts(&app);
+    assert_eq!(t[..3], ["Branches (1)", "@ (detached)      initial", ""]);
+    assert!(t[3].ends_with("):"), "{}", t[3]);
+}
+
+#[test]
+fn visit_ref_behavior() {
+    let (_o, _td, g) = repo();
+    let mut app = refs(&g);
+    // checkout-branch: local branches are checked out and focused
+    app.set_options(options("magit-visit-ref-behavior checkout-branch"));
+    goto(&mut app, "topic           topic work");
+    app.press("RET").unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("topic"), "{}", app.message());
+    assert!(matches!(app.mode(), BufferMode::Refs { upstream } if upstream == "topic"), "{:?}", app.mode());
+    // but not tags (they are shown)
+    goto(&mut app, "v1.0            release one");
+    app.press("RET").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "v1.0"), "{:?}", app.mode());
+    app.press("q").unwrap();
+    // with a prefix argument: shown without reading the revision
+    goto(&mut app, "master          origin/master initial");
+    let n = app.prompts().len();
+    press(&mut app, &["C-u", "RET"]);
+    assert_eq!(app.prompts().len(), n);
+    assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "master"), "{:?}", app.mode());
+    app.press("q").unwrap();
+    // focus-on-ref: with a prefix argument the refs buffer is focused
+    app.set_options(options("magit-visit-ref-behavior focus-on-ref checkout-any"));
+    goto(&mut app, "master          origin/master initial");
+    press(&mut app, &["C-u", "RET"]);
+    assert!(matches!(app.mode(), BufferMode::Refs { upstream } if upstream == "master"), "{:?}", app.mode());
+    assert_eq!(g.current_branch().as_deref(), Some("topic"));
+    // checkout-any: tags too
+    goto(&mut app, "v1.0            release one");
+    app.press("RET").unwrap();
+    assert_eq!(g.current_branch(), None);
+    assert!(matches!(app.mode(), BufferMode::Refs { upstream } if upstream == "v1.0"), "{:?}", app.mode());
+    // create-branch: a local branch for a remote one
+    git(&g, &["checkout", "-q", "master"]);
+    app.set_options(options("magit-visit-ref-behavior create-branch"));
+    goto(&mut app, "feature         feature work");
+    app.press("RET").unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("feature"), "{}", app.message());
+    assert_eq!(g.git_string(&["rev-parse", "--abbrev-ref", "feature@{upstream}"]).unwrap(), "origin/feature");
+    assert!(matches!(app.mode(), BufferMode::Refs { upstream } if upstream == "feature"), "{:?}", app.mode());
+    // already exists at the same commit: checked out
+    git(&g, &["checkout", "-q", "master"]);
+    goto(&mut app, "feature         feature work");
+    let n = app.prompts().len();
+    app.press("RET").unwrap();
+    assert_eq!(app.prompts().len(), n);
+    assert_eq!(g.current_branch().as_deref(), Some("feature"));
+    // elsewhere: checkout as-is, reset or abort
+    git(&g, &["checkout", "-q", "master"]);
+    git(&g, &["branch", "-f", "feature", "topic"]);
+    let topic = g.rev_parse("topic").unwrap();
+    goto(&mut app, "feature         feature work");
+    app.script_answers(&["a"]);
+    app.press("RET").unwrap();
+    assert!(last_prompt(&app).starts_with("Branch feature already exists.\n  [c]heckout feature as-is\n"), "{}", last_prompt(&app));
+    assert_eq!(app.message(), "Abort");
+    assert_eq!(g.current_branch().as_deref(), Some("master"));
+    goto(&mut app, "feature         feature work");
+    app.script_answers(&["c"]);
+    app.press("RET").unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("feature"));
+    assert_eq!(g.rev_parse("HEAD").unwrap(), topic);
+    git(&g, &["checkout", "-q", "master"]);
+    goto(&mut app, "feature         feature work");
+    app.script_answers(&["x", "r"]);
+    app.press("RET").unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("feature"));
+    assert_eq!(g.rev_parse("HEAD").unwrap(), g.rev_parse("origin/feature").unwrap());
+    // local branches and tags are shown
+    goto(&mut app, "v1.0            release one");
+    app.press("RET").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "v1.0"), "{:?}", app.mode());
+}

@@ -70,9 +70,14 @@ struct Refs<'a> {
     b: Builder,
     /// ref sections whose body isn't inserted (because they are hidden)
     deferred: Vec<String>,
+    /// magit-refs--insert-refname-p (magit-refs-filter-alist)
+    show: &'a dyn Fn(&str) -> bool,
 }
 
-/// magit-refs-refresh-buffer: the sections of magit-refs-sections-hook.
+/// magit-refs-refresh-buffer: the sections of magit-refs-sections-hook,
+/// the refs SHOW is false for omitted (magit-refs-filter-alist; remote
+/// branches with the remote).
+#[allow(clippy::too_many_arguments)]
 pub fn build_refs(
     g: &Git,
     focus: &str,
@@ -80,9 +85,21 @@ pub fn build_refs(
     counts: CommitCount,
     vis: &Visibility,
     margin: &Margin,
+    show: &dyn Fn(&str) -> bool,
 ) -> StatusBuffer {
     let counts = if g.rev_verify(focus) { counts } else { CommitCount::Nothing };
-    let mut r = Refs { g, focus, counts, width: PRIMARY_MIN, vis, margin, now: now(), b: Builder::new(), deferred: Vec::new() };
+    let mut r = Refs {
+        g,
+        focus,
+        counts,
+        width: PRIMARY_MIN,
+        vis,
+        margin,
+        now: now(),
+        b: Builder::new(),
+        deferred: Vec::new(),
+        show,
+    };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     r.branch_description();
     r.local_branches(&args);
@@ -232,7 +249,13 @@ impl Refs<'_> {
             "refs/heads",
         ];
         a.extend(args);
-        let mut lines: Vec<Local> = self.g.git_lines_pub(&a).iter().map(|l| self.format_local(l)).collect();
+        let mut lines: Vec<Local> = self
+            .g
+            .git_lines_pub(&a)
+            .iter()
+            .map(|l| self.format_local(l))
+            .filter(|l| l.branch.as_deref().is_none_or(self.show))
+            .collect();
         if self.g.current_branch().is_none() {
             let subject = self.g.git_string(&["log", "-1", "--no-walk", "--format=%s", "HEAD", "--"]).unwrap_or_default();
             lines.insert(0, self.format_local(&format!("*\0\0\0\0\0\0\0\0\0{subject}")));
@@ -285,6 +308,7 @@ impl Refs<'_> {
                     }
                     Some((get(1)?.to_string(), get(3).unwrap_or_default().to_string()))
                 })
+                .filter(|(b, _)| (self.show)(b))
                 .collect();
             let ident = format!("remote:{remote}");
             let n = branches.len();
@@ -321,7 +345,8 @@ impl Refs<'_> {
         }
         let n = tags.len();
         self.b.heading_hide(format!("Tags ({n})"), LineKind::SectionHeader { section: "tags".into(), n }, "tags", 0, true, false);
-        for (tag, msg) in tags {
+        // the count of all tags (magit-insert-heading (length tags))
+        for (tag, msg) in tags.into_iter().filter(|(t, _)| (self.show)(t)) {
             let focus = self.focus_column(Some(&tag), false, true);
             let heading = format!("{focus}{tag}{}{msg}", self.pad(tag.len()));
             let kind = LineKind::Ref { kind: RefKind::Tag, name: tag.clone() };
