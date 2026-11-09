@@ -140,17 +140,28 @@ impl Git {
     /// `git commit ARGS` with the message written in MESSAGE
     /// (magit-run-git-with-editor).
     pub fn commit_with_editor(&self, args: &[String], message: Editor) -> Result<()> {
+        self.commit_with_editor_env(args, message, &[])
+    }
+
+    /// commit_with_editor with the environment ENV.
+    pub fn commit_with_editor_env(&self, args: &[String], message: Editor, env: &[(&str, &str)]) -> Result<()> {
         let mut full: Vec<&str> = vec!["commit"];
         full.extend(args.iter().map(String::as_str));
-        self.git_with_editors(Editor::User, message, &full)
+        self.git_with_editors_env(Editor::User, message, env, &full)
     }
 
     /// magit-commit-extend ("c e"): `git commit --amend --no-edit <args>`
     pub fn commit_extend(&self, args: &[String]) -> Result<()> {
+        self.commit_extend_env(args, &[])
+    }
+
+    /// commit_extend with the environment ENV (GIT_COMMITTER_DATE to keep
+    /// the committer date).
+    pub fn commit_extend_env(&self, args: &[String], env: &[(&str, &str)]) -> Result<()> {
         let mut full: Vec<String> = vec!["commit".into(), "--amend".into(), "--no-edit".into()];
         full.extend(args.iter().cloned());
         let strs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
-        self.git_interactive(&strs)
+        self.git_interactive_env(env, &strs)
     }
 
     /// magit-commit-amend ("c a"): `git commit --amend <args>`

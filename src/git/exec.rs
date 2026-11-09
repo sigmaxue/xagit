@@ -328,9 +328,16 @@ impl Git {
 
     /// Run git, inherit stdio so editors/hooks can run (magit-call-git).
     pub fn git_interactive(&self, args: &[&str]) -> Result<()> {
+        self.git_interactive_env(&[], args)
+    }
+
+    /// git_interactive with the environment variables ENV set
+    /// (with-environment-variables).
+    pub fn git_interactive_env(&self, env: &[(&str, &str)], args: &[&str]) -> Result<()> {
         let st = Command::new(env_git())
             .args(GLOBAL_ARGS)
             .args(args)
+            .envs(env.iter().copied())
             .current_dir(&self.toplevel)
             .status()
             .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
@@ -350,8 +357,13 @@ impl Git {
     /// The environment variables are set so they win over the user's own
     /// `GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` unless `Editor::User` is asked for.
     pub fn git_with_editors(&self, todo: Editor, message: Editor, args: &[&str]) -> Result<()> {
+        self.git_with_editors_env(todo, message, &[], args)
+    }
+
+    /// git_with_editors with the environment variables ENV set.
+    pub fn git_with_editors_env(&self, todo: Editor, message: Editor, env: &[(&str, &str)], args: &[&str]) -> Result<()> {
         let mut cmd = Command::new(env_git());
-        cmd.args(["-c", "color.ui=false"]).current_dir(&self.toplevel);
+        cmd.args(["-c", "color.ui=false"]).envs(env.iter().copied()).current_dir(&self.toplevel);
         match todo {
             Editor::Accept => {
                 cmd.env("GIT_SEQUENCE_EDITOR", "true");

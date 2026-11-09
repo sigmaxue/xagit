@@ -64,6 +64,10 @@ pub struct App {
     transient_log_args: Option<Vec<String>>,
     /// C-c was typed (the prefix of C-c C-n)
     cc_prefix: bool,
+    /// the prefix argument of the next command (current-prefix-arg)
+    prefix_arg: Option<PrefixArg>,
+    /// C-u / M-- was typed and digits are read (universal-argument-map)
+    reading_arg: bool,
     /// magit--right-margin-config of the buffer of each mode (permanent)
     margins: HashMap<&'static str, Margin>,
     message: String,
@@ -81,6 +85,8 @@ pub struct App {
     pub log_args: Vec<String>,
     /// answers used instead of reading from the terminal (tests)
     scripted: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// the prompts answered so far (tests)
+    prompts: std::cell::RefCell<Vec<String>>,
     /// the TUI owns the terminal (`run`): it is handed over to editors
     in_terminal: bool,
     /// values of transient prefixes set for this session (transient-set)
@@ -241,6 +247,43 @@ const PUBLISHED_BRANCHES: &[&str] = &["origin/master"];
 /// magit-section-mode-map). `k` is magit-discard and `j` is
 /// magit-status-jump (Magit has no vi-style movement); `n` / `p` move
 /// between sections, C-n / C-p and the arrows between lines.
+/// A prefix argument (Emacs' raw prefix argument): `C-u` typed N times
+/// is Raw(4^N), `C-u 12` is Num(12), `C-u -` / `M--` is Minus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixArg {
+    Raw(i64),
+    Num(i64),
+    Minus,
+}
+
+impl PrefixArg {
+    /// prefix-numeric-value
+    pub fn numeric(self) -> i64 {
+        match self {
+            PrefixArg::Raw(n) | PrefixArg::Num(n) => n,
+            PrefixArg::Minus => -1,
+        }
+    }
+
+    /// universal-argument--description, as echoed while it is read.
+    fn description(self) -> String {
+        match self {
+            PrefixArg::Raw(n) if n > 0 => {
+                let mut c = vec!["C-u"];
+                let mut m = n;
+                while m > 4 {
+                    c.push("C-u");
+                    m /= 4;
+                }
+                c.join(" ")
+            }
+            PrefixArg::Raw(n) => format!("C-u {n}"),
+            PrefixArg::Num(n) => format!("C-u {n}"),
+            PrefixArg::Minus => "C-u -".into(),
+        }
+    }
+}
+
 pub fn status_binding(key: &Key) -> Option<Binding> {
     use Binding::*;
     if key.ctrl {
@@ -356,6 +399,8 @@ impl App {
             transient_diff_args: None,
             transient_log_args: None,
             cc_prefix: false,
+            prefix_arg: None,
+            reading_arg: false,
             margins: HashMap::new(),
             message: String::new(),
             quit: false,
@@ -365,6 +410,7 @@ impl App {
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            prompts: std::cell::RefCell::new(Vec::new()),
             in_terminal: false,
             set_values: HashMap::new(),
             saved_values: BTreeMap::new(),
@@ -390,7 +436,7 @@ impl App {
     }
 
     /// magit-buffer-diff-args of the buffer shown.
-    fn buffer_args(&self) -> Vec<String> {
+    pub fn buffer_args(&self) -> Vec<String> {
         match self.mode {
             BufferMode::Status => self.status_diff_args(),
             _ => self.buf_args.clone(),
@@ -409,6 +455,11 @@ impl App {
     /// The major mode of the buffer shown.
     pub fn mode(&self) -> &BufferMode {
         &self.mode
+    }
+
+    /// Whether ngit is about to exit (the last buffer was buried).
+    pub fn quitting(&self) -> bool {
+        self.quit
     }
 
     /// The header line of the buffer shown (empty for the status buffer).
@@ -515,8 +566,21 @@ impl App {
         self.refresh();
     }
 
-    /// magit-mode-bury-buffer (q): leave the text view, else show the
-    /// buffer below (refreshed), else quit.
+    /// magit-mode-bury-buffer (q): with two prefix arguments kill all
+    /// Magit buffers of the repository (and so quit), else bury (with a
+    /// prefix argument kill) the buffer shown.
+    fn mode_bury_buffer(&mut self) {
+        if self.prefix_numeric() >= 16 {
+            self.view_text = None;
+            self.buried.clear();
+            self.quit = true;
+            return;
+        }
+        self.bury_buffer();
+    }
+
+    /// Leave the text view, else show the buffer below (refreshed), else
+    /// quit.
     fn bury_buffer(&mut self) {
         if self.view_text.take().is_some() {
             self.set_msg("");
@@ -672,6 +736,11 @@ impl App {
 
     // ------------------------------------------------------------ input helpers
 
+    /// The prompts read so far, oldest first.
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.borrow().clone()
+    }
+
     /// Answers consumed by prompts instead of reading the terminal (tests).
     pub fn script_answers(&mut self, answers: &[&str]) {
         self.scripted.borrow_mut().extend(answers.iter().map(|s| s.to_string()));
@@ -683,6 +752,7 @@ impl App {
 
     /// Read a line (the DEFAULT when empty); only EOF gives none.
     fn read_line_raw(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+        self.prompts.borrow_mut().push(prompt.to_string());
         let scripted = self.scripted.borrow_mut().pop_front();
         let buf = if let Some(ans) = scripted {
             ans
@@ -854,6 +924,80 @@ impl App {
     }
 
     fn handle_key(&mut self, key: Key) -> Result<()> {
+        if self.universal_argument(&key) {
+            return Ok(());
+        }
+        let r = self.dispatch_key(key);
+        // the prefix argument is for one command; prefix keys (C-c, the
+        // first keys of a transient's key sequence) pass it on
+        if !self.cc_prefix && self.pending.is_empty() {
+            self.prefix_arg = None;
+        }
+        r
+    }
+
+    /// universal-argument (C-u), negative-argument (M--) and the digits,
+    /// `-` and C-u of universal-argument-map. True if KEY was consumed.
+    fn universal_argument(&mut self, key: &Key) -> bool {
+        let arg = self.prefix_arg;
+        let new = match (key.ctrl, key.code.as_str()) {
+            (true, "u") if self.reading_arg => match arg {
+                Some(PrefixArg::Raw(n)) => Some(PrefixArg::Raw(n * 4)),
+                Some(PrefixArg::Minus) => Some(PrefixArg::Raw(-4)),
+                // universal-argument-more after digits ends the argument
+                _ => {
+                    self.reading_arg = false;
+                    return true;
+                }
+            },
+            (true, "u") => Some(PrefixArg::Raw(4)),
+            (false, "M--") => match arg {
+                Some(PrefixArg::Num(n)) => Some(PrefixArg::Num(-n)),
+                Some(PrefixArg::Minus) => None,
+                _ => Some(PrefixArg::Minus),
+            },
+            _ if !self.reading_arg => return false,
+            (true, "g") => {
+                self.reading_arg = false;
+                self.prefix_arg = None;
+                self.set_msg("Quit");
+                return true;
+            }
+            (false, d) if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
+                let digit = i64::from(d.as_bytes()[0] - b'0');
+                match arg {
+                    Some(PrefixArg::Num(n)) => Some(PrefixArg::Num(n * 10 + if n < 0 { -digit } else { digit })),
+                    Some(PrefixArg::Minus) if digit == 0 => Some(PrefixArg::Minus),
+                    Some(PrefixArg::Minus) => Some(PrefixArg::Num(-digit)),
+                    Some(PrefixArg::Raw(n)) if n < 0 => Some(PrefixArg::Num(-digit)),
+                    _ => Some(PrefixArg::Num(digit)),
+                }
+            }
+            // universal-argument-minus: after digits `-` is a command
+            (false, "-") if !matches!(arg, Some(PrefixArg::Num(_))) => Some(PrefixArg::Minus),
+            _ => {
+                self.reading_arg = false;
+                return false;
+            }
+        };
+        self.prefix_arg = new;
+        self.reading_arg = true;
+        let desc = new.map_or_else(|| "C-u".to_string(), PrefixArg::description);
+        self.set_msg(&format!("{desc}-"));
+        true
+    }
+
+    /// current-prefix-arg
+    pub fn current_prefix_arg(&self) -> Option<PrefixArg> {
+        self.prefix_arg
+    }
+
+    /// (prefix-numeric-value current-prefix-arg)
+    fn prefix_numeric(&self) -> i64 {
+        self.prefix_arg.map_or(1, PrefixArg::numeric)
+    }
+
+    fn dispatch_key(&mut self, key: Key) -> Result<()> {
         // transient popup takes precedence
         if let Some((name, active)) = self.stack.last().cloned() {
             if let Some(menu) = self.menus.get(&name).cloned() {
@@ -936,7 +1080,7 @@ impl App {
             return Ok(());
         }
         match binding {
-            Binding::Bury => self.bury_buffer(),
+            Binding::Bury => self.mode_bury_buffer(),
             Binding::Refresh => {
                 self.refresh();
                 self.set_msg("refreshed");
@@ -1455,10 +1599,13 @@ impl App {
             .collect()
     }
 
+    /// magit-stash-read-untracked: one prefix argument is equivalent to
+    /// "--include-untracked", two to "--all".
     fn untracked_from(&self, active: &BTreeMap<String, bool>) -> Untracked {
-        if *active.get("--all").unwrap_or(&false) {
+        let prefix = self.prefix_numeric();
+        if prefix == 16 || *active.get("--all").unwrap_or(&false) {
             Untracked::All
-        } else if *active.get("--include-untracked").unwrap_or(&false) {
+        } else if prefix == 4 || *active.get("--include-untracked").unwrap_or(&false) {
             Untracked::Include
         } else {
             Untracked::No
@@ -1495,7 +1642,7 @@ impl App {
             "stage-files" => self.stage_files()?,
             "unstage-files" => self.unstage_files()?,
             "display-repository-buffer" | "display-buffer" => self.display_repository_buffer()?,
-            "quit" => self.bury_buffer(),
+            "quit" => self.mode_bury_buffer(),
             "toggle-section" => self.toggle_section(),
             "visit" => self.visit_thing()?,
             "jump" => self.jump_section(),
@@ -1530,8 +1677,12 @@ impl App {
             }
             "diff-show-or-scroll-up" => self.show_or_scroll(true)?,
             "diff-show-or-scroll-down" => self.show_or_scroll(false)?,
-            "diff-more-context" => self.set_diff_context(|n| Some(n + 1)),
-            "diff-less-context" => self.set_diff_context(|n| Some(n.saturating_sub(1))),
+            "diff-more-context" | "diff-less-context" => {
+                // by the numeric prefix argument
+                let count = self.prefix_numeric();
+                let count = if cmd == "diff-less-context" { -count } else { count };
+                self.set_diff_context(|n| Some((n as i64 + count).max(0) as usize));
+            }
             "diff-default-context" => self.set_diff_context(|_| None),
 
             // -------- commit menu: the message is written in the editor
@@ -1551,7 +1702,10 @@ impl App {
                 if !self.amend_assert("HEAD")? {
                     return Ok(());
                 }
-                let res = g!().commit_extend(&args);
+                // with a prefix argument keep the committer date
+                let date = self.keep_committer_date();
+                let env: Vec<(&str, &str)> = date.iter().map(|d| ("GIT_COMMITTER_DATE", d.as_str())).collect();
+                let res = g!().commit_extend_env(&args, &env);
                 self.done("extended HEAD commit", res.map(|()| String::new()));
             }
             "commit-amend" => {
@@ -1573,7 +1727,10 @@ impl App {
                 if !a.iter().any(|x| x == "--allow-empty") {
                     a.push("--allow-empty".into());
                 }
-                let res = self.with_terminal(|g| g.commit_with_editor(&a, Editor::User));
+                // with a prefix argument keep the committer date
+                let date = self.keep_committer_date();
+                let env: Vec<(&str, &str)> = date.iter().map(|d| ("GIT_COMMITTER_DATE", d.as_str())).collect();
+                let res = self.with_terminal(|g| g.commit_with_editor_env(&a, Editor::User, &env));
                 self.done("reworded HEAD commit", res.map(|()| String::new()));
             }
             // magit-commit-squash-internal: with magit-commit-squash-confirm
@@ -1670,7 +1827,12 @@ impl App {
                 let bs = g!().branches();
                 if let Some(old) = self.pick("Rename branch", &bs, None)? {
                     if let Some(new) = self.read_line_prompt("New name", Some(old))? {
-                        g!().branch_rename(old, &new)?;
+                        // with a prefix argument even if NEW exists
+                        if self.prefix_arg.is_some() {
+                            g!().git_interactive(&["branch", "-M", old, &new])?;
+                        } else {
+                            g!().branch_rename(old, &new)?;
+                        }
                         self.set_msg("renamed");
                         self.refresh();
                     }
@@ -1684,17 +1846,33 @@ impl App {
                         if g!().current_branch().as_deref() == Some(b.as_str()) {
                             let _ = g!().git_interactive(&["reset", "--keep", &rev]);
                         }
+                        // with a prefix argument the branch reset to
+                        // becomes the upstream
+                        let is_branch = g!().git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{rev}")])
+                            || g!().git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/remotes/{rev}")]);
+                        if self.prefix_arg.is_some() && is_branch {
+                            g!().git_interactive(&["branch", &format!("--set-upstream-to={rev}"), b])?;
+                        }
                         self.set_msg("branch reset");
                         self.refresh();
                     }
                 }
             }
+            // magit-branch-delete: with a prefix argument force, else
+            // confirm deleting an unmerged branch
             "branch-delete" => {
+                let mut force = self.prefix_arg.is_some();
                 let bs = g!().branches();
-                if let Some(b) = self.pick("Delete branch", &bs, None)? {
-                    g!().branch_delete(b)?;
-                    self.set_msg(&format!("deleted {b}"));
-                    self.refresh();
+                let prompt = if force { "Force delete branch" } else { "Delete branch" };
+                if let Some(b) = self.pick(prompt, &bs, None)?.cloned() {
+                    if !force && !self.branch_merged(&b) {
+                        if !self.confirm(&format!("Delete unmerged branch {b}"))? {
+                            return Ok(());
+                        }
+                        force = true;
+                    }
+                    let res = g!().git_interactive(&["branch", if force { "-D" } else { "-d" }, &b]);
+                    self.done(&format!("deleted {b}"), res.map(|()| String::new()));
                 }
             }
 
@@ -2330,6 +2508,19 @@ impl App {
     fn diff_view(&mut self, kind: &str) -> Result<()> {
         match kind {
             "unstaged" => self.show_diff(None, None, "unstaged"),
+            // with a prefix argument against a commit read
+            "staged" | "worktree" if self.prefix_arg.is_some() => {
+                let prompt = if kind == "staged" { "Diff index and commit" } else { "Diff working tree and commit" };
+                let default = self.branch_or_commit_default();
+                let Some(rev) = self.read_line_prompt(prompt, default.as_deref())? else {
+                    return Ok(());
+                };
+                if kind == "staged" {
+                    self.show_diff(Some(rev), Some("--cached"), "staged");
+                } else {
+                    self.show_diff(Some(rev), None, "committed");
+                }
+            }
             "staged" => self.show_diff(None, Some("--cached"), "staged"),
             "worktree" => self.show_diff(Some("HEAD".into()), None, "committed"),
             "range" => {
@@ -2341,15 +2532,24 @@ impl App {
             }
             "dwim" => self.diff_dwim()?,
             "commit" => {
-                let rev = match self.current_line().map(|l| l.kind.clone()) {
+                let atpoint = match self.current_line().map(|l| l.kind.clone()) {
                     Some(LineKind::Commit { hash, .. }) => Some(hash),
                     _ => match &self.mode {
                         BufferMode::Revision { rev, .. } => Some(rev.clone()),
-                        _ => {
-                            let current = self.git.current_branch();
-                            self.read_line_prompt("Show commit", current.as_deref())?
-                        }
+                        _ => None,
                     },
+                };
+                // with a prefix argument always read the commit
+                let rev = match atpoint {
+                    Some(r) if self.prefix_arg.is_none() => Some(r),
+                    Some(r) => {
+                        let short = self.git.rev_short(&r);
+                        self.read_line_prompt("Show commit", Some(&short))?
+                    }
+                    None => {
+                        let current = self.git.current_branch();
+                        self.read_line_prompt("Show commit", current.as_deref())?
+                    }
                 };
                 if let Some(rev) = rev {
                     self.show_commit(&rev);
@@ -2363,11 +2563,12 @@ impl App {
                         _ => None,
                     },
                 };
+                // with a prefix argument always read the stash
                 let stash = match at {
-                    Some(s) => Some(s),
-                    None => {
+                    Some(s) if self.prefix_arg.is_none() => Some(s),
+                    at => {
                         let names: Vec<String> = self.git.stashes().into_iter().map(|(n, _)| n).collect();
-                        self.pick("Show stash", &names, None)?.cloned()
+                        self.pick("Show stash", &names, at.as_deref())?.cloned()
                     }
                 };
                 if let Some(s) = stash {
@@ -2895,10 +3096,11 @@ impl App {
         Ok(())
     }
 
-    /// C-c C-n in log buffers (magit-log-move-to-parent).
+    /// C-c C-n in log buffers (magit-log-move-to-parent): to the Nth
+    /// parent, N being the numeric prefix argument.
     fn log_move_to_parent(&mut self) {
         let Some(LineKind::Commit { hash, .. }) = self.current_line().map(|l| l.kind.clone()) else { return };
-        let parent_rev = format!("{hash}^1");
+        let parent_rev = format!("{hash}^{}", self.prefix_numeric());
         let Ok(parent) = self.git.git_string(&["rev-parse", "--short", &parent_rev]) else {
             self.set_msg(&format!("Parent {parent_rev} does not exist"));
             return;
@@ -3464,7 +3666,13 @@ impl App {
                 if files.is_empty() {
                     return Ok(());
                 }
-                let mut a = vec!["add", "--"];
+                // magit-stage-untracked: with a prefix argument stage
+                // the files but not their content
+                let mut a = vec!["add"];
+                if self.prefix_arg.is_some() {
+                    a.push("--intent-to-add");
+                }
+                a.push("--");
                 a.extend(files.iter().map(String::as_str));
                 self.git.git_interactive(&a)?;
             }
@@ -3504,14 +3712,26 @@ impl App {
     }
 
     /// magit-stage-files: read files (unstaged and untracked), default the
-    /// file at point.
+    /// file at point. With a prefix argument offer the ignored files and
+    /// force adding them.
     fn stage_files(&mut self) -> Result<()> {
-        let mut choices = self.git.unstaged_files();
-        choices.extend(self.git.untracked_files());
-        let Some(files) = self.pick_files("Stage file,s", &choices)? else {
+        let force = self.prefix_arg.is_some();
+        let (prompt, choices) = if force {
+            let ignored = self.git.git_lines(&["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]);
+            ("Stage ignored file,s", ignored)
+        } else {
+            let mut choices = self.git.unstaged_files();
+            choices.extend(self.git.untracked_files());
+            ("Stage file,s", choices)
+        };
+        let Some(files) = self.pick_files(prompt, &choices)? else {
             return Ok(());
         };
-        let mut a = vec!["add", "--"];
+        let mut a = vec!["add"];
+        if force {
+            a.push("--force");
+        }
+        a.push("--");
         a.extend(files.iter().map(String::as_str));
         self.git.git_interactive(&a)?;
         self.set_msg("staged");
@@ -3545,14 +3765,20 @@ impl App {
         Ok(Some(files))
     }
 
-    /// magit-stage-modified (S): `git add -u .`, confirming when something
-    /// is staged already.
+    /// magit-stage-modified (S): `git add -u .`, with a prefix argument
+    /// `git add --all .` (also new files), confirming when something is
+    /// staged already.
     fn stage_modified(&mut self) -> Result<()> {
         if self.git.anything_staged() && !self.confirm("Stage all changes")? {
             return Ok(());
         }
-        self.git.stage_all()?;
-        self.set_msg("staged all modified");
+        if self.prefix_arg.is_some() {
+            self.git.stage_all_with_untracked()?;
+            self.set_msg("staged all changes");
+        } else {
+            self.git.stage_all()?;
+            self.set_msg("staged all modified");
+        }
         self.refresh();
         Ok(())
     }
@@ -3727,18 +3953,23 @@ impl App {
                 self.set_msg("Cannot reverse unstaged changes");
                 Ok(())
             }
+            // with a prefix argument fall back to a 3-way merge
+            _ if self.prefix_arg.is_some() => self.reverse_sel(&sel, &["--3way"]),
             _ => self.reverse_sel(&sel, &[]),
         }
     }
 
     /// magit-reverse-region / -hunk / -hunks / -files: apply the selection
-    /// with `--reverse ARGS --reject`.
+    /// with `--reverse ARGS --reject` (magit-reverse-apply; not with
+    /// `--3way`).
     fn reverse_sel(&mut self, sel: &DiffSel, args: &[&str]) -> Result<()> {
         let group = sel.typ().to_string();
         let ctx = self.context();
         let mut a = vec!["--reverse"];
         a.extend(args);
-        a.push("--reject");
+        if !args.contains(&"--3way") {
+            a.push("--reject");
+        }
         if let Some((path, scope)) = Self::hunk_scope(sel) {
             if !self.confirm(&Self::hunk_prompt("Reverse", sel))? {
                 return Ok(());
@@ -3782,7 +4013,11 @@ impl App {
             return Ok(());
         };
         let group = sel.typ().to_string();
-        let three: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a == "--3way").collect();
+        // with a prefix argument fall back to a 3-way merge
+        let mut three: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a == "--3way").collect();
+        if self.prefix_arg.is_some() && three.is_empty() {
+            three.push("--3way");
+        }
         match (self.diff_type(&group), &sel) {
             ("unstaged" | "staged", _) => self.set_msg("Change is already in the working tree"),
             ("untracked", DiffSel::File { .. } | DiffSel::Files { .. }) => self.open_menu("patches-menu"),
@@ -4256,7 +4491,13 @@ impl App {
                         None => return Ok(()),
                     },
                 };
-                let mut a = vec!["rm", "--cached", "--"];
+                // with a prefix argument even files with staged and
+                // unstaged changes
+                let mut a = vec!["rm", "--cached"];
+                if self.prefix_arg.is_some() {
+                    a.push("--force");
+                }
+                a.push("--");
                 a.extend(files.iter().map(String::as_str));
                 let res = self.git.git_interactive(&a);
                 self.done("untracked", res.map(|()| String::new()));
@@ -4321,7 +4562,11 @@ impl App {
                 };
                 let top = self.git.toplevel.clone();
                 let dirs: Vec<&String> = files.iter().filter(|f| top.join(f).is_dir()).collect();
+                // with a prefix argument even files with uncommitted changes
                 let mut args = vec!["rm"];
+                if self.prefix_arg.is_some() {
+                    args.push("--force");
+                }
                 if !dirs.is_empty() {
                     let what = if dirs.len() == 1 { "directory" } else { "directories" };
                     let names = dirs.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(",");
@@ -4398,6 +4643,10 @@ impl App {
                     rev
                 };
                 let mut args = self.log_arguments();
+                // with a prefix argument follow renames
+                if cmd == "log-buffer-file" && self.prefix_arg.is_some() && !args.iter().any(|a| a == "--follow") {
+                    args.insert(0, "--follow".into());
+                }
                 let mut files = vec![file.clone()];
                 let lines = if cmd == "log-trace-definition" {
                     let Some(name) = self.which_function() else {
@@ -4468,6 +4717,27 @@ impl App {
         Ok(())
     }
 
+    /// magit-commit-extend / -reword with a prefix argument (and
+    /// magit-commit-*-override-date t): the committer date of HEAD, kept.
+    fn keep_committer_date(&self) -> Option<String> {
+        self.prefix_arg?;
+        self.git.git_string(&["log", "-1", "--format=%cD", "HEAD"]).ok()
+    }
+
+    /// magit-branch-merged-p: BRANCH is merged into the current branch
+    /// (never when HEAD is detached) and, if it has one, its upstream.
+    fn branch_merged(&self, branch: &str) -> bool {
+        let upstream = self
+            .git
+            .git_string(&["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+            .ok()
+            .filter(|u| !u.is_empty());
+        if upstream.is_some_and(|u| !self.git.is_ancestor(branch, &u)) {
+            return false;
+        }
+        self.git.current_branch().is_some_and(|c| self.git.is_ancestor(branch, &c))
+    }
+
     /// magit-which-function: the name of the definition around point.
     fn which_function(&self) -> Option<String> {
         const KEYWORDS: [&str; 7] = ["fn", "def", "func", "function", "(defun", "class", "sub"];
@@ -4496,15 +4766,18 @@ impl App {
             BufferMode::File { blame: Some(b), .. } => Some(b.typ),
             _ => None,
         };
-        let chunk = match blame_type {
-            Some(BlameType::Addition) => self.current_blame_chunk(),
-            _ => {
-                // magit-current-blame-chunk: blame the line at point
-                let line = self.file_line().unwrap_or(1);
-                let r = (rev != "{worktree}" && rev != "{index}").then_some(rev.as_str());
-                let range = vec!["-L".to_string(), format!("{line},{line}")];
-                super::blame::run_blame(&self.git, r, &file, &range, BlameType::Addition)?.into_iter().next()
-            }
+        // with a prefix argument the commit that removes the line
+        let typ = if self.prefix_arg.is_some() { BlameType::Removal } else { BlameType::Addition };
+        let chunk = if blame_type == Some(typ) {
+            self.current_blame_chunk()
+        } else {
+            // magit-current-blame-chunk: blame the line at point, in
+            // reverse if the buffer is blamed so
+            let line = self.file_line().unwrap_or(1);
+            let r = (rev != "{worktree}" && rev != "{index}").then_some(rev.as_str());
+            let range = vec!["-L".to_string(), format!("{line},{line}")];
+            let reverse = matches!(blame_type, Some(BlameType::Final | BlameType::Removal));
+            super::blame::run_blame_parsed(&self.git, r, &file, &range, reverse, typ)?.into_iter().next()
         };
         let Some(chunk) = chunk else {
             self.set_msg("No chunk at point");

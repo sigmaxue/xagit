@@ -127,8 +127,21 @@ fn commit_alist(g: &Git, rev: &str) -> HashMap<String, String> {
 /// FILE at REV (none: the worktree) in final-line order, adjacent chunks
 /// of the same commit merged (magit-blame--make-overlays).
 pub fn run_blame(g: &Git, rev: Option<&str>, file: &str, args: &[String], typ: BlameType) -> Result<Vec<Chunk>> {
+    run_blame_parsed(g, rev, file, args, typ != BlameType::Addition, typ)
+}
+
+/// `git blame` (with `--reverse` if REVERSE), its chunks parsed as of TYP
+/// (magit-current-blame-chunk decides the two separately).
+pub fn run_blame_parsed(
+    g: &Git,
+    rev: Option<&str>,
+    file: &str,
+    args: &[String],
+    reverse: bool,
+    typ: BlameType,
+) -> Result<Vec<Chunk>> {
     let mut a: Vec<&str> = vec!["blame", "--incremental"];
-    if typ != BlameType::Addition {
+    if reverse {
         a.push("--reverse");
     }
     a.extend(args.iter().map(String::as_str));
