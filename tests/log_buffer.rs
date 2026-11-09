@@ -475,11 +475,13 @@ fn stashes_buffer() {
     assert_eq!(app.mode(), &BufferMode::Stash { stash: "stash@{0}".into() });
     app.press("q").unwrap();
     assert!(matches!(app.mode(), BufferMode::Stashes { .. }));
-    // k drops the stash at point
+    // k drops a stash read, the one at point the default
     goto(&mut app, "stash@{1}");
-    app.script_answers(&["y"]);
+    app.script_answers(&[""]);
     app.press("k").unwrap();
+    assert!(app.prompts().last().unwrap().starts_with("Drop stash"), "{:?}", app.prompts());
     assert_eq!(texts(&app), ["Stashes", "stash@{0} On master: custom"]);
+    assert!(app.message().starts_with("Deleted refs/stash@{1} (was "), "{}", app.message());
     // RET on the stashes section of the status buffer lists them too
     app.press("q").unwrap();
     assert_eq!(app.mode(), &BufferMode::Status);

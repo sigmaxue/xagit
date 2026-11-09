@@ -8,10 +8,12 @@
 //! magit-refs-filter-alist ^refs/pullreqs/ nil
 //! magit-refs-filter-alist ^origin/pr- nil
 //! magit-visit-ref-behavior create-branch checkout-branch
+//! magit-published-branches origin/master origin/main
 //! ```
 //!
 //! magit-no-confirm and magit-visit-ref-behavior take a list of symbols
-//! (or `t` / `nil`), a line setting the whole list. Each
+//! (or `t` / `nil`), magit-published-branches a list of branches (or
+//! `nil`), a line setting the whole list. Each
 //! magit-refs-filter-alist line adds an entry: a regexp (Emacs syntax,
 //! without whitespace) and `t` (show) or `nil` (omit).
 
@@ -61,11 +63,18 @@ pub struct Options {
     pub refs_filter: Vec<(Regexp, bool)>,
     /// magit-visit-ref-behavior
     pub visit_ref_behavior: Vec<String>,
+    /// magit-published-branches
+    pub published_branches: Vec<String>,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { no_confirm: Some(vec!["set-and-push".into()]), refs_filter: Vec::new(), visit_ref_behavior: Vec::new() }
+        Options {
+            no_confirm: Some(vec!["set-and-push".into()]),
+            refs_filter: Vec::new(),
+            visit_ref_behavior: Vec::new(),
+            published_branches: vec!["origin/master".into()],
+        }
     }
 }
 
@@ -130,6 +139,11 @@ impl Options {
                         }
                     }
                 }
+                "magit-published-branches" => {
+                    let vs: &[&str] = if values == ["nil"] { &[] } else { &values };
+                    o.published_branches = vs.iter().map(|v| v.to_string()).collect();
+                    None
+                }
                 "magit-refs-filter-alist" => match values.as_slice() {
                     ["nil"] => {
                         o.refs_filter.clear();
@@ -183,7 +197,10 @@ mod tests {
         assert!(o.visit_ref("create-branch") && !o.visit_ref("checkout-any"));
         assert_eq!(e.len(), 3, "{e:?}");
         assert!(e[0].starts_with("8: unknown action frobnicate"), "{e:?}");
-        let (o, _) = Options::parse("magit-no-confirm t\nmagit-visit-ref-behavior nil");
+        let (o, _) = Options::parse("magit-no-confirm t\nmagit-visit-ref-behavior nil\nmagit-published-branches nil");
         assert!(o.no_confirm("discard") && !o.no_confirm("t") && o.visit_ref_behavior.is_empty());
+        assert!(o.published_branches.is_empty() && Options::default().published_branches == ["origin/master"]);
+        let (o, _) = Options::parse("magit-published-branches origin/main upstream/main");
+        assert_eq!(o.published_branches, ["origin/main", "upstream/main"]);
     }
 }

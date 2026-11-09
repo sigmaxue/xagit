@@ -275,8 +275,6 @@ pub const REBASE_CHOICES: &[&str] = &["true", "merges", "interactive", "false"];
 pub const AUTOSETUP_MERGE_CHOICES: &[&str] = &["always", "true", "false"];
 /// Choices cycled by `b C a r` (magit-branch.autoSetupRebase).
 pub const AUTOSETUP_REBASE_CHOICES: &[&str] = &["always", "local", "remote", "never"];
-/// magit-published-branches (default)
-const PUBLISHED_BRANCHES: &[&str] = &["origin/master"];
 
 /// The history list of a minibuffer read (its HIST argument).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2781,36 +2779,26 @@ impl App {
                 self.refresh();
             }
             "stash-show" => self.diff_view("stash")?,
-            "stash-apply" | "stash-pop" | "stash-drop" | "stash-branch" => {
-                let stashes = g!().stashes();
-                if stashes.is_empty() {
-                    self.set_msg("no stashes");
-                    return Ok(());
-                }
-                let names: Vec<String> = stashes.iter().map(|(n, _)| n.clone()).collect();
-                if let Some(s) = self.pick("Stash", &names, None)? {
-                    match cmd {
-                        "stash-apply" => g!().stash_apply(s, true)?,
-                        "stash-pop" => g!().stash_pop(s, true)?,
-                        "stash-drop" => {
-                            if self.confirm_noabort("drop-stashes", &format!("Drop {s}"))? {
-                                g!().stash_drop(s)?;
-                            } else {
-                                return Ok(());
-                            }
-                        }
-                        "stash-branch" => {
-                            if let Some(name) = self.read_line_prompt("Branch name", None)? {
-                                g!().stash_branch(&name, s)?;
-                            } else {
-                                return Ok(());
-                            }
-                        }
-                        _ => unreachable!(),
+            "stash-drop" => self.stash_drop()?,
+            "stash-apply" | "stash-pop" | "stash-branch" => {
+                let prompt = match cmd {
+                    "stash-apply" => "Apply stash",
+                    "stash-pop" => "Pop stash",
+                    _ => "Branch stash",
+                };
+                let Some(s) = self.read_stash(prompt)? else { return Ok(()) };
+                match cmd {
+                    "stash-apply" => g!().stash_apply(&s, true)?,
+                    "stash-pop" => g!().stash_pop(&s, true)?,
+                    _ => {
+                        let Some(name) = self.read_line_prompt("Branch name", None)? else {
+                            return Ok(());
+                        };
+                        g!().stash_branch(&name, &s)?;
                     }
-                    self.set_msg("done");
-                    self.refresh();
                 }
+                self.set_msg("done");
+                self.refresh();
             }
             "stash-list" => self.setup_buffer(BufferMode::Stashes { refname: "refs/stash".into() }, Vec::new()),
 
@@ -3095,10 +3083,7 @@ impl App {
                 // with a prefix argument always read the stash
                 let stash = match at {
                     Some(s) if self.prefix_arg.is_none() => Some(s),
-                    at => {
-                        let names: Vec<String> = self.git.stashes().into_iter().map(|(n, _)| n).collect();
-                        self.pick("Show stash", &names, at.as_deref())?.cloned()
-                    }
+                    _ => self.read_stash("Show stash")?,
                 };
                 if let Some(s) = stash {
                     self.show_stash(&s);
@@ -3597,18 +3582,23 @@ impl App {
 
     /// magit-commit-amend-assert: confirm modifying a published COMMIT.
     fn amend_assert(&mut self, commit: &str) -> Result<bool> {
-        let published: Vec<&str> = PUBLISHED_BRANCHES
-            .iter()
-            .copied()
-            .filter(|b| self.git.rev_verify(b) && self.git.is_ancestor(commit, b))
-            .collect();
+        let published = self.publishing_branches(commit);
         if published.is_empty() {
             return Ok(true);
         }
-        self.confirm(
-            "amend-published",
-            &format!("This commit has already been published to {}.\nDo you really want to modify it", published.join(", ")),
-        )
+        let (m1, m2) = ("This commit has already been published to ", ".\nDo you really want to modify it");
+        self.confirm_items("amend-published", &format!("{m1}%s{m2}"), &format!("{m1}%d public branches{m2}"), &published)
+    }
+
+    /// magit-list-publishing-branches: the members of
+    /// magit-published-branches COMMIT is an ancestor of.
+    fn publishing_branches(&self, commit: &str) -> Vec<String> {
+        self.options
+            .published_branches
+            .iter()
+            .filter(|b| self.git.rev_verify(b) && self.git.is_ancestor(commit, b))
+            .cloned()
+            .collect()
     }
 
     /// `j` in log buffers (magit-log-move-to-revision).
@@ -4177,6 +4167,81 @@ impl App {
         self.yes_no(&format!("{prompt}?"))
     }
 
+    /// magit-read-stash: one of the stashes ("stash@{N} subject",
+    /// require-match), the one at point the default, else the first.
+    fn read_stash(&mut self, prompt: &str) -> Result<Option<String>> {
+        let choices: Vec<String> = self.git.stashes().into_iter().map(|(n, m)| format!("{n} {m}")).collect();
+        if choices.is_empty() {
+            self.set_msg("No stashes");
+            return Ok(None);
+        }
+        let atpoint = match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Stash { name, .. }) => Some(name),
+            _ => None,
+        };
+        let default = atpoint
+            .and_then(|a| choices.iter().find(|c| c.split(' ').next() == Some(a.as_str())).cloned())
+            .unwrap_or_else(|| choices[0].clone());
+        let table = Completion { candidates: choices.clone(), require_match: true, multiple: false };
+        let Some(v) = self.completing_read(prompt, Some(&default), Hist::Minibuffer, Some(table))?.filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+        // a choice, or just the name of one
+        let name = choices.iter().filter_map(|c| c.split(' ').next()).find(|n| v == *n || v.starts_with(&format!("{n} ")));
+        if name.is_none() {
+            self.set_msg("[No match]");
+        }
+        Ok(name.map(str::to_string))
+    }
+
+    /// magit-stash-drop: the stashes selected by the region (confirmed,
+    /// drop-stashes), else one read; dropped from the last.
+    fn stash_drop(&mut self) -> Result<()> {
+        let region: Option<Vec<String>> = self.region_sections(false).and_then(|secs| {
+            secs.iter()
+                .map(|&s| match &self.buf.all[self.sec(s).start].kind {
+                    LineKind::Stash { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        let stashes = match region {
+            Some(v) => {
+                if !self.confirm_items("drop-stashes", "Drop stashes", "Drop %d stashes", &v)? {
+                    return Ok(());
+                }
+                v
+            }
+            None => match self.read_stash("Drop stash")? {
+                Some(s) => vec![s],
+                None => return Ok(()),
+            },
+        };
+        self.mark = None;
+        let mut msg = String::new();
+        for s in stashes.iter().rev() {
+            msg = format!("Deleted refs/{s} (was {})", self.git.rev_short(s));
+            if let Err(e) = self.git.stash_drop(s) {
+                msg = format!("{e}");
+                break;
+            }
+        }
+        self.refresh();
+        self.set_msg(&msg);
+        Ok(())
+    }
+
+    /// magit-confirm with ITEMS: ONE with `%s` the item, else the items
+    /// and MANY with `%d` their count; "Abort" when declined.
+    fn confirm_items(&mut self, action: &str, one: &str, many: &str, items: &[String]) -> Result<bool> {
+        match items {
+            [] => Ok(true),
+            [i] => self.confirm(action, &one.replacen("%s", i, 1)),
+            is => self.confirm(action, &format!("{}\n\n{}", is.join("\n"), many.replacen("%d", &is.len().to_string(), 1))),
+        }
+    }
+
     /// magit-confirm-files: `PROMPT "file"` or the file list and `PROMPT N files`.
     fn confirm_files(&mut self, action: &str, prompt: &str, files: &[String]) -> Result<bool> {
         match files {
@@ -4413,14 +4478,7 @@ impl App {
     /// magit-stash-clear on the stashes section.
     fn discard_cmd(&mut self) -> Result<()> {
         match self.current_line().map(|l| l.kind.clone()) {
-            Some(LineKind::Stash { name, .. }) => {
-                if self.confirm_noabort("drop-stashes", &format!("Drop {name}"))? {
-                    self.git.stash_drop(&name)?;
-                    self.set_msg("stash dropped");
-                    self.refresh();
-                }
-                return Ok(());
-            }
+            Some(LineKind::Stash { .. }) => return self.stash_drop(),
             Some(LineKind::SectionHeader { section, .. }) if section == "stashes" => {
                 if self.confirm("drop-stashes", "Drop all stashes in refs/stash")? {
                     self.git.stash_clear()?;
@@ -6857,25 +6915,15 @@ impl App {
             }
         };
         let target = self.git.rev_parse(commit)?;
-        let published: Vec<&str> = PUBLISHED_BRANCHES
-            .iter()
-            .copied()
-            .filter(|b| self.git.rev_verify(b) && self.git.is_ancestor(commit, b))
-            .collect();
+        let published = self.publishing_branches(commit);
         let all_at_commit = published
             .iter()
             .all(|b| self.git.rev_parse(b).ok().as_deref() == Some(target.as_str()));
-        if !published.is_empty()
-            && !(delay_edit_confirm && all_at_commit)
-            && !self.confirm(
-                "rebase-published",
-                &format!(
-                    "Some of these commits have already been published to {}. Do you really want to modify them",
-                    published.join(", ")
-                ),
-            )?
-        {
-            return Ok(false);
+        if !(delay_edit_confirm && all_at_commit) {
+            let (m1, m2) = ("Some of these commits have already been published to ", ".\nDo you really want to modify them");
+            if !self.confirm_items("rebase-published", &format!("{m1}%s{m2}"), &format!("{m1}%d public branches{m2}"), &published)? {
+                return Ok(false);
+            }
         }
         if !args.iter().any(|a| a.starts_with("--rebase-merges")) {
             let range = format!("{}..HEAD", since.as_deref().unwrap_or(commit));
