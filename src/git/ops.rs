@@ -3,7 +3,7 @@
 //! Each function corresponds to a Magit command and uses the same underlying
 //! git invocations documented in the Elisp docstrings (e.g. "(git reset --hard REV)").
 
-use super::exec::Git;
+use super::exec::{Editor, Git};
 use anyhow::{bail, Context, Result};
 use std::fs;
 
@@ -1366,8 +1366,6 @@ impl Git {
     /// [args] <base>`, with the todo list accepted unchanged.
     pub fn rebase_autosquash_with(&self, base: &str, args: &[String]) -> Result<()> {
         let mut a: Vec<String> = vec![
-            "-c".into(),
-            "sequence.editor=true".into(),
             "rebase".into(),
             "-i".into(),
             "--autosquash".into(),
@@ -1376,7 +1374,7 @@ impl Git {
         a.extend(args.iter().filter(|x| *x != "--interactive").cloned());
         a.push(base.into());
         let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
-        self.git_interactive(&strs)
+        self.git_with_editors(Editor::Accept, Editor::Accept, &strs)
     }
 
     /// Default base for autosquash: merge-base with the upstream (as in Magit).
@@ -1549,5 +1547,323 @@ impl Git {
         let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
         let out = self.git_string(&strs)?;
         Ok(out.lines().map(|l| l.to_string()).collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Magit suffixes that edit the rebase todo list or move commits between branches.
+
+/// magit-rebase--perl-editor: rewrite the first `pick <abbrev>` todo line.
+pub fn perl_pick_editor(abbrev: &str, replacement: &str) -> String {
+    format!("perl -i -p -e '++$x if not $x and s/^pick {abbrev}/{replacement} {abbrev}/'")
+}
+
+impl Git {
+    /// magit-rev-ancestor-p: `git merge-base --is-ancestor <a> <b>`
+    pub fn is_ancestor(&self, a: &str, b: &str) -> bool {
+        self.git_ok(&["merge-base", "--is-ancestor", a, b])
+    }
+
+    /// magit-rev-verify for commits
+    pub fn rev_verify(&self, rev: &str) -> bool {
+        self.git_ok(&["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])
+    }
+
+    pub fn local_branch_exists(&self, branch: &str) -> bool {
+        self.git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+    }
+
+    /// magit-rev-abbrev
+    pub fn abbrev(&self, rev: &str) -> Result<String> {
+        Ok(self.git_string(&["rev-parse", "--short", rev])?.trim().to_string())
+    }
+
+    /// magit-main-branch: `init.defaultBranch`, else main/master/trunk/development.
+    pub fn main_branch(&self) -> Option<String> {
+        let branches = self.branches();
+        let configured = self
+            .git_string(&["config", "init.defaultBranch"])
+            .ok()
+            .map(|s| s.trim().to_string());
+        configured
+            .into_iter()
+            .chain(["main", "master", "trunk", "development"].map(String::from))
+            .find(|b| branches.contains(b))
+    }
+
+    /// magit-primary-remote: `magit.primaryRemote`, else "upstream", else "origin".
+    pub fn primary_remote(&self) -> Option<String> {
+        let remotes = self.remotes();
+        let configured = self
+            .git_string(&["config", "magit.primaryRemote"])
+            .ok()
+            .map(|s| s.trim().to_string());
+        configured
+            .into_iter()
+            .chain(["upstream", "origin"].map(String::from))
+            .find(|r| remotes.contains(r))
+    }
+
+    // ---- interactive rebase (magit-rebase-interactive-1)
+
+    /// Base for rebasing COMMIT and everything after it: `<commit>^`, or None
+    /// for a root commit (then `--root` is used).
+    pub fn rebase_since(&self, commit: &str) -> Result<Option<String>> {
+        if !self.is_ancestor(commit, "HEAD") {
+            bail!("{commit} isn't an ancestor of HEAD");
+        }
+        let parent = format!("{commit}^");
+        Ok(self.rev_verify(&parent).then_some(parent))
+    }
+
+    fn rebase_i(&self, commit: &str, args: &[String], todo: Editor, message: Editor, global: &[&str]) -> Result<()> {
+        let since = self.rebase_since(commit)?;
+        let mut a: Vec<String> = global.iter().map(|s| s.to_string()).collect();
+        a.extend(["rebase".to_string(), "-i".to_string()]);
+        a.extend(args.iter().filter(|x| *x != "--interactive").cloned());
+        a.push(since.unwrap_or_else(|| "--root".into()));
+        let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+        self.git_with_editors(todo, message, &strs)
+    }
+
+    /// magit-rebase-interactive ("r i"): rebase COMMIT and later commits,
+    /// with the todo list and messages edited in the given editors.
+    pub fn rebase_interactive(&self, commit: &str, args: &[String], todo: Editor, message: Editor) -> Result<()> {
+        self.rebase_i(commit, args, todo, message, &[])
+    }
+
+    /// magit-rebase-edit-commit ("r m"): stop at COMMIT so it can be amended.
+    pub fn rebase_edit_commit(&self, commit: &str, args: &[String]) -> Result<()> {
+        let ed = perl_pick_editor(&self.abbrev(commit)?, "edit");
+        self.rebase_i(commit, args, Editor::Command(&ed), Editor::Accept, &[])
+    }
+
+    /// magit-rebase-reword-commit ("r w"): the new message is written in `message`.
+    pub fn rebase_reword_commit(&self, commit: &str, args: &[String], message: Editor) -> Result<()> {
+        let ed = perl_pick_editor(&self.abbrev(commit)?, "reword");
+        self.rebase_i(commit, args, Editor::Command(&ed), message, &[])
+    }
+
+    /// magit-rebase-remove-commit ("r k"): drop COMMIT from the history.
+    pub fn rebase_remove_commit(&self, commit: &str, args: &[String]) -> Result<()> {
+        let ed = perl_pick_editor(&self.abbrev(commit)?, "noop\\n# pick");
+        self.rebase_i(commit, args, Editor::Command(&ed), Editor::Accept, &["-c", "core.commentChar=#"])
+    }
+
+    /// magit-rebase-subset ("r s"): `git rebase --onto <newbase> <start> <args>`,
+    /// i.e. move the commits after START onto NEWBASE.
+    pub fn rebase_subset(&self, newbase: &str, start: &str, args: &[String]) -> Result<()> {
+        let mut a: Vec<&str> = vec!["rebase", "--onto", newbase, start];
+        a.extend(args.iter().map(|s| s.as_str()));
+        self.git_interactive(&a)
+    }
+
+    /// magit-rebase-edit ("r e" while rebasing): `git rebase --edit-todo`
+    pub fn rebase_edit_todo(&self, todo: Editor) -> Result<()> {
+        if !self.rebase_in_progress() {
+            bail!("No rebase in progress");
+        }
+        self.git_with_editors(todo, Editor::Accept, &["rebase", "--edit-todo"])
+    }
+
+    // ---- merge (magit-merge-absorb / magit-merge-dissolve)
+
+    /// magit--merge-absorb: force-push BRANCH to its push target when that
+    /// remote branch exists, merge it with `--no-edit`, then unset its
+    /// pushRemote and delete it.
+    pub fn merge_absorb(&self, branch: &str, args: &[String]) -> Result<()> {
+        if let Some(remote) = self.push_remote_of(branch) {
+            if self.rev_verify(&format!("refs/remotes/{remote}/{branch}")) {
+                self.git_interactive(&[
+                    "push",
+                    "-v",
+                    "--force-with-lease",
+                    &remote,
+                    &format!("{branch}:refs/heads/{branch}"),
+                ])?;
+            }
+        }
+        let mut a: Vec<&str> = vec!["merge"];
+        a.extend(args.iter().map(|s| s.as_str()));
+        a.extend(["--no-edit", branch]);
+        self.git_interactive(&a)?;
+        self.set_config(&format!("branch.{branch}.pushRemote"), None)?;
+        self.git_interactive(&["branch", "-D", branch])
+    }
+
+    /// magit-merge-dissolve: check out INTO, then absorb the branch that was
+    /// current (or merge the detached HEAD commit).
+    pub fn merge_dissolve(&self, into: &str, args: &[String]) -> Result<()> {
+        let current = self.current_branch();
+        let head = self.rev_parse("HEAD")?;
+        self.git_interactive(&["checkout", into])?;
+        match current {
+            Some(c) => self.merge_absorb(&c, args),
+            None => {
+                let mut a: Vec<&str> = vec!["merge"];
+                a.extend(args.iter().map(|s| s.as_str()));
+                a.push(&head);
+                self.git_interactive(&a)
+            }
+        }
+    }
+
+    // ---- cherry moves (magit--cherry-move)
+
+    /// Commits named by SPEC, oldest first: one commit, or a range `A..B`.
+    pub fn resolve_cherries(&self, spec: &str) -> Result<Vec<String>> {
+        if spec.contains("..") {
+            let out = self.git_string(&["rev-list", "--reverse", spec])?;
+            let v: Vec<String> = out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+            if v.is_empty() {
+                bail!("no commits in {spec}");
+            }
+            Ok(v)
+        } else {
+            Ok(vec![self.rev_parse(&format!("{spec}^{{commit}}"))?])
+        }
+    }
+
+    /// magit-list-containing-branches
+    pub fn branches_containing(&self, commit: &str) -> Vec<String> {
+        self.git_string(&["branch", "--contains", commit, "--format=%(refname:short)"])
+            .map(|o| {
+                o.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty() && !l.starts_with('('))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// magit--cherry-move: cherry-pick COMMITS (oldest first) onto DST, creating
+    /// DST at START_POINT when needed, then remove them from SRC (reset when
+    /// they are its tip, otherwise drop them with rebase -i). Ends on SRC
+    /// unless `checkout_dst`. SRC None only cherry-picks (harvest from no branch).
+    pub fn cherry_move(
+        &self,
+        commits: &[String],
+        src: Option<&str>,
+        dst: &str,
+        args: &[String],
+        start_point: Option<&str>,
+        checkout_dst: bool,
+    ) -> Result<()> {
+        let Some(first) = commits.first() else {
+            bail!("no commits to move");
+        };
+        let tip = commits.last().unwrap_or(first).clone();
+        let current = self.current_branch();
+        if !self.local_branch_exists(dst) {
+            let mut a = vec!["branch", dst];
+            a.extend(start_point);
+            self.git_interactive(&a)?;
+        }
+        if current.as_deref() != Some(dst) {
+            self.git_interactive(&["checkout", dst])?;
+        }
+        let Some(src) = src else {
+            return self.cherry_pick(commits, args);
+        };
+        let keep = format!("{first}^");
+        self.cherry_pick(commits, args)?;
+        if self.rev_parse(&tip)? == self.rev_parse(src)? {
+            if self.local_branch_exists(src) {
+                self.git_interactive(&[
+                    "update-ref",
+                    "-m",
+                    &format!("reset: moving to {keep}"),
+                    &format!("refs/heads/{src}"),
+                    &keep,
+                    &tip,
+                ])?;
+                if !checkout_dst {
+                    self.git_interactive(&["checkout", src])?;
+                }
+            } else if !checkout_dst {
+                // src was a detached HEAD: detach at the commit before the cherries
+                self.git_interactive(&["checkout", "--detach", &keep])?;
+            }
+        } else {
+            self.git_interactive(&["checkout", src])?;
+            let abbrevs: Vec<String> = commits.iter().map(|c| self.abbrev(c)).collect::<Result<_>>()?;
+            let ed = format!("perl -i -ne '/^pick ({})/ or print'", abbrevs.join("|"));
+            self.git_with_editors(Editor::Command(&ed), Editor::Accept, &["rebase", "-i", &keep])?;
+            if checkout_dst {
+                self.git_interactive(&["checkout", dst])?;
+            }
+        }
+        Ok(())
+    }
+
+    // ---- default branch (magit-update-default-branch)
+
+    /// magit--get-default-branch: the primary remote and the branch its
+    /// `refs/remotes/<remote>/HEAD` points at. With `update`, fetch and run
+    /// `git remote set-head --auto` first.
+    pub fn default_branch(&self, update: bool) -> Result<(String, Option<String>)> {
+        let Some(remote) = self.primary_remote() else {
+            bail!("Cannot determine primary remote");
+        };
+        if update {
+            self.git_interactive(&["fetch", "--prune", &remote])?;
+            self.git_interactive(&["remote", "set-head", "--auto", &remote])?;
+        }
+        let head = self
+            .git_string(&["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")])
+            .ok()
+            .map(|h| {
+                let h = h.trim();
+                h.strip_prefix(&format!("{remote}/")).unwrap_or(h).to_string()
+            });
+        if update && head.is_none() {
+            bail!("Cannot determine new default branch");
+        }
+        Ok((remote, head))
+    }
+
+    /// magit--set-default-branch: rename local OLD to NEW (unless NEW exists)
+    /// and point every branch that tracked OLD (locally or on the primary
+    /// remote) at NEW.
+    pub fn set_default_branch(&self, new: &str, old: &str) -> Result<()> {
+        let Some(remote) = self.primary_remote() else {
+            bail!("Cannot determine primary remote");
+        };
+        let out = self.git_string(&[
+            "for-each-ref",
+            "refs/heads",
+            "--format=%(refname:short)\t%(upstream:short)",
+        ])?;
+        let mut branches: Vec<(String, String)> = out
+            .lines()
+            .map(|l| {
+                let mut p = l.splitn(2, '\t');
+                (p.next().unwrap_or("").to_string(), p.next().unwrap_or("").to_string())
+            })
+            .collect();
+        if branches.iter().any(|(b, _)| b == old) && !branches.iter().any(|(b, _)| b == new) {
+            self.git_interactive(&["branch", "-m", old, new])?;
+            for e in branches.iter_mut().filter(|e| e.0 == old) {
+                e.0 = new.to_string();
+            }
+        }
+        let new_local = if self.local_branch_exists(new) {
+            new.to_string()
+        } else {
+            format!("{remote}/{new}")
+        };
+        let old_remote = format!("{remote}/{old}");
+        let new_remote = format!("{remote}/{new}");
+        for (branch, upstream) in &branches {
+            let target = if upstream == old {
+                &new_local
+            } else if *upstream == old_remote {
+                &new_remote
+            } else {
+                continue;
+            };
+            self.git_interactive(&["branch", "--set-upstream-to", target, branch])?;
+        }
+        Ok(())
     }
 }

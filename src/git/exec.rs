@@ -14,7 +14,7 @@ const GLOBAL_ARGS: [&str; 4] = ["-c", "core.editor=true", "-c", "color.ui=false"
 static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 const PROCESS_LOG_MAX: usize = 200;
 
-fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
+pub(crate) fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
     let mut entry = format!(
         "{} git {}  [{}]",
         if ok { " " } else { "!" },
@@ -42,6 +42,17 @@ pub fn process_log() -> Vec<String> {
         .lock()
         .map(|l| l.iter().cloned().collect())
         .unwrap_or_default()
+}
+
+/// Which program git may start to edit a todo list or a commit message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Editor<'a> {
+    /// accept the file unchanged (`true`)
+    Accept,
+    /// the user's configured editor; the caller must hand over the terminal
+    User,
+    /// a non-interactive shell command, e.g. Magit's perl todo editors
+    Command(&'a str),
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +340,42 @@ impl Git {
         Ok(())
     }
 
+    /// Run a sequencer command (rebase -i, --edit-todo, ...) with explicit
+    /// editors, like Magit's `GIT_SEQUENCE_EDITOR` / with-editor handling.
+    /// The environment variables are set so they win over the user's own
+    /// `GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` unless `Editor::User` is asked for.
+    pub fn git_with_editors(&self, todo: Editor, message: Editor, args: &[&str]) -> Result<()> {
+        let mut cmd = Command::new(env_git());
+        cmd.args(["-c", "color.ui=false"]).current_dir(&self.toplevel);
+        match todo {
+            Editor::Accept => {
+                cmd.env("GIT_SEQUENCE_EDITOR", "true");
+            }
+            Editor::Command(c) => {
+                cmd.env("GIT_SEQUENCE_EDITOR", c);
+            }
+            Editor::User => {}
+        }
+        match message {
+            Editor::Accept => {
+                cmd.env("GIT_EDITOR", "true");
+            }
+            Editor::Command(c) => {
+                cmd.env("GIT_EDITOR", c);
+            }
+            Editor::User => {}
+        }
+        let st = cmd
+            .args(args)
+            .status()
+            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        record(&self.toplevel, args, st.success(), st.code(), "");
+        if !st.success() {
+            bail!("git {} failed: {}", args.first().unwrap_or(&""), st);
+        }
+        Ok(())
+    }
+
     /// Run a side-effecting git command and return its stdout (recorded in the
     /// process log, unlike `git_string` which is used for queries).
     pub fn git_fmt(&self, args: &[String]) -> Result<String> {
@@ -361,11 +408,11 @@ impl Git {
     pub fn merge_in_progress(&self) -> bool {
         self.gitdir.join("MERGE_HEAD").exists()
     }
-    /// magit-rebase-in-progress-p: rebase-merge, or rebase-apply that is not `git am`.
+    /// magit-rebase-in-progress-p: `rebase-merge/` or `rebase-apply/onto`
+    /// (`git am` also uses `rebase-apply/`, but without `onto`).
     pub fn rebase_in_progress(&self) -> bool {
         let g = &self.gitdir;
-        g.join("rebase-merge").exists()
-            || (g.join("rebase-apply").exists() && !g.join("rebase-apply/applying").exists())
+        g.join("rebase-merge").exists() || g.join("rebase-apply/onto").exists()
     }
     /// magit-am-in-progress-p
     pub fn am_in_progress(&self) -> bool {

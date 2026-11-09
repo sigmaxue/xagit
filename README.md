@@ -62,12 +62,18 @@ cargo build --release
 - **Stash (`z`)**：`z/i/w/x` stash both/index/worktree/keep-index；`a/p/k` apply/pop/drop；`l/v` list/show；`Z/I/W` snapshot；`-u/-a` 包含未跟踪/忽略文件
 - **Reset (`X`)**：`m/s/h/k/i/w` mixed/soft/hard/keep/index/worktree
 - **Push (`P`)**：`-f` force-with-lease、`-F` force、`-h` no-verify、`-n` dry-run、`-u` set-upstream、`-T` 全部 tag、`-t` follow-tags；`p` 推到 pushRemote（`branch.<b>.pushRemote`，回退到 `remote.pushDefault`）、`u` upstream、`e` 其他、`o` 其他分支、`r` 显式 refspec、`m` matching、`T` 推一个 tag、`t` 推全部 tag、`C` 配置
-- **Merge (`m`)**：`m` merge、`e` 编辑消息后合并（`--no-ff`）、`n` 不提交、`p` 预览（`git merge-tree`，不改动工作区）、`s` squash；合并进行中：`m` 提交合并、`a` 放弃
-- **Rebase (`r`)**：`p` onto pushRemote、`u` onto upstream、`e` elsewhere、`f` autosquash；rebase 进行中：`r` continue、`s` skip、`a` abort
-- **Cherry-pick (`A`) / Revert (`V`)**：进行中时 `A`/`V` continue、`s` skip、`a` abort
+- **Merge (`m`)**：`m` merge、`e` 编辑消息后合并（`--no-ff`）、`n` 不提交、`a` absorb（若 push 目标存在先 `--force-with-lease` 推送，再 `merge --no-edit`，然后删除分支；对主分支会先确认）、`p` 预览（`git merge-tree`，不改动工作区）、`s` squash、`d` dissolve（切到目标分支并 absorb 原分支）；合并进行中：`m` 提交合并、`a` 放弃
+- **Rebase (`r`)**：`p` onto pushRemote、`u` onto upstream、`e` elsewhere、`i` interactive、`s` subset（`rebase --onto <新基> <起点>^`）、`m` 修改某个提交（todo 中改为 `edit`）、`w` reword、`k` 删除某个提交、`f` autosquash；会改写已发布提交（`origin/master`）或范围内含 merge 时，与 Magit 一样先确认；rebase 进行中：`r` continue、`s` skip、`e` 编辑 todo（`rebase --edit-todo`）、`a` abort
+- **Cherry-pick (`A`)**：`h` harvest（把其他分支上的提交搬到当前分支，并从原分支移除）、`m` squash 合并、`d` donate（把当前分支上的提交搬到其他分支）、`n` spinout / `s` spinoff（用这些提交新建分支；spinoff 会切换过去）。被移走的提交是源分支 tip 时用 `update-ref` 回退源分支，否则用 `rebase -i` 删掉；进行中时 `A` continue、`s` skip、`a` abort
+- **Revert (`V`)**：进行中时 `V` continue、`s` skip、`a` abort
+- **Apply patches (`w`)**：`m` 应用 mbox / maildir（`git am <路径>`）、`w` 应用 patch 文件、`a` 应用普通 patch 到工作区
 - **Bisect (`B`)**：平时 `B` 开始、`s` 开始并运行脚本；bisect 进行中 `B` bad、`g` good、`k` skip、`r` reset、`s` 运行脚本
 - **Submodule (`o`)**：`a` 添加、`r` 注册（`git submodule init`，不删除任何东西）、`p` populate（`update --init`）、`u` 更新、`s` 同步、`d` unpopulate（`deinit`）、`k` 删除（带确认）、`l` 列表、`f` fetch modules
-- **Branch (`b`)**：`b/l/c` checkout、`s` spin-off、`S` spin-out、`n` create、`m` rename、`k` delete；`C` 配置：`d` description、`u` upstream、`r` 循环切换 `branch.<b>.rebase`、`p` pushRemote、`R` 循环切换 `pull.rebase`、`P` `remote.pushDefault`
+- **Branch (`b`)**：`b/l/c` checkout、`s` spin-off、`S` spin-out、`n` create、`m` rename、`k` delete；与 Magit 默认的 `magit-branch-direct-configure` 一致，菜单里直接提供 `d/u/r/p/R/P/B` 配置键；`C` 配置菜单：`d` description、`u` upstream、`r` 循环切换 `branch.<b>.rebase`（true/merges/interactive/false/未设置）、`p` pushRemote、`R` 循环切换 `pull.rebase`、`P` `remote.pushDefault`、`B` 更新默认分支（fetch 主远端并 `remote set-head --auto`，把本地旧默认分支改名，同时修改跟踪它的分支的 upstream）、`a m` 循环切换 `branch.autoSetupMerge`（always/true/false）、`a r` 循环切换 `branch.autoSetupRebase`（always/local/remote/never）
+
+菜单键按 Emacs `kbd` 的写法逐键输入：`-f` 是先按 `-` 再按 `f`，`a m` 是先按 `a` 再按 `m`。只按了前缀时菜单会保持打开，等待后续按键；键序列没有定义时提示 `<键> is undefined`；`q` / `C-g` 退出菜单。
+
+`r i`、`r w`、进行中的 `r e` 会暂时离开 TUI，打开 git 配置的编辑器（`GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` / `core.editor`）编辑 todo 或提交消息，编辑器退出后回到 TUI。`r m`、`r k` 和 cherry 搬移与 Magit 一样，用 perl 脚本改写 todo，不需要手动编辑，所以系统里要有 `perl`。
 
 ## 架构
 
@@ -89,14 +95,14 @@ src/
 
 行为一致性来源：每个操作的 git 参数与 Magit Elisp docstring 中记录的一致（如 `magit-unstage-1` 无初始提交时用 `git rm --cached`、否则 `git reset HEAD --`；`magit-reset-index` 用 `git reset <commit> -- .` 等）。
 
-## 测试验收（132 项全部通过）
+## 测试验收（155 项全部通过）
 
 ```bash
 cargo test
 ```
 
-- `tests/keymaps.rs`（28 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言、「无 `unsupported` 占位」全量校验、状态缓冲区直接按键断言、进行中菜单（`@progress`）的选择逻辑，以及通过 `App::press` 实际按键验证打开的菜单
-- `tests/git_ops.rs`（104 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性、11 项附加功能行为测试、8 项 Magit 差异回归测试（ahead/behind、重命名、冲突、upstream、reverse、gitignore 子目录、工作目录命令）与 11 项按键语义回归测试（submodule 注册/populate/unpopulate、配置循环切换、pushRemote/tags/matching/refspecs 推送、merge 预览与编辑消息、合并中提交、sequencer continue/skip/abort、am 与 rebase 区分、bisect 状态、autosquash、进程日志、diff/log 参数）：
+- `tests/keymaps.rs`（31 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言、「无 `unsupported` 占位」全量校验、状态缓冲区直接按键断言、进行中菜单（`@progress`，按 Magit 谓词判断：`rebase-merge/` 或 `rebase-apply/onto`）的选择逻辑、多键序列解析（所有菜单无重复键、无前缀冲突，`P - f`、`b C a m` 等实际按键），以及通过 `App::press` 实际按键验证打开的菜单
+- `tests/git_ops.rs`（124 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性、11 项附加功能行为测试、8 项 Magit 差异回归测试（ahead/behind、重命名、冲突、upstream、reverse、gitignore 子目录、工作目录命令）、11 项按键语义回归测试（submodule 注册/populate/unpopulate、配置循环切换、pushRemote/tags/matching/refspecs 推送、merge 预览与编辑消息、合并中提交、sequencer continue/skip/abort、am 与 rebase 区分、bisect 状态、autosquash、进程日志、diff/log 参数），以及 20 项新增后缀行为测试（rebase interactive/edit/reword/remove/subset/edit-todo/root，merge absorb（含 force-with-lease 推送与 unset pushRemote）/dissolve，cherry harvest（tip 与非 tip）/donate/spinout/spinoff，am mbox，main branch / primary remote，更新默认分支）：
   - stage/unstage/discard × 9（含无初始提交场景）
   - commit 系列 × 9（create/extend/amend/reword/fixup/squash/instant-fixup/instant-squash/-a）
   - branch × 8（checkout/create/delete/rename/spinoff/spinout）
@@ -114,7 +120,8 @@ cargo test
 - ediff 没有 Emacs 会话：`e` / `E` 改为在文本视图显示对应 diff（光标处文件、暂存/未暂存、两个 rev 区间、单个 commit、stash）；Magit ediff 菜单中依赖 ediff 会话的 stage / resolve 未提供
 - `D` / `L` 修改的参数在本次运行内对所有 diff / log 视图生效（Magit 为每个 buffer 单独保存）
 - `m e` 的合并消息在提示行输入，而不是打开编辑器
-- 需要编辑 todo 列表或专用 buffer 的 Magit 后缀未提供（按下无反应，不会触发别的命令）：merge `a` absorb / `d` dissolve，rebase `i/s/m/w/k` 与进行中的 `e`，cherry-pick `h/m/d/n/s`，am `m` maildir，branch configure `B` / `a m` / `a r`
+- 需要编辑 todo 或提交消息时，打开的是外部编辑器，而不是 Emacs 的 `git-rebase-mode` / with-editor buffer
+- `r i/m/w/k/s` 从最近 30 个提交的列表中选择提交（Magit 用 log buffer 选择）；cherry 搬移在提示行输入 commit 或 `A..B` 区间
 - dispatch 与所有子菜单命令均已支持，无 `unsupported` 占位：`H`/`J` 输出当前行信息与状态缓冲区文本，`l r`/`l O`/`l H` 显示 reflog，`l f` 显示光标处文件的日志（ngit 附加），`O` subtree，`Y` cherries，`b C` 分支配置
 - subtree / cherries / patches / 分支配置没有独立 Magit buffer，结果统一显示在文本视图
 - stash 实现采用 `git stash` 原生命令（Magit 自建 stash commit），净效果一致

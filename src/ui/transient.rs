@@ -32,16 +32,53 @@ pub struct Menu {
     pub groups: Vec<Vec<MenuEntry>>,
 }
 
+/// Result of looking up the keys typed so far in a menu.
+#[derive(Debug)]
+pub enum Lookup<'a> {
+    Found(&'a MenuEntry),
+    /// the keys start a longer sequence ("-" of "-a", "a" of "a m")
+    Prefix,
+    None,
+}
+
+/// The keys to type for a transient label, as in Emacs `kbd`:
+/// "-a" is "-" then "a", "a m" is "a" then "m", "C-c" and "<tab>" are one key.
+pub fn key_seq(label: &str) -> Vec<Key> {
+    if label.len() > 1 && label.contains(' ') {
+        label.split(' ').filter(|s| !s.is_empty()).map(key_from_label).collect()
+    } else if label.len() == 2 && (label.starts_with('-') || label.starts_with('=')) {
+        vec![key_from_label(&label[..1]), key_from_label(&label[1..])]
+    } else {
+        vec![key_from_label(label)]
+    }
+}
+
 impl Menu {
+    /// Entry bound to exactly this one key.
     pub fn find(&self, key: &Key) -> Option<&MenuEntry> {
-        for g in &self.groups {
-            for e in g {
-                if key_from_label(&e.key) == *key {
-                    return Some(e);
-                }
+        match self.lookup(std::slice::from_ref(key)) {
+            Lookup::Found(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Match a (possibly partial) key sequence.
+    pub fn lookup(&self, typed: &[Key]) -> Lookup<'_> {
+        let mut prefix = false;
+        for e in self.groups.iter().flatten() {
+            let seq = key_seq(&e.key);
+            if seq == typed {
+                return Lookup::Found(e);
+            }
+            if seq.len() > typed.len() && seq.starts_with(typed) {
+                prefix = true;
             }
         }
-        None
+        if prefix {
+            Lookup::Prefix
+        } else {
+            Lookup::None
+        }
     }
 
     /// All keys in order — used by tests to compare with Magit's maps.
@@ -267,6 +304,16 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "branch-menu".into(),
             title: "Add, configure or remove a branch".into(),
             groups: vec![
+                // magit-branch-direct-configure (Magit's default)
+                vec![
+                    cmd("d", "branch.<branch>.description", "branch-config-description"),
+                    cmd("u", "branch.<branch>.merge/remote", "branch-config-upstream"),
+                    cmd("r", "branch.<branch>.rebase", "branch-config-rebase"),
+                    cmd("p", "branch.<branch>.pushRemote", "branch-config-pushremote"),
+                    cmd("R", "pull.rebase", "pull-rebase"),
+                    cmd("P", "remote.pushDefault", "remote-pushdefault"),
+                    cmd("B", "Update default branch", "update-default-branch"),
+                ],
                 vec![
                     cmd("b", "branch/revision", "checkout"),
                     cmd("l", "local branch", "branch-checkout"),
@@ -396,10 +443,12 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("m", "Merge", "merge-plain"),
                     cmd("e", "Merge and edit message", "merge-editmsg"),
                     cmd("n", "Merge but don't commit", "merge-nocommit"),
+                    cmd("a", "Absorb", "merge-absorb"),
                 ],
                 vec![
                     cmd("p", "Preview merge", "merge-preview"),
                     cmd("s", "Squash merge", "merge-squash"),
+                    cmd("d", "Dissolve", "merge-dissolve"),
                 ],
             ],
         },
@@ -440,7 +489,16 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("u", "onto upstream", "rebase-upstream"),
                     cmd("e", "elsewhere", "rebase-other"),
                 ],
-                vec![cmd("f", "to autosquash", "rebase-autosquash")],
+                vec![
+                    cmd("i", "interactively", "rebase-interactive"),
+                    cmd("s", "a subset", "rebase-subset"),
+                ],
+                vec![
+                    cmd("m", "to modify a commit", "rebase-edit-commit"),
+                    cmd("w", "to reword a commit", "rebase-reword-commit"),
+                    cmd("k", "to remove a commit", "rebase-remove-commit"),
+                    cmd("f", "to autosquash", "rebase-autosquash"),
+                ],
             ],
         },
     );
@@ -453,6 +511,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
             groups: vec![vec![
                 cmd("r", "Continue", "rebase-continue"),
                 cmd("s", "Skip", "rebase-skip"),
+                cmd("e", "Edit", "rebase-edit-todo"),
                 cmd("a", "Abort", "rebase-abort"),
             ]],
         },
@@ -640,6 +699,13 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("A", "Pick", "cherry-pick"),
                     cmd("a", "Apply", "cherry-apply"),
+                    cmd("h", "Harvest", "cherry-harvest"),
+                    cmd("m", "Squash", "merge-squash"),
+                ],
+                vec![
+                    cmd("d", "Donate", "cherry-donate"),
+                    cmd("n", "Spinout", "cherry-spinout"),
+                    cmd("s", "Spinoff", "cherry-spinoff"),
                 ],
             ],
         },
@@ -851,6 +917,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-t", "Use current time as author date", "--ignore-date"),
                 ],
                 vec![
+                    cmd("m", "maildir", "patches-apply-maildir"),
                     cmd("w", "patches", "patches-apply"),
                     cmd("a", "plain patch", "patches-apply-worktree"),
                 ],
@@ -907,6 +974,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("R", "pull.rebase (cycle)", "pull-rebase"),
                     cmd("P", "remote.pushDefault", "remote-pushdefault"),
+                    cmd("B", "Update default branch", "update-default-branch"),
+                    cmd("a m", "branch.autoSetupMerge (cycle)", "branch-autosetup-merge"),
+                    cmd("a r", "branch.autoSetupRebase (cycle)", "branch-autosetup-rebase"),
                 ],
                 // ngit extras
                 vec![

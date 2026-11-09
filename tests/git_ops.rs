@@ -1637,3 +1637,300 @@ fn diff_and_log_arguments() {
     assert_eq!(l.len(), 1);
     assert!(l[0].contains("initial"));
 }
+
+// =============================================================== todo-editing suffixes
+
+fn commit_file(g: &Git, name: &str, msg: &str) -> String {
+    write(g, name, msg);
+    g.stage(name).unwrap();
+    g.commit(Some(msg), &[]).unwrap();
+    g.rev_parse("HEAD").unwrap()
+}
+
+fn subjects(g: &Git, rev: &str) -> Vec<String> {
+    g.git_string(&["log", "--format=%s", rev])
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// initial, c1, c2, c3 on the default branch.
+fn linear_repo() -> (TempDir, Git, [String; 3]) {
+    let (td, g, _head) = repo_with_commit();
+    let c1 = commit_file(&g, "c1.txt", "c1");
+    let c2 = commit_file(&g, "c2.txt", "c2");
+    let c3 = commit_file(&g, "c3.txt", "c3");
+    (td, g, [c1, c2, c3])
+}
+
+#[test]
+fn perl_pick_editor_matches_magit() {
+    assert_eq!(
+        ngit_lib::git::ops::perl_pick_editor("abc123", "edit"),
+        "perl -i -p -e '++$x if not $x and s/^pick abc123/edit abc123/'"
+    );
+}
+
+/// magit-rebase-interactive-1: COMMIT^ as base, --root for the root commit,
+/// and COMMIT must be an ancestor of HEAD.
+#[test]
+fn rebase_since_uses_parent_or_root() {
+    let (_td, g, [c1, ..]) = linear_repo();
+    assert_eq!(g.rebase_since(&c1).unwrap(), Some(format!("{c1}^")));
+    let root = g.rev_parse("HEAD~3").unwrap();
+    assert_eq!(g.rebase_since(&root).unwrap(), None);
+    g.branch_and_checkout("side", Some(&root)).unwrap();
+    assert!(g.rebase_since(&c1).is_err());
+}
+
+/// r i: the todo list goes through the sequence editor; accepting it unchanged
+/// keeps history, editing it rewrites history.
+#[test]
+fn rebase_interactive_runs_sequence_editor() {
+    let (_td, g, [c1, _c2, c3]) = linear_repo();
+    g.rebase_interactive(&c1, &[], Editor::Accept, Editor::Accept).unwrap();
+    assert_eq!(g.rev_parse("HEAD").unwrap(), c3);
+    g.rebase_interactive(&c1, &[], Editor::Command("perl -i -pe 's/^pick/drop/ if $. == 1'"), Editor::Accept)
+        .unwrap();
+    assert_eq!(subjects(&g, "HEAD"), ["c3", "c2", "initial"]);
+    assert!(!exists(&g, "c1.txt"));
+    // from the root commit (--root)
+    let root = g.rev_parse("HEAD~2").unwrap();
+    g.rebase_interactive(&root, &[], Editor::Accept, Editor::Accept).unwrap();
+    assert_eq!(subjects(&g, "HEAD"), ["c3", "c2", "initial"]);
+}
+
+/// r m: stop at COMMIT so it can be amended, then continue.
+#[test]
+fn rebase_edit_commit_stops_at_commit() {
+    let (_td, g, [_c1, c2, _c3]) = linear_repo();
+    g.rebase_edit_commit(&c2, &[]).unwrap();
+    assert!(g.rebase_in_progress());
+    assert_eq!(g.rev_parse("HEAD").unwrap(), c2);
+    write(&g, "c2.txt", "amended");
+    g.stage("c2.txt").unwrap();
+    g.commit(None, &["--amend".into(), "--no-edit".into()]).unwrap();
+    g.git_with_editors(Editor::Accept, Editor::Accept, &["rebase", "--continue"]).unwrap();
+    assert!(!g.rebase_in_progress());
+    assert_eq!(subjects(&g, "HEAD"), ["c3", "c2", "c1", "initial"]);
+    assert_eq!(read(&g, "c2.txt"), "amended");
+}
+
+/// r w: only the message of COMMIT changes.
+#[test]
+fn rebase_reword_commit_changes_message() {
+    let (_td, g, [_c1, c2, _c3]) = linear_repo();
+    g.rebase_reword_commit(&c2, &[], Editor::Command("perl -i -pe 's/^c2$/reworded/'")).unwrap();
+    assert!(!g.rebase_in_progress());
+    assert_eq!(subjects(&g, "HEAD"), ["c3", "reworded", "c1", "initial"]);
+    assert_eq!(g.git_string(&["diff", &c2, "HEAD~1"]).unwrap(), "");
+}
+
+/// r k: COMMIT is dropped (noop + commented pick, as Magit does).
+#[test]
+fn rebase_remove_commit_drops_commit() {
+    let (_td, g, [_c1, c2, _c3]) = linear_repo();
+    g.rebase_remove_commit(&c2, &[]).unwrap();
+    assert!(!g.rebase_in_progress());
+    assert_eq!(subjects(&g, "HEAD"), ["c3", "c1", "initial"]);
+    assert!(!exists(&g, "c2.txt"));
+    assert!(exists(&g, "c3.txt"));
+}
+
+/// r s: rebase --onto NEWBASE START moves the commits after START.
+#[test]
+fn rebase_subset_moves_commits_after_start() {
+    let (_td, g, _head) = repo_with_commit();
+    let main = g.current_branch().unwrap();
+    g.branch_and_checkout("topic", None).unwrap();
+    let t1 = commit_file(&g, "t1.txt", "t1");
+    commit_file(&g, "t2.txt", "t2");
+    commit_file(&g, "t3.txt", "t3");
+    g.checkout(&main).unwrap();
+    commit_file(&g, "m1.txt", "m1");
+    g.checkout("topic").unwrap();
+    g.rebase_subset(&main, &t1, &[]).unwrap();
+    assert_eq!(subjects(&g, "HEAD"), ["t3", "t2", "m1", "initial"]);
+    assert!(!exists(&g, "t1.txt"));
+}
+
+/// r e (while rebasing): git rebase --edit-todo.
+#[test]
+fn rebase_edit_todo_rewrites_remaining_steps() {
+    let (_td, g, [c1, ..]) = linear_repo();
+    assert!(g.rebase_edit_todo(Editor::Accept).is_err());
+    g.rebase_edit_commit(&c1, &[]).unwrap();
+    g.rebase_edit_todo(Editor::Command("perl -i -pe 's/^pick(.* c3)$/drop$1/'")).unwrap();
+    g.git_with_editors(Editor::Accept, Editor::Accept, &["rebase", "--continue"]).unwrap();
+    assert_eq!(subjects(&g, "HEAD"), ["c2", "c1", "initial"]);
+}
+
+// =============================================================== merge absorb/dissolve
+
+/// m a: merge BRANCH with --no-edit, then delete it.
+#[test]
+fn merge_absorb_merges_and_deletes_branch() {
+    let (_td, g) = repo_two_branches();
+    g.merge_absorb("feature", &["--no-ff".into()]).unwrap();
+    assert!(exists(&g, "feature.txt"));
+    assert!(!g.local_branch_exists("feature"));
+    assert_eq!(g.git_string(&["log", "-1", "--format=%p"]).unwrap().split(' ').count(), 2);
+}
+
+/// m a with a push target: force-push first, unset pushRemote afterwards.
+#[test]
+fn merge_absorb_pushes_and_unsets_push_remote() {
+    let (_td, g, _td2, _g2) = remote_sandbox();
+    let main = g.current_branch().unwrap();
+    g.branch_and_checkout("feature", None).unwrap();
+    commit_file(&g, "f1.txt", "f1");
+    g.git_interactive(&["push", "-q", "origin", "feature"]).unwrap();
+    g.set_config("branch.feature.pushRemote", Some("origin")).unwrap();
+    let tip = commit_file(&g, "f2.txt", "f2");
+    g.checkout(&main).unwrap();
+    g.merge_absorb("feature", &[]).unwrap();
+    let remote = g.git_string(&["ls-remote", "origin", "refs/heads/feature"]).unwrap();
+    assert!(remote.starts_with(&tip), "{remote}");
+    assert!(!g.git_ok(&["config", "branch.feature.pushRemote"]));
+    assert!(!g.local_branch_exists("feature"));
+    assert!(exists(&g, "f2.txt"));
+}
+
+/// m d: check out INTO, merge the previously current branch, delete it.
+#[test]
+fn merge_dissolve_merges_current_into_target() {
+    let (_td, g) = repo_two_branches();
+    let main = g.current_branch().unwrap();
+    g.checkout("feature").unwrap();
+    g.merge_dissolve(&main, &[]).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some(main.as_str()));
+    assert!(exists(&g, "feature.txt"));
+    assert!(!g.local_branch_exists("feature"));
+}
+
+// =============================================================== cherry moves
+
+/// main: initial; feature: initial, f1, f2, f3
+fn cherry_repo() -> (TempDir, Git, String, [String; 3]) {
+    let (td, g, _head) = repo_with_commit();
+    let main = g.current_branch().unwrap();
+    g.branch_and_checkout("feature", None).unwrap();
+    let f1 = commit_file(&g, "f1.txt", "f1");
+    let f2 = commit_file(&g, "f2.txt", "f2");
+    let f3 = commit_file(&g, "f3.txt", "f3");
+    g.checkout(&main).unwrap();
+    (td, g, main, [f1, f2, f3])
+}
+
+#[test]
+fn resolve_cherries_orders_oldest_first() {
+    let (_td, g, main, [f1, f2, f3]) = cherry_repo();
+    assert_eq!(g.resolve_cherries(&f2).unwrap(), [f2.clone()]);
+    assert_eq!(g.resolve_cherries(&format!("{main}..feature")).unwrap(), [f1, f2, f3]);
+    assert!(g.resolve_cherries("feature..feature").is_err());
+    assert_eq!(g.branches_containing("feature~1"), ["feature"]);
+}
+
+/// A h on the tip: picked onto the current branch, source reset with update-ref.
+#[test]
+fn cherry_harvest_tip_resets_source() {
+    let (_td, g, main, [_f1, f2, f3]) = cherry_repo();
+    g.cherry_move(&[f3], Some("feature"), &main, &[], None, true).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some(main.as_str()));
+    assert_eq!(subjects(&g, "HEAD"), ["f3", "initial"]);
+    assert_eq!(g.rev_parse("feature").unwrap(), f2);
+}
+
+/// A h on a non-tip commit: source gets it dropped with rebase -i.
+#[test]
+fn cherry_harvest_middle_rebases_source() {
+    let (_td, g, main, [_f1, f2, _f3]) = cherry_repo();
+    g.cherry_move(&[f2], Some("feature"), &main, &[], None, true).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some(main.as_str()));
+    assert_eq!(subjects(&g, "HEAD"), ["f2", "initial"]);
+    assert_eq!(subjects(&g, "feature"), ["f3", "f1", "initial"]);
+}
+
+/// A d: move commits from the current branch to another, stay on current.
+#[test]
+fn cherry_donate_moves_to_other_branch() {
+    let (_td, g, main, [f1, f2, f3]) = cherry_repo();
+    g.checkout("feature").unwrap();
+    g.cherry_move(&[f2, f3], Some("feature"), &main, &[], None, false).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("feature"));
+    assert_eq!(g.rev_parse("HEAD").unwrap(), f1);
+    assert_eq!(subjects(&g, &main), ["f3", "f2", "initial"]);
+}
+
+/// A n: new branch from START with the commits, stay on the current branch.
+#[test]
+fn cherry_spinout_creates_branch_and_stays() {
+    let (_td, g, main, [f1, _f2, _f3]) = cherry_repo();
+    g.checkout("feature").unwrap();
+    g.cherry_move(&[f1], Some("feature"), "out", &[], Some(&main), false).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("feature"));
+    assert_eq!(subjects(&g, "feature"), ["f3", "f2", "initial"]);
+    assert_eq!(subjects(&g, "out"), ["f1", "initial"]);
+}
+
+/// A s: like spinout but checks out the new branch.
+#[test]
+fn cherry_spinoff_creates_branch_and_checks_out() {
+    let (_td, g, main, [_f1, f2, f3]) = cherry_repo();
+    g.checkout("feature").unwrap();
+    g.cherry_move(&[f3], Some("feature"), "off", &[], Some(&main), true).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("off"));
+    assert_eq!(subjects(&g, "HEAD"), ["f3", "initial"]);
+    assert_eq!(g.rev_parse("feature").unwrap(), f2);
+}
+
+// =============================================================== am maildir
+
+/// w m: git am on a mailbox.
+#[test]
+fn am_apply_maildir_applies_mailbox() {
+    let (td, g, main, _) = cherry_repo();
+    let mbox = g.git_string(&["format-patch", "--stdout", &format!("{main}..feature")]).unwrap();
+    let path = td.path().join("patches.mbox");
+    std::fs::write(&path, format!("{mbox}\n")).unwrap();
+    g.am_apply(&[path.to_string_lossy().into_owned()], &[]).unwrap();
+    assert_eq!(subjects(&g, "HEAD"), ["f3", "f2", "f1", "initial"]);
+}
+
+// =============================================================== default branch
+
+#[test]
+fn main_branch_and_primary_remote() {
+    let (_td, g, _td2, _g2) = remote_sandbox();
+    let cur = g.current_branch().unwrap();
+    assert_eq!(g.main_branch().as_deref(), Some(cur.as_str()));
+    g.git_interactive(&["branch", "trunk"]).unwrap();
+    g.set_config("init.defaultBranch", Some("trunk")).unwrap();
+    assert_eq!(g.main_branch().as_deref(), Some("trunk"));
+    assert_eq!(g.primary_remote().as_deref(), Some("origin"));
+    g.remote_add("upstream", "/nonexistent", false).unwrap();
+    assert_eq!(g.primary_remote().as_deref(), Some("upstream"));
+    g.set_config("magit.primaryRemote", Some("origin")).unwrap();
+    assert_eq!(g.primary_remote().as_deref(), Some("origin"));
+}
+
+/// b C B: follow a rename of the remote default branch.
+#[test]
+fn update_default_branch_follows_remote_rename() {
+    let (td, g, _td2, _g2) = remote_sandbox();
+    let old = g.current_branch().unwrap();
+    g.git_interactive(&["remote", "set-head", "origin", "--auto"]).unwrap();
+    g.git_interactive(&["branch", "--track", "topic", &old]).unwrap();
+    assert_eq!(g.default_branch(false).unwrap(), ("origin".to_string(), Some(old.clone())));
+    let bare = td.path().join("srv.git");
+    g.git_string_in(&bare, &["branch", "-m", &old, "newmain"]).unwrap();
+    let (remote, new) = g.default_branch(true).unwrap();
+    assert_eq!((remote.as_str(), new.as_deref()), ("origin", Some("newmain")));
+    g.set_default_branch("newmain", &old).unwrap();
+    assert_eq!(g.current_branch().as_deref(), Some("newmain"));
+    assert!(!g.local_branch_exists(&old));
+    let up = |b: &str| g.git_string(&["rev-parse", "--abbrev-ref", &format!("{b}@{{upstream}}")]).unwrap();
+    assert_eq!(up("newmain"), "origin/newmain");
+    assert_eq!(up("topic"), "newmain");
+}

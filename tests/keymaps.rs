@@ -147,6 +147,18 @@ fn branch_popup_layout() {
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "branch-rename"));
     assert!(matches!(action_of(&m, "x"), Action::Command(c) if c == "branch-reset"));
     assert!(matches!(action_of(&m, "k"), Action::Command(c) if c == "branch-delete"));
+    // magit-branch-direct-configure (default t): configuration suffixes
+    for (key, target) in [
+        ("d", "branch-config-description"),
+        ("u", "branch-config-upstream"),
+        ("r", "branch-config-rebase"),
+        ("p", "branch-config-pushremote"),
+        ("R", "pull-rebase"),
+        ("P", "remote-pushdefault"),
+        ("B", "update-default-branch"),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "b {key}");
+    }
 }
 
 /// magit-remote.el:66 magit-remote prefix
@@ -217,13 +229,15 @@ fn merge_popup_layout() {
     assert!(matches!(action_of(&m, "n"), Action::Command(c) if c == "merge-nocommit"));
     assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "merge-preview"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "merge-squash"));
-    // abort only exists while merging (:if magit-merge-in-progress-p)
-    assert!(find(&m, "a").is_none());
+    assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "merge-absorb"));
+    assert!(matches!(action_of(&m, "d"), Action::Command(c) if c == "merge-dissolve"));
 
+    // :if magit-merge-in-progress-p — "a" aborts only while merging
     let p = menu("merge-menu@progress");
     assert!(matches!(action_of(&p, "m"), Action::Command(c) if c == "merge-commit"));
     assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "merge-abort"));
     assert!(find(&p, "s").is_none());
+    assert!(find(&p, "d").is_none());
 }
 
 /// magit-sequence.el:526 magit-rebase prefix
@@ -242,16 +256,23 @@ fn rebase_popup_layout() {
     assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "rebase-upstream"));
     assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "rebase-other"));
     assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "rebase-autosquash"));
-    // continue/skip/abort only while rebasing (:if magit-rebase-in-progress-p)
-    for k in ["r", "s", "a"] {
+    assert!(matches!(action_of(&m, "i"), Action::Command(c) if c == "rebase-interactive"));
+    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "rebase-subset"));
+    assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "rebase-edit-commit"));
+    assert!(matches!(action_of(&m, "w"), Action::Command(c) if c == "rebase-reword-commit"));
+    assert!(matches!(action_of(&m, "k"), Action::Command(c) if c == "rebase-remove-commit"));
+    // continue/abort only while rebasing (:if magit-rebase-in-progress-p)
+    for k in ["r", "a"] {
         assert!(find(&m, k).is_none(), "{k} must not be in the idle rebase menu");
     }
 
     let p = menu("rebase-menu@progress");
     assert!(matches!(action_of(&p, "r"), Action::Command(c) if c == "rebase-continue"));
     assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "rebase-skip"));
+    assert!(matches!(action_of(&p, "e"), Action::Command(c) if c == "rebase-edit-todo"));
     assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "rebase-abort"));
     assert!(find(&p, "u").is_none());
+    assert!(find(&p, "i").is_none());
 }
 
 /// magit-reset.el:34 magit-reset prefix
@@ -367,6 +388,11 @@ fn cherry_pick_popup_layout() {
     assert!(matches!(action_of(&m, "-e"), Action::Switch(s) if s == "--edit"));
     assert!(matches!(action_of(&m, "A"), Action::Command(c) if c == "cherry-pick"));
     assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "cherry-apply"));
+    assert!(matches!(action_of(&m, "h"), Action::Command(c) if c == "cherry-harvest"));
+    assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "merge-squash"));
+    assert!(matches!(action_of(&m, "d"), Action::Command(c) if c == "cherry-donate"));
+    assert!(matches!(action_of(&m, "n"), Action::Command(c) if c == "cherry-spinout"));
+    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "cherry-spinoff"));
 
     // :if magit-sequencer-in-progress-p
     let p = menu("cherry-pick-menu@progress");
@@ -578,6 +604,7 @@ fn remaining_extras_popup_layout() {
     // magit-am ("w")
     let p = menu("patches-menu");
     assert!(matches!(action_of(&p, "-3"), Action::Switch(s) if s == "--3way"));
+    assert!(matches!(action_of(&p, "m"), Action::Command(c) if c == "patches-apply-maildir"));
     assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-apply"));
     assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-apply-worktree"));
     let p = menu("patches-menu@progress");
@@ -603,9 +630,128 @@ fn remaining_extras_popup_layout() {
         ("p", "branch-config-pushremote"),
         ("R", "pull-rebase"),
         ("P", "remote-pushdefault"),
+        ("B", "update-default-branch"),
+        ("a m", "branch-autosetup-merge"),
+        ("a r", "branch-autosetup-rebase"),
     ] {
         assert!(matches!(action_of(&c, key), Action::Command(x) if x == target), "b C {key}");
     }
+}
+
+/// Transient keys are key sequences, as in Emacs `kbd`.
+#[test]
+fn transient_key_sequences() {
+    use ngit_lib::ui::keys::key_from_label;
+    use ngit_lib::ui::transient::{key_seq, Lookup};
+    let k = key_from_label;
+    assert_eq!(key_seq("-a"), vec![k("-"), k("a")]);
+    assert_eq!(key_seq("a m"), vec![k("a"), k("m")]);
+    assert_eq!(key_seq("C-c"), vec![k("C-c")]);
+    assert_eq!(key_seq("<tab>"), vec![k("tab")]);
+    assert_eq!(key_seq("!"), vec![k("!")]);
+
+    let c = menu("branch-config-menu");
+    assert!(matches!(c.lookup(&[k("a")]), Lookup::Prefix));
+    assert!(matches!(c.lookup(&[k("a"), k("m")]), Lookup::Found(e) if e.key == "a m"));
+    assert!(matches!(c.lookup(&[k("a"), k("z")]), Lookup::None));
+    let p = menu("push-menu");
+    assert!(matches!(p.lookup(&[k("-")]), Lookup::Prefix));
+    assert!(matches!(p.lookup(&[k("-"), k("f")]), Lookup::Found(e) if e.key == "-f"));
+    assert!(matches!(p.lookup(&[k("f")]), Lookup::None), "f alone is not -f");
+
+    // like transient: no binding may shadow another or be defined twice
+    for (name, m) in registry() {
+        let seqs: Vec<(String, Vec<_>)> = m.groups.iter().flatten().map(|e| (e.key.clone(), key_seq(&e.key))).collect();
+        for (i, (a, sa)) in seqs.iter().enumerate() {
+            for (b, sb) in seqs.iter().skip(i + 1) {
+                assert!(sa != sb, "{name}: {a} defined twice");
+                assert!(!sb.starts_with(sa) && !sa.starts_with(sb), "{name}: {a} and {b} overlap");
+            }
+        }
+    }
+}
+
+/// Typing a switch is two keys ("-" then "f"); "a m" likewise.
+#[test]
+fn app_reads_multi_key_bindings() {
+    use ngit_lib::prelude::*;
+    use ngit_lib::ui::app::App;
+    let td = TempDir::new().unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(td.path())
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"])
+        .current_dir(td.path())
+        .status()
+        .unwrap()
+        .success());
+    let g = Git::discover(td.path()).unwrap();
+    let mut app = App::new(g.clone());
+
+    app.press("P").unwrap();
+    app.press("-").unwrap();
+    assert_eq!(app.current_menu(), Some("push-menu"), "half a key keeps the menu open");
+    app.press("f").unwrap();
+    assert_eq!(app.active_switches(), vec!["--force-with-lease".to_string()]);
+    app.press("-").unwrap();
+    app.press("f").unwrap();
+    assert!(app.active_switches().is_empty(), "second -f toggles off");
+    app.press("-").unwrap();
+    app.press("z").unwrap();
+    assert_eq!(app.message(), "- z is undefined");
+    assert_eq!(app.current_menu(), Some("push-menu"));
+    // after an undefined sequence the next key starts afresh
+    app.press("-").unwrap();
+    app.press("u").unwrap();
+    assert_eq!(app.active_switches(), vec!["--set-upstream".to_string()]);
+    app.press("C-g").unwrap();
+    assert_eq!(app.current_menu(), None);
+
+    let local = |k: &str| {
+        g.git_string(&["config", "--local", k])
+            .ok()
+            .filter(|s| !s.is_empty())
+    };
+    app.press("b").unwrap();
+    app.press("C").unwrap();
+    assert_eq!(app.current_menu(), Some("branch-config-menu"));
+    app.press("a").unwrap();
+    app.press("m").unwrap();
+    assert_eq!(app.current_menu(), None);
+    assert_eq!(local("branch.autoSetupMerge").as_deref(), Some("always"));
+    for want in ["true", "false"] {
+        app.press("b").unwrap();
+        app.press("C").unwrap();
+        app.press("a").unwrap();
+        app.press("m").unwrap();
+        assert_eq!(local("branch.autoSetupMerge").as_deref(), Some(want));
+    }
+    app.press("b").unwrap();
+    app.press("C").unwrap();
+    app.press("a").unwrap();
+    app.press("r").unwrap();
+    assert_eq!(local("branch.autoSetupRebase").as_deref(), Some("always"));
+
+    // "b r" (direct configure) cycles branch.<b>.rebase through Magit's choices
+    let key = format!("branch.{}.rebase", g.current_branch().unwrap());
+    for want in [Some("true"), Some("merges"), Some("interactive"), Some("false"), None] {
+        app.press("b").unwrap();
+        app.press("r").unwrap();
+        assert_eq!(local(&key).as_deref(), want);
+    }
+}
+
+#[test]
+fn config_choices_match_magit() {
+    use ngit_lib::ui::app::{AUTOSETUP_MERGE_CHOICES, AUTOSETUP_REBASE_CHOICES, REBASE_CHOICES};
+    // magit-branch.el: magit-branch.<branch>.rebase / magit-pull.rebase
+    assert_eq!(REBASE_CHOICES, &["true", "merges", "interactive", "false"]);
+    assert_eq!(AUTOSETUP_MERGE_CHOICES, &["always", "true", "false"]);
+    assert_eq!(AUTOSETUP_REBASE_CHOICES, &["always", "local", "remote", "never"]);
 }
 
 /// magit-status-mode-map: `k` is magit-discard, `j` is magit-status-jump;
@@ -726,6 +872,16 @@ fn app_opens_in_progress_menu_variants() {
     assert_eq!(app.current_menu(), Some("patches-menu@progress"));
     app.press("q").unwrap();
     std::fs::remove_file(g.gitdir.join("rebase-apply/applying")).unwrap();
+    // a bare rebase-apply/ directory is neither (magit checks rebase-apply/onto)
+    app.press("r").unwrap();
+    assert_eq!(app.current_menu(), Some("rebase-menu"));
+    app.press("q").unwrap();
+    std::fs::write(g.gitdir.join("rebase-apply/onto"), "").unwrap();
+    app.press("r").unwrap();
+    assert_eq!(app.current_menu(), Some("rebase-menu@progress"));
+    app.press("q").unwrap();
+    std::fs::remove_dir_all(g.gitdir.join("rebase-apply")).unwrap();
+    std::fs::create_dir_all(g.gitdir.join("rebase-merge")).unwrap();
     app.press("r").unwrap();
     assert_eq!(app.current_menu(), Some("rebase-menu@progress"));
     app.press("q").unwrap();

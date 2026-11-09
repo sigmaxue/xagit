@@ -1,8 +1,9 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::Key;
-use super::transient::{registry, resolve_menu, Action, Menu, MenuEntry, RepoState};
+use super::transient::{registry, resolve_menu, Action, Lookup, Menu, MenuEntry, RepoState};
 use super::view::{render_status, BufferLine, LineKind};
+use crate::git::exec::Editor;
 use crate::git::ops::Untracked;
 use crate::git::status::Status;
 use crate::git::Git;
@@ -21,6 +22,8 @@ pub struct App {
     menus: BTreeMap<String, Menu>,
     /// stack of open transient menus + their active switches
     stack: Vec<(String, BTreeMap<String, bool>)>,
+    /// keys typed so far of a multi-key transient binding ("-" of "-a")
+    pending: Vec<Key>,
     lines: Vec<BufferLine>,
     cursor: usize,
     message: String,
@@ -51,6 +54,15 @@ pub enum Binding {
     Menu(&'static str),
     Command(&'static str),
 }
+
+/// Choices cycled by `b C r` / `b C R` (magit-branch.<branch>.rebase, magit-pull.rebase).
+pub const REBASE_CHOICES: &[&str] = &["true", "merges", "interactive", "false"];
+/// Choices cycled by `b C a m` (magit-branch.autoSetupMerge).
+pub const AUTOSETUP_MERGE_CHOICES: &[&str] = &["always", "true", "false"];
+/// Choices cycled by `b C a r` (magit-branch.autoSetupRebase).
+pub const AUTOSETUP_REBASE_CHOICES: &[&str] = &["always", "local", "remote", "never"];
+/// magit-published-branches (default)
+const PUBLISHED_BRANCHES: &[&str] = &["origin/master"];
 
 /// Status buffer key map (magit-status-mode-map + magit-mode-map).
 /// `k` is magit-discard and `j` is magit-status-jump (Magit has no vi-style
@@ -131,6 +143,7 @@ impl App {
             git,
             menus: registry(),
             stack: Vec::new(),
+            pending: Vec::new(),
             lines: Vec::new(),
             cursor: 0,
             message: String::new(),
@@ -225,7 +238,7 @@ impl App {
             out,
             crossterm::cursor::MoveTo(0, y as u16),
             crossterm::style::Print(format!(
-                "\r\n[ngit:{branch}] {}\r\n(h/? dispatch, g refresh, q quit, TAB toggle, RET visit, j/k move)",
+                "\r\n[ngit:{branch}] {}\r\n(h/? dispatch, g refresh, q quit, TAB toggle, RET visit, n/p move)",
                 self.message
             ))
         );
@@ -431,6 +444,7 @@ impl App {
             _ => &[],
         };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
+        self.pending.clear();
         self.stack.push((name, active));
     }
 
@@ -459,6 +473,25 @@ impl App {
         &self.message
     }
 
+    /// Switches enabled in the transient currently shown.
+    pub fn active_switches(&self) -> Vec<String> {
+        self.stack
+            .last()
+            .map(|(_, a)| a.iter().filter(|(_, on)| **on).map(|(k, _)| k.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Give the terminal to a program that needs it (the user's editor for a
+    /// rebase todo list or commit message), then take it back.
+    fn with_terminal<T>(&mut self, f: impl FnOnce(&Git) -> T) -> T {
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        let r = f(&self.git);
+        let _ = enable_raw_mode();
+        let _ = execute!(stdout(), EnterAlternateScreen);
+        r
+    }
+
     fn handle_transient_key(
         &mut self,
         key: Key,
@@ -466,27 +499,39 @@ impl App {
         mut active: BTreeMap<String, bool>,
     ) -> Result<()> {
         if key.code == "q" || key.code == "esc" || (key.ctrl && key.code == "g") {
+            self.pending.clear();
             self.stack.pop();
             return Ok(());
         }
-        if let Some(entry) = menu.find(&key) {
-            let entry: MenuEntry = entry.clone();
-            match entry.action {
-                Action::Switch(sw) => {
-                    let on = *active.get(&sw).unwrap_or(&false);
-                    active.insert(sw, !on);
-                    if let Some(top) = self.stack.last_mut() {
-                        top.1 = active;
-                    }
+        let mut typed = std::mem::take(&mut self.pending);
+        typed.push(key);
+        let entry: MenuEntry = match menu.lookup(&typed) {
+            Lookup::Found(e) => e.clone(),
+            Lookup::Prefix => {
+                self.pending = typed;
+                return Ok(());
+            }
+            Lookup::None => {
+                let keys: Vec<String> = typed.iter().map(Key::label).collect();
+                self.set_msg(&format!("{} is undefined", keys.join(" ")));
+                return Ok(());
+            }
+        };
+        match entry.action {
+            Action::Switch(sw) => {
+                let on = *active.get(&sw).unwrap_or(&false);
+                active.insert(sw, !on);
+                if let Some(top) = self.stack.last_mut() {
+                    top.1 = active;
                 }
-                Action::Submenu(name) => {
-                    self.stack.pop();
-                    self.open_menu(&name);
-                }
-                Action::Command(cmd) => {
-                    self.stack.pop();
-                    self.run_command(&cmd, &active)?;
-                }
+            }
+            Action::Submenu(name) => {
+                self.stack.pop();
+                self.open_menu(&name);
+            }
+            Action::Command(cmd) => {
+                self.stack.pop();
+                self.run_command(&cmd, &active)?;
             }
         }
         Ok(())
@@ -2041,7 +2086,8 @@ impl App {
                 let res = self.git.branch_unset_upstream();
                 self.done("upstream unset", res);
             }
-            // magit-branch.<branch>.rebase / pull.rebase: cycle true -> false -> unset
+            // magit-branch.<branch>.rebase / magit-pull.rebase:
+            // cycle true -> merges -> interactive -> false -> unset
             "branch-config-rebase" | "pull-rebase" => {
                 let key = if cmd == "pull-rebase" {
                     "pull.rebase".to_string()
@@ -2054,10 +2100,80 @@ impl App {
                         }
                     }
                 };
-                match self.git.cycle_config(&key, &["true", "false"]) {
+                match self.git.cycle_config(&key, REBASE_CHOICES) {
                     Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
                     Err(e) => self.set_msg(&format!("{e}")),
                 }
+            }
+            // magit-branch.autoSetupMerge / magit-branch.autoSetupRebase ("b C a m" / "a r")
+            "branch-autosetup-merge" | "branch-autosetup-rebase" => {
+                let (key, choices): (&str, &[&str]) = if cmd == "branch-autosetup-merge" {
+                    ("branch.autoSetupMerge", AUTOSETUP_MERGE_CHOICES)
+                } else {
+                    ("branch.autoSetupRebase", AUTOSETUP_REBASE_CHOICES)
+                };
+                match self.git.cycle_config(key, choices) {
+                    Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+            }
+            "update-default-branch" => self.update_default_branch()?,
+            "patches-apply-maildir" => {
+                let Some(p) = self.read_line_prompt("Apply mbox or Maildir", None)? else {
+                    return Ok(());
+                };
+                let path = self.cwd.join(&p);
+                let res = self.git.am_apply(&[path.display().to_string()], args);
+                self.done("patches applied", res);
+            }
+            "merge-absorb" | "merge-dissolve" => self.merge_absorb_cmd(cmd, args)?,
+            "cherry-harvest" | "cherry-donate" | "cherry-spinout" | "cherry-spinoff" => {
+                self.cherry_move_cmd(cmd, args)?
+            }
+            "rebase-interactive" | "rebase-edit-commit" | "rebase-reword-commit" | "rebase-remove-commit" => {
+                let prompt = match cmd {
+                    "rebase-interactive" => "Rebase this commit and all commits above it",
+                    "rebase-edit-commit" => "Edit commit",
+                    "rebase-reword-commit" => "Reword commit",
+                    _ => "Remove commit",
+                };
+                let Some(commit) = self.pick_recent_commit(prompt)? else {
+                    return Ok(());
+                };
+                // magit-rebase-remove-commit passes NOASSERT
+                if cmd != "rebase-remove-commit"
+                    && !self.rebase_assert(&commit, cmd != "rebase-reword-commit", args)?
+                {
+                    return Ok(());
+                }
+                let res = match cmd {
+                    "rebase-interactive" => {
+                        self.with_terminal(|g| g.rebase_interactive(&commit, args, Editor::User, Editor::User))
+                    }
+                    "rebase-edit-commit" => self.git.rebase_edit_commit(&commit, args),
+                    "rebase-reword-commit" => {
+                        self.with_terminal(|g| g.rebase_reword_commit(&commit, args, Editor::User))
+                    }
+                    _ => self.git.rebase_remove_commit(&commit, args),
+                };
+                self.after_rebase(res);
+            }
+            "rebase-subset" => {
+                let default = self.git.upstream_shortname();
+                let Some(newbase) = self.read_line_prompt("Rebase subset onto", default.as_deref())? else {
+                    return Ok(());
+                };
+                let Some(start) =
+                    self.pick_recent_commit(&format!("Rebase this commit and the commits above it onto {newbase}"))?
+                else {
+                    return Ok(());
+                };
+                let res = self.git.rebase_subset(&newbase, &format!("{start}^"), args);
+                self.after_rebase(res);
+            }
+            "rebase-edit-todo" => {
+                let res = self.with_terminal(|g| g.rebase_edit_todo(Editor::User));
+                self.after_rebase(res);
             }
             "remote-pushdefault" => {
                 let mut choices = self.git.remotes();
@@ -2104,6 +2220,260 @@ impl App {
             .pick("Submodule", &choices, None)?
             .cloned()
             .map(|c| if c == "(all)" { vec![] } else { vec![c] }))
+    }
+
+    /// Report the outcome of a rebase that may stop half-way.
+    fn after_rebase(&mut self, res: Result<()>) {
+        match res {
+            Ok(()) if self.git.rebase_in_progress() => {
+                self.set_msg("rebase stopped (r r continue, r s skip, r a abort)")
+            }
+            Ok(()) => self.set_msg("rebased"),
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        self.refresh();
+    }
+
+    /// magit-rebase-interactive-assert: confirm rewriting published commits
+    /// and rebasing a range that contains merges. With `delay_edit_confirm`,
+    /// do not ask when the published branches point exactly at COMMIT.
+    fn rebase_assert(&mut self, commit: &str, delay_edit_confirm: bool, args: &[String]) -> Result<bool> {
+        let since = match self.git.rebase_since(commit) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_msg(&format!("{e}"));
+                return Ok(false);
+            }
+        };
+        let target = self.git.rev_parse(commit)?;
+        let published: Vec<&str> = PUBLISHED_BRANCHES
+            .iter()
+            .copied()
+            .filter(|b| self.git.rev_verify(b) && self.git.is_ancestor(commit, b))
+            .collect();
+        let all_at_commit = published
+            .iter()
+            .all(|b| self.git.rev_parse(b).ok().as_deref() == Some(target.as_str()));
+        if !published.is_empty()
+            && !(delay_edit_confirm && all_at_commit)
+            && !self.yes_no(&format!(
+                "Some of these commits have already been published to {}. Do you really want to modify them?",
+                published.join(", ")
+            ))?
+        {
+            self.set_msg("Abort");
+            return Ok(false);
+        }
+        if !args.iter().any(|a| a.starts_with("--rebase-merges")) {
+            let range = format!("{}..HEAD", since.as_deref().unwrap_or(commit));
+            let merges = self.git.git_string(&["rev-list", "--merges", &range]).unwrap_or_default();
+            if !merges.trim().is_empty() && !self.yes_no("Proceed despite merge in rebase range?")? {
+                self.set_msg("Abort");
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// magit-merge-absorb ("m a") / magit-merge-dissolve ("m d")
+    fn merge_absorb_cmd(&mut self, cmd: &str, args: &[String]) -> Result<()> {
+        let current = self.git.current_branch();
+        let others: Vec<String> = self
+            .git
+            .branches()
+            .into_iter()
+            .filter(|b| Some(b) != current.as_ref())
+            .collect();
+        let (absorbed, res) = if cmd == "merge-absorb" {
+            let Some(branch) = self.pick("Absorb branch", &others, None)?.cloned() else {
+                return Ok(());
+            };
+            if !self.confirm_absorb(&branch)? {
+                return Ok(());
+            }
+            let res = self.git.merge_absorb(&branch, args);
+            (branch, res)
+        } else {
+            let label = match &current {
+                Some(c) => c.clone(),
+                None => self.git.rev_parse("HEAD")?,
+            };
+            // default: the current branch's upstream when that is a local branch
+            let default = current
+                .as_ref()
+                .and_then(|b| self.git.upstream_of(b))
+                .filter(|(r, _)| r == ".")
+                .map(|(_, b)| b);
+            let Some(into) = self.pick(&format!("Merge `{label}' into"), &others, default.as_deref())?.cloned()
+            else {
+                return Ok(());
+            };
+            if current.is_some() && !self.confirm_absorb(&label)? {
+                return Ok(());
+            }
+            let res = self.git.merge_dissolve(&into, args);
+            (label, res)
+        };
+        match res {
+            Ok(()) => self.set_msg(&format!("merged and removed {absorbed}")),
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// magit--merge-absorb asks before merging the main branch into another one.
+    fn confirm_absorb(&mut self, branch: &str) -> Result<bool> {
+        if self.git.main_branch().as_deref() == Some(branch)
+            && !self.yes_no(&format!("Do you really want to merge `{branch}' into another branch?"))?
+        {
+            self.set_msg("Abort");
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// magit-cherry-harvest / -donate / -spinout / -spinoff ("A h/d/n/s")
+    fn cherry_move_cmd(&mut self, cmd: &str, args: &[String]) -> Result<()> {
+        let verb = &cmd["cherry-".len()..];
+        let away = cmd != "cherry-harvest";
+        let current = match self.git.current_branch() {
+            Some(c) => c,
+            None if cmd == "cherry-donate" => self.git.rev_parse("HEAD")?,
+            None => {
+                self.set_msg(&format!("Cannot {verb} cherries while HEAD is detached"));
+                return Ok(());
+            }
+        };
+        let Some(spec) = self.read_line_prompt(&format!("{verb} cherry (commit or A..B)"), None)? else {
+            return Ok(());
+        };
+        let commits = match self.git.resolve_cherries(&spec) {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_msg(&format!("{e}"));
+                return Ok(());
+            }
+        };
+        let reachable = self.git.is_ancestor(&commits[0], &current);
+        if away != reachable {
+            let are = if reachable { "are" } else { "are not" };
+            self.set_msg(&format!("Cannot {verb} cherries that {are} reachable from HEAD"));
+            return Ok(());
+        }
+        let n = commits.len();
+        let cherries = if n == 1 { "1 cherry".to_string() } else { format!("{n} cherries") };
+        let res = match cmd {
+            "cherry-harvest" => {
+                let branches = self.git.branches_containing(&commits[0]);
+                let src = match branches.len() {
+                    0 => None,
+                    1 => Some(branches[0].clone()),
+                    _ => match self.pick(&format!("Remove {cherries} from branch"), &branches, None)? {
+                        Some(b) => Some(b.clone()),
+                        None => return Ok(()),
+                    },
+                };
+                self.git.cherry_move(&commits, src.as_deref(), &current, args, None, true)
+            }
+            "cherry-donate" => {
+                let others: Vec<String> =
+                    self.git.branches().into_iter().filter(|b| *b != current).collect();
+                let Some(dst) = self.pick(&format!("Move {cherries} to branch"), &others, None)?.cloned() else {
+                    return Ok(());
+                };
+                self.git.cherry_move(&commits, Some(&current), &dst, args, None, false)
+            }
+            _ => {
+                let Some(name) =
+                    self.read_line_prompt(&format!("Create branch from {cherries} named"), None)?
+                else {
+                    return Ok(());
+                };
+                if self.git.local_branch_exists(&name) {
+                    self.set_msg(&format!("branch {name} already exists"));
+                    return Ok(());
+                }
+                let default_start = self.git.upstream_shortname().unwrap_or_else(|| current.clone());
+                let Some(start) = self.read_line_prompt(
+                    &format!("Create branch from {cherries} starting at"),
+                    Some(&default_start),
+                )?
+                else {
+                    return Ok(());
+                };
+                let checkout = cmd == "cherry-spinoff";
+                self.git.cherry_move(&commits, Some(&current), &name, args, Some(&start), checkout)
+            }
+        };
+        match res {
+            Ok(()) => self.set_msg(&format!("{verb}: moved {cherries}")),
+            Err(e) => self.set_msg(&format!("{e} (resolve, then A A to continue)")),
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// magit-update-default-branch ("b C B")
+    fn update_default_branch(&mut self) -> Result<()> {
+        let old = match self.git.default_branch(false) {
+            Ok((_, o)) => o,
+            Err(e) => {
+                self.set_msg(&format!("{e}"));
+                return Ok(());
+            }
+        };
+        let (remote, new) = match self.git.default_branch(true) {
+            Ok((r, Some(n))) => (r, n),
+            Ok((_, None)) => {
+                self.set_msg("Cannot determine new default branch");
+                return Ok(());
+            }
+            Err(e) => {
+                self.set_msg(&format!("{e}"));
+                return Ok(());
+            }
+        };
+        let old = if old.as_deref() == Some(new.as_str()) {
+            let Some(o) = self.read_line_prompt(
+                &format!(
+                    "Name of default branch is still `{new}', but the upstreams of some local branches \
+                     might need updating. Name of upstream branches to replace with `{new}'"
+                ),
+                None,
+            )?
+            else {
+                return Ok(());
+            };
+            o
+        } else {
+            let old = match old {
+                Some(o) => o,
+                None => {
+                    let others: Vec<String> = self.git.branches().into_iter().filter(|b| *b != new).collect();
+                    let Some(o) = self
+                        .pick(&format!("Name of old default branch to be renamed to `{new}'"), &others, Some("master"))?
+                        .cloned()
+                    else {
+                        return Ok(());
+                    };
+                    o
+                }
+            };
+            if !self.yes_no(&format!(
+                "Default branch changed from `{old}' to `{new}' on {remote}.  Do the same locally?"
+            ))? {
+                self.set_msg("Abort");
+                return Ok(());
+            }
+            old
+        };
+        match self.git.set_default_branch(&new, &old) {
+            Ok(()) => self.set_msg(&format!("default branch is now {new}")),
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        self.refresh();
+        Ok(())
     }
 
     /// Pick a known subtree prefix, or ask for one when none is recorded.
