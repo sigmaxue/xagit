@@ -1047,9 +1047,7 @@ impl App {
                 self.set_msg("cloned");
             }
 
-            "unsupported" => self.set_msg("command not supported in this build"),
-
-            // Magit extras (bisect/worktree/submodule/notes/ediff)
+            // All remaining commands are Magit extras
             _ => self.run_extra(cmd)?,
         }
         Ok(())
@@ -1461,9 +1459,180 @@ impl App {
                 self.show(&format!("commit {rev}"), res);
             }
 
+            // ---- section info / buffer display
+            "section-info" => {
+                let line = self.current_line().cloned();
+                let text = match line {
+                    Some(l) => {
+                        let section = match &l.kind {
+                            LineKind::SectionHeader { section, .. }
+                            | LineKind::File { section, .. } => section.clone(),
+                            _ => "-".into(),
+                        };
+                        format!(
+                            "Line: {}\nKind: {:?}\nSection: {}\nPosition: {}/{}",
+                            l.text,
+                            l.kind,
+                            section,
+                            self.cursor + 1,
+                            self.lines.len(),
+                        )
+                    }
+                    None => "No line at point".into(),
+                };
+                self.view_text = Some(("section info".into(), text));
+            }
+            "display-buffer" => {
+                let mut out = format!("Status buffer ({} lines)\n\n", self.lines.len());
+                for (i, l) in self.lines.iter().enumerate() {
+                    out.push_str(&format!("{:>4}  {}\n", i + 1, l.text));
+                }
+                self.view_text = Some(("status buffer".into(), out));
+            }
+            "log-change" => {
+                let path = match self.current_file() {
+                    Some((_, p)) => p,
+                    None => {
+                        let Some(p) = self.read_line_prompt("Log file path", None)? else {
+                            return Ok(());
+                        };
+                        p
+                    }
+                };
+                let res = self.git.log_file(&path, 50);
+                self.show(&format!("log {path}"), res);
+            }
+            "cherries" => {
+                let default = self.git.upstream_shortname();
+                let up = self.read_line_prompt("Cherry against upstream", default.as_deref())?;
+                let res = self.git.cherries(up.as_deref(), None);
+                self.show("cherries", res);
+            }
+            "reflog-current" => {
+                let res = self.git.reflog(None, 50);
+                self.show("reflog", res);
+            }
+
+            // ---- subtree
+            "subtree-prefixes" => {
+                let prefixes = self.git.subtree_prefixes();
+                let text = if prefixes.is_empty() {
+                    "No subtree prefixes found".into()
+                } else {
+                    prefixes.join("\n")
+                };
+                self.view_text = Some(("subtree prefixes".into(), text));
+            }
+            "subtree-add" | "subtree-pull" | "subtree-push" => {
+                let prefix = self.subtree_prefix_prompt()?;
+                let Some(prefix) = prefix else { return Ok(()) };
+                let Some(repo) = self.read_line_prompt("Subtree repository", None)? else {
+                    return Ok(());
+                };
+                let Some(rev) = self.read_line_prompt("Subtree revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                let res = match cmd {
+                    "subtree-add" => self.git.subtree_add(&prefix, &repo, &rev),
+                    "subtree-pull" => self.git.subtree_pull(&prefix, &repo, &rev),
+                    _ => self.git.subtree_push(&prefix, &repo, &rev),
+                };
+                self.done("subtree updated", res);
+            }
+            "subtree-split" => {
+                let Some(prefix) = self.subtree_prefix_prompt()? else { return Ok(()) };
+                let Some(branch) = self.read_line_prompt("Split into branch", None)? else {
+                    return Ok(());
+                };
+                let res = self.git.subtree_split(&prefix, &branch);
+                self.done("subtree split", res);
+            }
+
+            // ---- patches
+            "patches-format" => {
+                let Some(range) =
+                    self.read_line_prompt("Format patches for range", Some("HEAD~3..HEAD"))?
+                else {
+                    return Ok(());
+                };
+                let Some(dir) = self.read_line_prompt("Output directory", Some("patches"))? else {
+                    return Ok(());
+                };
+                let res = self.git.patch_format(&range, &dir);
+                self.show("format-patch", res);
+            }
+            "patches-apply" | "patches-apply-3way" | "patches-apply-worktree" => {
+                let Some(path) = self.read_line_prompt("Patch file", None)? else {
+                    return Ok(());
+                };
+                let res = match cmd {
+                    "patches-apply" => self.git.patch_apply_am(&path, false),
+                    "patches-apply-3way" => self.git.patch_apply_am(&path, true),
+                    _ => self.git.patch_apply_worktree(&path),
+                };
+                self.done("patch applied", res);
+            }
+            "patches-abort" | "patches-continue" | "patches-show" => {
+                let res = match cmd {
+                    "patches-abort" => self.git.patch_am_abort(),
+                    "patches-continue" => self.git.patch_am_continue(),
+                    _ => self.git.patch_am_show(),
+                };
+                if cmd == "patches-show" {
+                    self.show("current patch", res);
+                } else {
+                    self.done("git am", res);
+                }
+            }
+
+            // ---- branch configuration
+            "branch-config-show" => {
+                let res = self.git.branch_config();
+                self.show("branch configuration", res);
+            }
+            "branch-config-upstream" => {
+                let default = self.git.upstream_shortname();
+                let Some(up) = self.read_line_prompt("Upstream branch", default.as_deref())? else {
+                    return Ok(());
+                };
+                let res = self.git.branch_set_upstream(&up);
+                self.done("upstream set", res);
+            }
+            "branch-config-unset-upstream" => {
+                let res = self.git.branch_unset_upstream();
+                self.done("upstream unset", res);
+            }
+            "branch-config-rebase-on" | "branch-config-rebase-off" => {
+                let value = if cmd == "branch-config-rebase-on" { "true" } else { "false" };
+                let res = self.git.branch_set_config("rebase", value);
+                self.done("branch rebase configured", res);
+            }
+            "branch-config-description" | "branch-config-pushremote" => {
+                let (key, prompt) = if cmd == "branch-config-description" {
+                    ("description", "Branch description")
+                } else {
+                    ("pushRemote", "pushRemote")
+                };
+                let Some(value) = self.read_line_prompt(prompt, None)? else {
+                    return Ok(());
+                };
+                let res = self.git.branch_set_config(key, &value);
+                self.done("branch configured", res);
+            }
+
             _ => self.set_msg(&format!("unknown command: {cmd}")),
         }
         Ok(())
+    }
+
+    /// Pick a known subtree prefix, or ask for one when none is recorded.
+    fn subtree_prefix_prompt(&mut self) -> Result<Option<String>> {
+        let prefixes = self.git.subtree_prefixes();
+        if prefixes.is_empty() {
+            self.read_line_prompt("Subtree prefix", None)
+        } else {
+            Ok(self.pick("Subtree prefix", &prefixes, None)?.cloned())
+        }
     }
 }
 

@@ -132,19 +132,19 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("f", "Fetch", "fetch-menu"),
                     cmd("F", "Pull", "pull-menu"),
                     cmd("h", "Help", "help"),
-                    cmd("H", "Section info", "unsupported"),
+                    cmd("H", "Section info", "section-info"),
                 ],
                 vec![
                     cmd("i", "Ignore", "gitignore-menu"),
                     cmd("I", "Init", "init"),
                     cmd("j", "Jump to section", "jump"),
-                    cmd("J", "Display buffer", "unsupported"),
+                    cmd("J", "Display buffer", "display-buffer"),
                     cmd("l", "Log", "log-menu"),
-                    cmd("L", "Log (change)", "unsupported"),
+                    cmd("L", "Log (change)", "log-change"),
                     cmd("m", "Merge", "merge-menu"),
                     cmd("M", "Remote", "remote-menu"),
                     cmd("o", "Submodule", "submodule-menu"),
-                    cmd("O", "Subtree", "unsupported"),
+                    cmd("O", "Subtree", "subtree-menu"),
                     cmd("P", "Push", "push-menu"),
                     cmd("q", "Bury buffer", "quit"),
                     cmd("Q", "Command", "git-command"),
@@ -154,11 +154,11 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("t", "Tag", "tag-menu"),
                     cmd("T", "Note", "notes-menu"),
                     cmd("V", "Revert", "revert"),
-                    cmd("w", "Apply patches", "unsupported"),
-                    cmd("W", "Format patches", "unsupported"),
+                    cmd("w", "Apply patches", "patches-menu"),
+                    cmd("W", "Format patches", "patches-format"),
                     cmd("X", "Reset", "reset-menu"),
                     cmd("y", "Show Refs", "show-refs"),
-                    cmd("Y", "Cherries", "unsupported"),
+                    cmd("Y", "Cherries", "cherries"),
                     cmd("z", "Stash", "stash-menu"),
                     cmd("Z", "Worktree", "worktree-menu"),
                     cmd("!", "Run", "run-menu"),
@@ -226,7 +226,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("m", "rename", "branch-rename"),
                     cmd("x", "reset", "branch-reset"),
                     cmd("k", "delete", "branch-delete"),
-                    cmd("C", "configure...", "unsupported"),
+                    cmd("C", "configure...", "branch-config-menu"),
                 ],
             ],
         },
@@ -475,7 +475,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 cmd("o", "other", "log-other"),
                 cmd("L", "local branches", "log-branches"),
                 cmd("b", "all branches", "log-all-branches"),
-                cmd("r", "reflog current", "unsupported"),
+                cmd("r", "reflog current", "reflog-current"),
             ]],
         },
     );
@@ -614,6 +614,68 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("c", "Commit", "ediff-commit"),
                     cmd("r", "Ranges", "ediff-range"),
                     cmd("D", "Change", "diff-change"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-subtree (O)
+    m.insert(
+        "subtree-menu".into(),
+        Menu {
+            name: "subtree-menu".into(),
+            title: "Subtree".into(),
+            groups: vec![
+                vec![
+                    cmd("a", "Add", "subtree-add"),
+                    cmd("P", "Pull", "subtree-pull"),
+                    cmd("p", "Push", "subtree-push"),
+                    cmd("s", "Split", "subtree-split"),
+                ],
+                vec![cmd("l", "List prefixes", "subtree-prefixes")],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-am / format-patch (w / W)
+    m.insert(
+        "patches-menu".into(),
+        Menu {
+            name: "patches-menu".into(),
+            title: "Apply patches".into(),
+            groups: vec![
+                vec![
+                    cmd("w", "Apply (git am)", "patches-apply"),
+                    cmd("A", "Apply 3-way", "patches-apply-3way"),
+                    cmd("a", "Apply to worktree", "patches-apply-worktree"),
+                ],
+                vec![
+                    cmd("r", "Abort", "patches-abort"),
+                    cmd("c", "Continue", "patches-continue"),
+                    cmd("l", "Show current", "patches-show"),
+                    cmd("W", "Format patches", "patches-format"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-branch-configure (b C)
+    m.insert(
+        "branch-config-menu".into(),
+        Menu {
+            name: "branch-config-menu".into(),
+            title: "Configure branch".into(),
+            groups: vec![
+                vec![
+                    cmd("s", "Show settings", "branch-config-show"),
+                    cmd("u", "Set upstream", "branch-config-upstream"),
+                    cmd("U", "Unset upstream", "branch-config-unset-upstream"),
+                ],
+                vec![
+                    cmd("r", "Rebase on", "branch-config-rebase-on"),
+                    cmd("R", "Rebase off", "branch-config-rebase-off"),
+                    cmd("d", "Description", "branch-config-description"),
+                    cmd("p", "pushRemote", "branch-config-pushremote"),
                 ],
             ],
         },

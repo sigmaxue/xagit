@@ -373,3 +373,48 @@ fn extra_features_popup_layout() {
     let e = menu("ediff-menu");
     assert!(matches!(action_of(&e, "e"), Action::Command(c) if c == "ediff-dwim"));
 }
+
+/// No transient entry may remain a placeholder.
+#[test]
+fn no_unsupported_commands_remain() {
+    for (name, m) in registry() {
+        for e in m.groups.iter().flatten() {
+            assert!(
+                !matches!(&e.action, Action::Command(c) if c == "unsupported"),
+                "{name}: {} still unsupported",
+                e.key
+            );
+        }
+    }
+}
+
+/// The last batch of Magit extras: subtree, patches, branch config, reflog, etc.
+#[test]
+fn remaining_extras_popup_layout() {
+    let reg = registry();
+    for name in ["subtree-menu", "patches-menu", "branch-config-menu"] {
+        assert!(reg.contains_key(name), "{name} missing");
+    }
+    let d = menu("dispatch");
+    for (key, target) in [
+        ("H", "section-info"),
+        ("J", "display-buffer"),
+        ("L", "log-change"),
+        ("O", "subtree-menu"),
+        ("w", "patches-menu"),
+        ("W", "patches-format"),
+        ("Y", "cherries"),
+    ] {
+        assert!(matches!(action_of(&d, key), Action::Command(c) if c == target), "{key}");
+    }
+    let b = menu("branch-menu");
+    assert!(matches!(action_of(&b, "C"), Action::Command(c) if c == "branch-config-menu"));
+    let l = menu("log-menu");
+    assert!(matches!(action_of(&l, "r"), Action::Command(c) if c == "reflog-current"));
+    let s = menu("subtree-menu");
+    assert!(matches!(action_of(&s, "a"), Action::Command(c) if c == "subtree-add"));
+    let p = menu("patches-menu");
+    assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-apply"));
+    let c = menu("branch-config-menu");
+    assert!(matches!(action_of(&c, "u"), Action::Command(c) if c == "branch-config-upstream"));
+}

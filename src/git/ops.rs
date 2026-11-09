@@ -958,4 +958,164 @@ impl Git {
             rev.into(),
         ])
     }
+
+    // ---- subtree (magit-subtree)
+
+    /// Prefixes recorded in subtree merge commits.
+    pub fn subtree_prefixes(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .git_lines(&["log", "--all", "--grep=git-subtree-dir:", "--format=%B"])
+            .iter()
+            .filter_map(|l| l.strip_prefix("git-subtree-dir:").map(|p| p.trim().to_string()))
+            .filter(|p| !p.is_empty())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    pub fn subtree_add(&self, prefix: &str, repo: &str, rev: &str) -> Result<String> {
+        self.git_fmt(&[
+            "subtree".into(),
+            "add".into(),
+            format!("--prefix={prefix}"),
+            repo.into(),
+            rev.into(),
+        ])
+    }
+
+    pub fn subtree_pull(&self, prefix: &str, repo: &str, rev: &str) -> Result<String> {
+        self.git_fmt(&[
+            "subtree".into(),
+            "pull".into(),
+            format!("--prefix={prefix}"),
+            repo.into(),
+            rev.into(),
+            "-m".into(),
+            format!("Merge subtree {prefix}"),
+        ])
+    }
+
+    pub fn subtree_push(&self, prefix: &str, repo: &str, rev: &str) -> Result<String> {
+        self.git_fmt(&[
+            "subtree".into(),
+            "push".into(),
+            format!("--prefix={prefix}"),
+            repo.into(),
+            rev.into(),
+        ])
+    }
+
+    pub fn subtree_split(&self, prefix: &str, branch: &str) -> Result<String> {
+        self.git_fmt(&[
+            "subtree".into(),
+            "split".into(),
+            format!("--prefix={prefix}"),
+            "-b".into(),
+            branch.into(),
+        ])
+    }
+
+    // ---- patches (magit-am / magit-format-patch)
+
+    /// `git format-patch -o <outdir> <range>`; stdout is the generated file list.
+    pub fn patch_format(&self, range: &str, outdir: &str) -> Result<String> {
+        self.git_fmt(&[
+            "format-patch".into(),
+            "-o".into(),
+            outdir.into(),
+            range.into(),
+        ])
+    }
+
+    pub fn patch_apply_am(&self, path: &str, three_way: bool) -> Result<String> {
+        let mut a: Vec<String> = vec!["am".into()];
+        if three_way {
+            a.push("-3".into());
+        }
+        a.push(path.into());
+        self.git_fmt(&a)
+    }
+
+    /// Apply a patch to the worktree only (`git apply`), without committing.
+    pub fn patch_apply_worktree(&self, path: &str) -> Result<String> {
+        self.git_fmt(&["apply".into(), path.into()])
+    }
+
+    pub fn patch_am_abort(&self) -> Result<String> {
+        self.git_fmt(&["am".into(), "--abort".into()])
+    }
+
+    pub fn patch_am_continue(&self) -> Result<String> {
+        self.git_fmt(&["am".into(), "--continue".into()])
+    }
+
+    pub fn patch_am_show(&self) -> Result<String> {
+        self.git_fmt(&["am".into(), "--show-current-patch".into()])
+    }
+
+    // ---- cherries / reflog / file log / branch configuration
+
+    /// `git cherry -v <upstream> [head]`
+    pub fn cherries(&self, upstream: Option<&str>, head: Option<&str>) -> Result<String> {
+        let up = upstream
+            .map(str::to_string)
+            .or_else(|| self.upstream_shortname());
+        let Some(up) = up else {
+            bail!("no upstream configured for cherries");
+        };
+        let mut a: Vec<String> = vec!["cherry".into(), "-v".into(), up];
+        if let Some(h) = head {
+            a.push(h.into());
+        }
+        self.git_fmt(&a)
+    }
+
+    /// `git reflog show --date=iso -n <limit> [rev]`
+    pub fn reflog(&self, rev: Option<&str>, limit: usize) -> Result<String> {
+        let mut a: Vec<String> = vec![
+            "reflog".into(),
+            "show".into(),
+            "--date=iso".into(),
+            "-n".into(),
+            limit.to_string(),
+        ];
+        if let Some(r) = rev {
+            a.push(r.into());
+        }
+        self.git_fmt(&a)
+    }
+
+    /// Log (change): history of one file.
+    pub fn log_file(&self, path: &str, limit: usize) -> Result<String> {
+        self.git_fmt(&[
+            "log".into(),
+            "--oneline".into(),
+            "--follow".into(),
+            "-n".into(),
+            limit.to_string(),
+            "--".into(),
+            path.into(),
+        ])
+    }
+
+    pub fn branch_config(&self) -> Result<String> {
+        self.git_fmt(&["config".into(), "--get-regexp".into(), r"^branch\.".into()])
+    }
+
+    pub fn branch_set_upstream(&self, upstream: &str) -> Result<String> {
+        self.git_fmt(&["branch".into(), format!("--set-upstream-to={upstream}")])
+    }
+
+    pub fn branch_unset_upstream(&self) -> Result<String> {
+        self.git_fmt(&["branch".into(), "--unset-upstream".into()])
+    }
+
+    /// Set `branch.<current>.<key>` (Magit branch configure infixes).
+    pub fn branch_set_config(&self, key: &str, value: &str) -> Result<String> {
+        let Some(b) = self.current_branch() else {
+            bail!("cannot configure a branch on detached HEAD");
+        };
+        self.git_fmt(&["config".into(), format!("branch.{b}.{key}"), value.into()])
+    }
 }

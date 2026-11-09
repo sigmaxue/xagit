@@ -31,6 +31,10 @@ cargo build --release
 | `$` / `!` | run 菜单 | 运行 git 命令 |
 | `B` / `Z` / `o` / `T` | bisect / worktree / submodule / notes | 附加功能菜单 |
 | `e` / `E` / `D` | ediff dwim / ediff 菜单 / diff change | 文本 diff 视图 |
+| `H` / `J` | section info / display buffer | 当前行信息与状态缓冲区文本 |
+| `L` / `O` / `Y` | log change / subtree / cherries | 文件日志、subtree 菜单、cherry 视图 |
+| `w` / `W` | apply / format patches | `git am` 菜单与 `git format-patch` |
+| `b C` / `l r` | branch configure / reflog | 分支配置菜单与 reflog 视图 |
 
 ### 总菜单（dispatch popup，与 magit.el:330-403 一致）
 
@@ -74,14 +78,14 @@ src/
 
 行为一致性来源：每个操作的 git 参数与 Magit Elisp docstring 中记录的一致（如 `magit-unstage-1` 无初始提交时用 `git rm --cached`、否则 `git reset HEAD --`；`magit-reset-index` 用 `git reset <commit> -- .` 等）。
 
-## 测试验收（101 项全部通过）
+## 测试验收（108 项全部通过）
 
 ```bash
 cargo test
 ```
 
-- `tests/keymaps.rs`（21 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言
-- `tests/git_ops.rs`（80 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性与 6 项附加功能行为测试：
+- `tests/keymaps.rs`（23 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言及「无 `unsupported` 占位」全量校验
+- `tests/git_ops.rs`（85 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性与 11 项附加功能行为测试：
   - stage/unstage/discard × 9（含无初始提交场景）
   - commit 系列 × 9（create/extend/amend/reword/fixup/squash/instant-fixup/instant-squash/-a）
   - branch × 8（checkout/create/delete/rename/spinoff/spinout）
@@ -90,11 +94,13 @@ cargo test
   - rebase × 2、reset × 6、revert × 2、cherry-pick × 2
   - stash × 10（both/index/worktree/keep-index/snapshot/pop/drop/clear/show/branch）
   - ignore/untrack/log/diff/show 等
+  - 附加功能 × 11（bisect/worktree/submodule/notes/ediff 6 项，reflog/branch config/cherries/patches/subtree 5 项）
 
 ## 与 Magit 的差异说明
 
 - 提交消息通过提示行输入（`-m`）而非弹出 Emacs 编辑器
 - bisect / worktree / submodule / notes 已支持：`B` / `Z` / `o` / `T` 打开对应菜单，底层分别调用 `git bisect`、`git worktree`、`git submodule`、`git notes`
 - ediff 没有 Emacs 会话：`e` / `E` / `D` 改为在文本视图显示对应 diff（光标处文件、暂存/未暂存、两个 rev 区间、单个 commit 的 patch）
-- 仍标记为 `unsupported`：`H` Section info、`J` Display buffer、`L` Log (change)、`O` Subtree、`w`/`W` patches、`Y` Cherries、branch configure、log reflog
+- dispatch 与所有子菜单命令均已支持，无 `unsupported` 占位：`H`/`J` 输出当前行信息与状态缓冲区文本，`L`/`l r` 显示文件日志与 reflog，`O` subtree，`w`/`W` `git am`/`git format-patch`，`Y` cherries，`b C` 分支配置
+- subtree / cherries / patches / 分支配置没有独立 Magit buffer，结果统一显示在文本视图
 - stash 实现采用 `git stash` 原生命令（Magit 自建 stash commit），净效果一致

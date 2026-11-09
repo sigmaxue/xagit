@@ -1097,3 +1097,75 @@ fn diff_range_file_and_change() {
     g.stage("file.txt").unwrap();
     assert!(g.diff_file("file.txt", true).unwrap().contains("working"));
 }
+
+// =============================================================== remaining extras
+
+#[test]
+fn reflog_and_file_log() {
+    let (_td, g) = repo_with_history(2);
+    let r = g.reflog(None, 20).unwrap();
+    assert!(r.contains("HEAD@{"));
+    assert!(r.contains("c2"));
+    let l = g.log_file("file.txt", 10).unwrap();
+    assert!(l.contains("c2"));
+    assert!(l.contains("initial"));
+}
+
+#[test]
+fn branch_config_roundtrip() {
+    let (_td, g, _head) = repo_with_commit();
+    let branch = g.current_branch().unwrap();
+    g.branch_set_config("rebase", "true").unwrap();
+    assert!(g
+        .branch_config()
+        .unwrap()
+        .contains(&format!("branch.{branch}.rebase true")));
+    g.branch_set_config("description", "my branch").unwrap();
+    assert!(g.branch_config().unwrap().contains("my branch"));
+}
+
+#[test]
+fn cherries_with_upstream() {
+    let (_td, g, _head) = repo_with_commit();
+    assert!(g.cherries(Some("HEAD"), None).is_ok());
+    assert!(g.cherries(Some("HEAD"), Some("HEAD")).is_ok());
+}
+
+#[test]
+fn patch_format_apply_worktree_and_am() {
+    let (_td, g) = repo_with_history(2);
+    let out_dir = TempDir::new().unwrap();
+    let out = g
+        .patch_format("HEAD~1..HEAD", out_dir.path().to_str().unwrap())
+        .unwrap();
+    assert!(out.contains(".patch"));
+    let patch = out.lines().next().unwrap().trim();
+
+    let (_td2, g2, _h2) = repo_with_commit();
+    g2.patch_apply_worktree(patch).unwrap();
+    assert_eq!(read(&g2, "file.txt"), "v2\n");
+
+    let (_td3, g3, _h3) = repo_with_commit();
+    g3.patch_apply_am(patch, false).unwrap();
+    assert!(read(&g3, "file.txt").contains("v2"));
+}
+
+#[test]
+fn subtree_add_prefixes_and_split() {
+    let (_td, g, _head) = repo_with_commit();
+    assert!(g.subtree_prefixes().is_empty());
+    let src = TempDir::new().unwrap();
+    git_init(src.path());
+    std::fs::write(src.path().join("a"), "x").unwrap();
+    let sg = Git::discover(src.path()).unwrap();
+    sg.git_interactive(&["add", "."]).unwrap();
+    sg.commit(Some("initial"), &[]).unwrap();
+
+    g.subtree_add("vendor/src", src.path().to_str().unwrap(), "HEAD")
+        .unwrap();
+    assert_eq!(g.subtree_prefixes(), vec!["vendor/src".to_string()]);
+    assert!(!g
+        .subtree_split("vendor/src", "split-branch")
+        .unwrap()
+        .is_empty());
+}
