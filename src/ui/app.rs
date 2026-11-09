@@ -5541,7 +5541,10 @@ impl App {
             let current = self.git.current_branch();
             branches.retain(|b| Some(b) != current.as_ref());
             for b in &branches {
-                let _ = self.git.git_ok(&["config", "--unset", &format!("branch.{b}.pushRemote")]);
+                self.branch_maybe_delete_pr_remote(b)?;
+            }
+            for b in &branches {
+                self.branch_unset_push_remote(b);
             }
             let mut a = vec!["branch", if force { "-D" } else { "-d" }];
             a.extend(branches.iter().map(String::as_str));
@@ -5582,10 +5585,55 @@ impl App {
             }
             force = true;
         }
-        // magit-branch-unset-pushRemote
-        let _ = self.git.git_ok(&["config", "--unset", &format!("branch.{branch}.pushRemote")]);
+        self.branch_maybe_delete_pr_remote(&branch)?;
+        self.branch_unset_push_remote(&branch);
         let res = self.git.git_interactive(&["branch", if force { "-D" } else { "-d" }, &branch]);
         self.done(&format!("deleted {branch}"), res.map(|()| String::new()));
+        Ok(())
+    }
+
+    /// magit-branch-unset-pushRemote
+    fn branch_unset_push_remote(&self, branch: &str) {
+        let _ = self.git.git_ok(&["config", "--unset", &format!("branch.{branch}.pushRemote")]);
+    }
+
+    /// magit-branch-maybe-delete-pr-remote: the remote of a pull-request
+    /// branch (branch.BRANCH.pullRequestRemote) that only fetches single
+    /// branches loses the refspec of BRANCH (that of its push branch, else
+    /// its upstream); a remote left with nothing to fetch is removed if
+    /// confirmed.
+    fn branch_maybe_delete_pr_remote(&mut self, branch: &str) -> Result<()> {
+        let get = |key: &str| self.git.git_string(&["config", "--get", key]).ok().filter(|v| !v.is_empty());
+        let Some(remote) = get(&format!("branch.{branch}.pullRequestRemote")) else {
+            return Ok(());
+        };
+        let variable = format!("remote.{remote}.fetch");
+        let refspecs: Vec<String> = self
+            .git
+            .git_string(&["config", "--get-all", &variable])
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default();
+        if refspecs.contains(&format!("+refs/heads/*:refs/remotes/{remote}/*")) {
+            return Ok(());
+        }
+        let refspec = if get(&format!("branch.{branch}.pushRemote")).as_deref() == Some(remote.as_str()) {
+            Some(format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}"))
+        } else {
+            get(&format!("branch.{branch}.merge"))
+                .and_then(|m| m.strip_prefix("refs/heads/").map(str::to_string))
+                .map(|m| format!("+refs/heads/{m}:refs/remotes/{remote}/{m}"))
+        };
+        let Some(refspec) = refspec.filter(|r| refspecs.contains(r)) else {
+            return Ok(());
+        };
+        if refspecs.len() == 1
+            && self.yes_no(&format!("Also delete remote {remote} (no pull-request branch remains)?"))?
+        {
+            self.git.git_interactive(&["remote", "rm", &remote])?;
+        } else {
+            let pattern = format!("^{}$", regex_quote(&refspec));
+            self.git.git_interactive(&["config", "--unset-all", &variable, &pattern])?;
+        }
         Ok(())
     }
 

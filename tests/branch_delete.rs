@@ -145,3 +145,88 @@ fn default_prefers_other_branches() {
     delete(&mut app, &[""]);
     assert!(!has_ref(&g, "refs/heads/other"), "{}", app.message());
 }
+
+fn config_all(g: &Git, key: &str) -> Vec<String> {
+    g.git_string(&["config", "--get-all", key]).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+}
+
+/// A pull-request branch PR (checked out from REMOTE's branch HEAD_BRANCH,
+/// pushing there if PUSH): its remote fetches only the single branches
+/// in REFSPECS.
+fn pr_branch(g: &Git, pr: &str, remote: &str, head_branch: &str, push: bool) {
+    git(g, &["branch", pr]);
+    git(g, &["config", &format!("branch.{pr}.pullRequestRemote"), remote]);
+    if push {
+        git(g, &["config", &format!("branch.{pr}.pushRemote"), remote]);
+    } else {
+        git(g, &["config", &format!("branch.{pr}.remote"), remote]);
+        git(g, &["config", &format!("branch.{pr}.merge"), &format!("refs/heads/{head_branch}")]);
+    }
+}
+
+#[test]
+fn pull_request_remote() {
+    let (_td, g, _) = repo_with_commit();
+    git(&g, &["remote", "add", "fork", "https://example.com/fork.git"]);
+    git(&g, &["config", "--unset-all", "remote.fork.fetch"]);
+    for spec in ["+refs/heads/fix.1:refs/remotes/fork/fix.1", "+refs/heads/pr-b:refs/remotes/fork/pr-b"] {
+        git(&g, &["config", "--add", "remote.fork.fetch", spec]);
+    }
+    // the upstream's refspec is removed (fix.1 quoted as a regexp)
+    pr_branch(&g, "pr-a", "fork", "fix.1", false);
+    pr_branch(&g, "pr-b", "fork", "", true);
+    let mut app = App::new(g.clone());
+    delete(&mut app, &["pr-a"]);
+    assert!(!has_ref(&g, "refs/heads/pr-a"), "{}", app.message());
+    assert_eq!(config_all(&g, "remote.fork.fetch"), ["+refs/heads/pr-b:refs/remotes/fork/pr-b"]);
+    // that of the push branch; the remote is left with nothing to fetch:
+    // removed if confirmed
+    let n = app.prompts().len();
+    delete(&mut app, &["pr-b", "y"]);
+    assert_eq!(prompts_since(&app, n)[1], "Also delete remote fork (no pull-request branch remains)? (y/n)");
+    assert!(!has_ref(&g, "refs/heads/pr-b"), "{}", app.message());
+    assert!(!g.remotes().contains(&"fork".to_string()));
+    // else only the refspec goes; the pushRemote is unset with the branch
+    git(&g, &["remote", "add", "fork", "https://example.com/fork.git"]);
+    git(&g, &["config", "--unset-all", "remote.fork.fetch"]);
+    git(&g, &["config", "--add", "remote.fork.fetch", "+refs/heads/pr-c:refs/remotes/fork/pr-c"]);
+    pr_branch(&g, "pr-c", "fork", "", true);
+    delete(&mut app, &["pr-c", "n"]);
+    assert!(!has_ref(&g, "refs/heads/pr-c"), "{}", app.message());
+    assert!(g.remotes().contains(&"fork".to_string()));
+    assert!(config_all(&g, "remote.fork.fetch").is_empty());
+    // a remote fetching all branches is left alone
+    git(&g, &["config", "--add", "remote.fork.fetch", "+refs/heads/*:refs/remotes/fork/*"]);
+    git(&g, &["config", "--add", "remote.fork.fetch", "+refs/heads/pr-d:refs/remotes/fork/pr-d"]);
+    pr_branch(&g, "pr-d", "fork", "", true);
+    let n = app.prompts().len();
+    delete(&mut app, &["pr-d"]);
+    assert_eq!(prompts_since(&app, n), ["Delete branch"]);
+    assert_eq!(config_all(&g, "remote.fork.fetch").len(), 2);
+    // with several branches selected in the refs buffer, each one
+    git(&g, &["config", "--unset-all", "remote.fork.fetch"]);
+    for spec in ["+refs/heads/pr-e:refs/remotes/fork/pr-e", "+refs/heads/pr-f:refs/remotes/fork/pr-f", "+refs/heads/keep:refs/remotes/fork/keep"] {
+        git(&g, &["config", "--add", "remote.fork.fetch", spec]);
+    }
+    pr_branch(&g, "pr-e", "fork", "", true);
+    pr_branch(&g, "pr-f", "fork", "", true);
+    app.press("y").unwrap();
+    for _ in 0..app.visible_lines().len() {
+        app.press("C-p").unwrap();
+    }
+    for _ in 0..app.visible_lines().len() {
+        if app.point_text().starts_with("  pr-e ") {
+            break;
+        }
+        app.press("C-n").unwrap();
+    }
+    let lines: Vec<String> = app.visible_lines().iter().map(|l| l.text.clone()).collect();
+    assert!(app.point_text().starts_with("  pr-e "), "{lines:#?}");
+    app.press("C-SPC").unwrap();
+    app.press("C-n").unwrap();
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    assert!(!has_ref(&g, "refs/heads/pr-e") && !has_ref(&g, "refs/heads/pr-f"), "{}", app.message());
+    assert_eq!(config_all(&g, "remote.fork.fetch"), ["+refs/heads/keep:refs/remotes/fork/keep"]);
+    assert!(config_all(&g, "branch.pr-e.pushRemote").is_empty());
+}
