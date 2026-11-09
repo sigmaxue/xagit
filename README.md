@@ -60,6 +60,7 @@ src/
 ├── lib.rs             # 库入口（供测试引用）
 ├── git/
 │   ├── exec.rs        # git 进程封装（rev-parse/status 解析/全局参数）
+│   ├── libgit2.rs     # libgit2 只读后端（git2 crate：仓库发现/HEAD/status/refs）
 │   ├── ops.rs         # 全部 Magit 风格操作（stage/commit/branch/...）
 │   └── status.rs      # magit-status 缓冲区模型（porcelain -z 解析）
 └── ui/
@@ -71,14 +72,14 @@ src/
 
 行为一致性来源：每个操作的 git 参数与 Magit Elisp docstring 中记录的一致（如 `magit-unstage-1` 无初始提交时用 `git rm --cached`、否则 `git reset HEAD --`；`magit-reset-index` 用 `git reset <commit> -- .` 等）。
 
-## 测试验收（90 项全部通过）
+## 测试验收（94 项全部通过）
 
 ```bash
 cargo test
 ```
 
 - `tests/keymaps.rs`（20 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义
-- `tests/git_ops.rs`（70 项）：每个命令在临时仓库中执行后断言真实仓库状态：
+- `tests/git_ops.rs`（74 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端与 git CLI 结果一致性测试：
   - stage/unstage/discard × 9（含无初始提交场景）
   - commit 系列 × 9（create/extend/amend/reword/fixup/squash/instant-fixup/instant-squash/-a）
   - branch × 8（checkout/create/delete/rename/spinoff/spinout）

@@ -9,6 +9,7 @@ pub mod ui;
 /// Convenience re-exports for tests.
 pub mod prelude {
     pub use crate::git::exec::Git;
+    pub use crate::git::libgit2::{FileStatus, LibGit2};
     pub use crate::git::ops::{SnapshotScope, Untracked};
     pub use crate::git::status::{FileEntry, Status, StatusKind};
     pub use tempfile::TempDir;

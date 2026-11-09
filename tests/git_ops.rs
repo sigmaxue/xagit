@@ -942,3 +942,56 @@ fn run_arbitrary_git_command() {
     g.run_git_command(&["log".into(), "-1".into(), "--oneline".into()])
         .unwrap();
 }
+
+// =============================================================== libgit2 backend
+
+#[test]
+fn libgit2_discover_and_head() {
+    let (td, g, head) = repo_with_commit();
+    std::fs::create_dir(td.path().join("sub")).unwrap();
+    let outside = TempDir::new().unwrap();
+    assert!(LibGit2::discover(outside.path()).is_err());
+
+    let lg = LibGit2::discover(&td.path().join("sub")).unwrap();
+    assert_eq!(lg.toplevel, g.toplevel);
+    assert!(lg.gitdir.exists());
+    assert!(!lg.no_commit());
+    assert_eq!(lg.head_oid().unwrap().to_string(), head);
+    assert!(lg.current_branch().is_some());
+    assert!(matches!(lg.state(), git2::RepositoryState::Clean));
+}
+
+#[test]
+fn libgit2_no_commit_before_first_commit() {
+    let (_td, g) = scratch_repo();
+    let lg = LibGit2::from_git(&g).unwrap();
+    assert!(lg.no_commit());
+    assert!(lg.head_oid().is_none());
+    assert!(matches!(lg.state(), git2::RepositoryState::Clean));
+}
+
+#[test]
+fn libgit2_status_classification() {
+    let (_td, g, _head) = repo_with_commit();
+    write(&g, "new.txt", "n");
+    write(&g, "file.txt", "changed");
+    g.stage("file.txt").unwrap();
+
+    let entries = LibGit2::from_git(&g).unwrap().statuses().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries
+        .iter()
+        .any(|f| f.path == "new.txt" && f.untracked && !f.staged));
+    assert!(entries
+        .iter()
+        .any(|f| f.path == "file.txt" && f.staged && !f.unstaged));
+}
+
+#[test]
+fn libgit2_refs_match_git_cli() {
+    let (_td, g, _head) = repo_with_commit();
+    let lg = LibGit2::from_git(&g).unwrap();
+    assert_eq!(lg.branches().unwrap(), g.branches());
+    assert_eq!(lg.tags().unwrap(), g.tags());
+    assert_eq!(lg.remotes().unwrap(), g.remotes());
+}
