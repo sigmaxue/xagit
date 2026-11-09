@@ -324,7 +324,7 @@ impl PrefixArg {
                 }
                 c.join(" ")
             }
-            PrefixArg::Raw(n) => format!("C-u {n}"),
+            PrefixArg::Raw(n) => format!("C-u ({n})"),
             PrefixArg::Num(n) => format!("C-u {n}"),
             PrefixArg::Minus => "C-u -".into(),
         }
@@ -1297,10 +1297,18 @@ impl App {
         r
     }
 
-    /// universal-argument (C-u), negative-argument (M--) and the digits,
+    /// universal-argument (C-u), negative-argument (M--, C--, C-M--),
+    /// digit-argument (M-0..M-9, C-0..C-9, C-M-0..C-M-9) and the digits,
     /// `-` and C-u of universal-argument-map. True if KEY was consumed.
     fn universal_argument(&mut self, key: &Key) -> bool {
         let arg = self.prefix_arg;
+        let digit_arg = self.digit_argument_key(key);
+        // negative-argument
+        let negative = |arg: Option<PrefixArg>| match arg {
+            Some(PrefixArg::Num(n)) => Some(PrefixArg::Num(-n)),
+            Some(PrefixArg::Minus) => None,
+            _ => Some(PrefixArg::Minus),
+        };
         let new = match (key.ctrl, key.code.as_str()) {
             (true, "u") if self.reading_arg => match arg {
                 Some(PrefixArg::Raw(n)) => Some(PrefixArg::Raw(n * 4)),
@@ -1312,11 +1320,17 @@ impl App {
                 }
             },
             (true, "u") => Some(PrefixArg::Raw(4)),
-            (false, "M--") => match arg {
-                Some(PrefixArg::Num(n)) => Some(PrefixArg::Num(-n)),
-                Some(PrefixArg::Minus) => None,
-                _ => Some(PrefixArg::Minus),
-            },
+            (false, "M--") | (true, "-") | (true, "M--") => negative(arg),
+            _ if digit_arg.is_some() => {
+                let digit = digit_arg.unwrap_or(0);
+                match arg {
+                    Some(PrefixArg::Num(n)) => Some(PrefixArg::Num(n * 10 + if n < 0 { -digit } else { digit })),
+                    // -0 is just -, so that -01 works
+                    Some(PrefixArg::Minus) if digit == 0 => Some(PrefixArg::Minus),
+                    Some(PrefixArg::Minus) => Some(PrefixArg::Num(-digit)),
+                    _ => Some(PrefixArg::Num(digit)),
+                }
+            }
             _ if !self.reading_arg => return false,
             (true, "g") => {
                 self.reading_arg = false;
@@ -1324,18 +1338,8 @@ impl App {
                 self.set_msg("Quit");
                 return true;
             }
-            (false, d) if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
-                let digit = i64::from(d.as_bytes()[0] - b'0');
-                match arg {
-                    Some(PrefixArg::Num(n)) => Some(PrefixArg::Num(n * 10 + if n < 0 { -digit } else { digit })),
-                    Some(PrefixArg::Minus) if digit == 0 => Some(PrefixArg::Minus),
-                    Some(PrefixArg::Minus) => Some(PrefixArg::Num(-digit)),
-                    Some(PrefixArg::Raw(n)) if n < 0 => Some(PrefixArg::Num(-digit)),
-                    _ => Some(PrefixArg::Num(digit)),
-                }
-            }
             // universal-argument-minus: after digits `-` is a command
-            (false, "-") if !matches!(arg, Some(PrefixArg::Num(_))) => Some(PrefixArg::Minus),
+            (false, "-") if !matches!(arg, Some(PrefixArg::Num(_))) => negative(arg),
             _ => {
                 self.reading_arg = false;
                 return false;
@@ -1346,6 +1350,23 @@ impl App {
         let desc = new.map_or_else(|| "C-u".to_string(), PrefixArg::description);
         self.set_msg(&format!("{desc}-"));
         true
+    }
+
+    /// The digit of KEY if it is digit-argument: M-0..M-9 (but M-1..M-4
+    /// are magit-section-show-level-N-all in Magit buffers), C-0..C-9,
+    /// C-M-0..C-M-9, and the digits of universal-argument-map while the
+    /// argument is read.
+    fn digit_argument_key(&self, key: &Key) -> Option<i64> {
+        let digit = |s: &str| match s.as_bytes() {
+            [d] if d.is_ascii_digit() => Some(i64::from(d - b'0')),
+            _ => None,
+        };
+        if let Some(d) = key.code.strip_prefix("M-").and_then(digit) {
+            let section_level = !key.ctrl && (1..=4).contains(&d) && !matches!(self.mode, BufferMode::File { .. });
+            return (!section_level).then_some(d);
+        }
+        let d = digit(&key.code)?;
+        (key.ctrl || self.reading_arg).then_some(d)
     }
 
     /// current-prefix-arg

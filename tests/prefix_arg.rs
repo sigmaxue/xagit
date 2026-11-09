@@ -1,5 +1,5 @@
-//! The prefix argument (C-u, C-u C-u, C-u N, M--) and the commands
-//! whose behavior it changes (current-prefix-arg in Magit).
+//! The prefix argument (C-u, C-u C-u, C-u N, M--, M-N, C-N) and the
+//! commands whose behavior it changes (current-prefix-arg in Magit).
 
 mod common;
 
@@ -103,6 +103,67 @@ fn universal_argument() {
     assert_eq!(app.current_menu(), Some("file-dispatch"), "C-g only cancels the argument");
     app.press("C-g").unwrap();
     assert_eq!(app.current_menu(), None);
+}
+
+#[test]
+fn digit_and_negative_argument() {
+    let (_td, g, _) = repo_with_commit();
+    write(&g, "file.txt", "changed\n");
+    let mut app = App::new(g);
+    // digit-argument: M-N and C-N, then digits continue
+    app.press("M-5").unwrap();
+    assert_eq!(app.message(), "C-u 5-");
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(5)));
+    app.press("2").unwrap();
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(52)));
+    app.press("C-g").unwrap();
+    assert_eq!(app.current_prefix_arg(), None);
+    press(&mut app, &["C-3", "C-M-7"]);
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(37)));
+    app.press("M--").unwrap();
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(-37)));
+    app.press("C-g").unwrap();
+    // negative-argument: M--, C--, C-M--; again cancels it
+    press(&mut app, &["C--", "M-0"]);
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Minus), "-0 is just -");
+    app.press("M-6").unwrap();
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(-6)));
+    app.press("C-g").unwrap();
+    press(&mut app, &["M--", "C-M--"]);
+    assert_eq!(app.current_prefix_arg(), None);
+    app.press("C-g").unwrap();
+    // - in universal-argument-map is negative-argument before digits
+    press(&mut app, &["C-u", "-", "-"]);
+    assert_eq!(app.current_prefix_arg(), None);
+    app.press("3").unwrap();
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(3)));
+    app.press("C-g").unwrap();
+    // C-u after - and a digit after that
+    press(&mut app, &["C-u", "-", "C-u"]);
+    assert_eq!(app.message(), "C-u (-4)-");
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Raw(-4)));
+    app.press("2").unwrap();
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(2)));
+    app.press("C-g").unwrap();
+    // M-1..M-4 are magit-section-show-level-N-all in Magit buffers
+    app.press("M-1").unwrap();
+    assert_eq!(app.current_prefix_arg(), None);
+    // the argument of the next command
+    let context = |app: &App| app.buffer_args().iter().find(|a| a.starts_with("-U")).cloned();
+    press(&mut app, &["C-2", "+"]);
+    assert_eq!(context(&app).as_deref(), Some("-U5"));
+    assert_eq!(app.current_prefix_arg(), None);
+}
+
+#[test]
+fn digit_argument_in_file_buffer() {
+    let (_td, g) = file_repo();
+    let mut app = App::new(g);
+    visit_line(&mut app, 1);
+    app.press("M-1").unwrap();
+    assert_eq!(app.current_prefix_arg(), Some(PrefixArg::Num(1)));
+    app.press("C-g").unwrap();
+    assert_eq!(app.current_prefix_arg(), None);
 }
 
 #[test]
