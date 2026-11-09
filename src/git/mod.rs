@@ -4,6 +4,7 @@ pub mod exec;
 pub mod libgit2;
 pub mod ops;
 pub mod status;
+pub mod wip;
 
 pub use exec::Git;
 #[allow(unused_imports)]

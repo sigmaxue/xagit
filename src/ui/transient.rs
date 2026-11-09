@@ -482,6 +482,11 @@ pub fn write_history(path: &std::path::Path, history: &History) -> std::io::Resu
     std::fs::write(path, text)
 }
 
+/// The Wiplog group of magit-log (:if-non-nil magit-wip-mode).
+pub fn wip_log_group() -> Vec<MenuEntry> {
+    vec![cmd("i", "index", "wip-log-index"), cmd("w", "worktree", "wip-log-worktree")]
+}
+
 /// magit-blame: "r" and "f" only in blob buffers (:if-nil
 /// buffer-file-name), "m" only in file buffers not blamed or blamed
 /// READ_ONLY, "q" and the Refresh group only while BLAMING.
@@ -996,6 +1001,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("Z", "snapshot both", "snapshot-both"),
                     cmd("I", "snapshot index", "snapshot-index"),
                     cmd("W", "snapshot worktree", "snapshot-worktree"),
+                    cmd("r", "to wip ref", "wip-commit"),
                 ],
             ],
         },

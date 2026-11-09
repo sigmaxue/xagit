@@ -280,9 +280,15 @@ impl Git {
     }
 
     pub fn git_output(&self, args: &[&str]) -> Result<std::process::Output> {
+        self.git_output_env(&[], args)
+    }
+
+    /// `git_output` with the environment variables ENV set.
+    pub fn git_output_env(&self, env: &[(&str, &str)], args: &[&str]) -> Result<std::process::Output> {
         Command::new(env_git())
             .args(GLOBAL_ARGS)
             .args(args)
+            .envs(env.iter().copied())
             .current_dir(&self.toplevel)
             .output()
             .map_err(|e| anyhow!("failed to spawn git: {e}"))

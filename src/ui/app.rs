@@ -1696,6 +1696,16 @@ impl App {
             let refs = matches!(self.mode, BufferMode::Refs { .. });
             self.menus.insert(name.clone(), show_refs_menu(refs));
         }
+        // the Wiplog group :if-non-nil magit-wip-mode
+        if name == "log-menu" {
+            if let Some(m) = self.menus.get_mut(&name) {
+                let wip = |e: &super::transient::MenuEntry| matches!(&e.action, Action::Command(c) if c.starts_with("wip-log-"));
+                m.groups.retain(|g| !g.iter().any(wip));
+                if self.options.wip_mode {
+                    m.groups.push(super::transient::wip_log_group());
+                }
+            }
+        }
         if name == "blame-menu" {
             self.menus.insert(name.clone(), blame_menu(blob, blaming, read_only));
         }
@@ -3005,28 +3015,36 @@ impl App {
             // -------- reset
             "reset-mixed" | "reset-soft" | "reset-hard" | "reset-keep" | "reset-index"
             | "reset-worktree" | "reset-quickly" => {
-                let bs = g!().branches();
-                let rev = self
-                    .pick("Reset to (branch/hash)", &bs, Some("HEAD"))?
-                    .cloned()
-                    .unwrap_or_else(|| "HEAD".into());
-                let hard_confirm = cmd == "reset-hard" || cmd == "reset-quickly";
-                if hard_confirm && !self.yes_no(&format!("Discard uncommitted changes and reset to {rev}?"))? {
-                    self.set_msg("aborted");
+                // magit-reset-quickly: hard with a prefix argument
+                let hard = cmd == "reset-hard" || (cmd == "reset-quickly" && self.prefix_arg.is_some());
+                let current = self.git.current_branch().unwrap_or_else(|| "detached head".into());
+                let prompt = match cmd {
+                    "reset-index" => "Reset index to".to_string(),
+                    "reset-worktree" => "Reset worktree to".to_string(),
+                    "reset-soft" => format!("Soft reset {current} to"),
+                    _ if hard => format!("Hard reset {current} to"),
+                    _ => format!("Reset {current} to"),
+                };
+                let Some(rev) = self.read_branch_or_commit(&prompt)? else {
+                    return Ok(());
+                };
+                if cmd == "reset-worktree" {
+                    self.wip_hook(&[], "before", "reset")?;
+                    let res = self.git.reset_worktree(&rev);
+                    if res.is_ok() {
+                        self.wip_hook(&[], "after", "reset")?;
+                    }
+                    self.done("", res.map(|_| String::new()));
                     return Ok(());
                 }
-                match cmd {
-                    "reset-mixed" => g!().reset_mixed(&rev)?,
-                    "reset-soft" => g!().reset_soft(&rev)?,
-                    "reset-hard" => g!().reset_hard(&rev)?,
-                    "reset-keep" => g!().reset_keep(&rev)?,
-                    "reset-index" => g!().reset_index(&rev)?,
-                    "reset-worktree" => g!().reset_worktree(&rev)?,
-                    "reset-quickly" => g!().reset_mixed(&rev)?, // Magit default without prefix arg
-                    _ => unreachable!(),
-                }
-                self.set_msg("reset");
-                self.refresh();
+                let arg = match cmd {
+                    "reset-index" => None,
+                    "reset-soft" => Some("--soft"),
+                    "reset-keep" => Some("--keep"),
+                    _ if hard => Some("--hard"),
+                    _ => Some("--mixed"),
+                };
+                self.reset_internal(arg, &rev, (cmd == "reset-index").then_some("."))?;
             }
 
             // -------- tag
@@ -3307,7 +3325,25 @@ impl App {
 
             // -------- log / diff / show (arguments come from the l/d menus)
             "log-current" | "log-head" | "log-other" | "log-related" | "log-branches" | "log-all-branches"
-            | "log-all" | "log-change" => self.log_view(cmd)?,
+            | "log-all" | "log-change" | "wip-log-index" | "wip-log-worktree" => self.log_view(cmd)?,
+            // magit-wip-commit: with a prefix argument the message is read
+            "wip-commit" => {
+                let msg = if self.prefix_arg.is_some() {
+                    match self.read_line_prompt("Wip commit message", None)? {
+                        Some(m) => m,
+                        None => return Ok(()),
+                    }
+                } else {
+                    "wip-save tracked files".to_string()
+                };
+                match self.options.wip.commit(&self.git, &[], Some(&msg)) {
+                    Ok(m) => {
+                        self.set_msg(m.as_deref().unwrap_or(""));
+                        self.refresh();
+                    }
+                    Err(e) => self.set_msg(&e.to_string()),
+                }
+            }
             // magit-log-refresh (L g): new arguments for the log buffer shown
             "log-refresh" => match self.mode {
                 BufferMode::Log { .. } | BufferMode::LogSelect { .. } => {
@@ -3668,6 +3704,9 @@ impl App {
                 v
             }
             "log-all" => vec!["--all".into()],
+            // magit-wip-log-index / -worktree
+            "wip-log-index" => vec![self.options.wip.wip_ref(&self.git, "index/", None)],
+            "wip-log-worktree" => vec![self.options.wip.wip_ref(&self.git, "wtree/", None)],
             "log-change" => {
                 let path = match self.current_file() {
                     Some((_, p)) => p,
@@ -4682,24 +4721,35 @@ impl App {
                 }
                 a.push("--");
                 a.extend(files.iter().map(String::as_str));
+                self.wip_hook(&files, "before", "stage")?;
                 self.git.git_interactive(&a)?;
+                self.wip_hook(&files, "after", "stage")?;
             }
             "unstaged" => {
                 if let Some((path, scope)) = Self::hunk_scope(&sel) {
                     let fd = self.file_diff("unstaged", &path)?;
+                    let files = [path];
+                    self.wip_hook(&files, "before", "stage")?;
                     self.git.stage_change(&fd, &scope, ctx)?;
+                    self.wip_hook(&files, "after", "stage")?;
                 } else if ws {
-                    for p in self.sel_paths(&sel) {
-                        let fd = self.file_diff("unstaged", &p)?;
+                    let files = self.sel_paths(&sel);
+                    self.wip_hook(&files, "before", "stage")?;
+                    for p in &files {
+                        let fd = self.file_diff("unstaged", p)?;
                         self.git.stage_change(&fd, &Scope::File, ctx)?;
                     }
+                    self.wip_hook(&files, "after", "stage")?;
                 } else if matches!(sel, DiffSel::List { .. }) {
                     return self.stage_modified();
                 } else {
+                    // magit-stage-1
                     let files = self.sel_paths(&sel);
                     let mut a = vec!["add", "-u", "--"];
                     a.extend(files.iter().map(String::as_str));
+                    self.wip_hook(&files, "before", "stage")?;
                     self.git.git_interactive(&a)?;
+                    self.wip_hook(&files, "after", "stage")?;
                 }
             }
             "staged" => {
@@ -4741,7 +4791,9 @@ impl App {
         }
         a.push("--");
         a.extend(files.iter().map(String::as_str));
+        self.wip_hook(&files, "before", "stage")?;
         self.git.git_interactive(&a)?;
+        self.wip_hook(&files, "after", "stage")?;
         self.set_msg("staged");
         self.refresh();
         Ok(())
@@ -4784,6 +4836,7 @@ impl App {
         if self.git.anything_staged() && !self.confirm("stage-all-changes", "Stage all changes")? {
             return Ok(());
         }
+        self.wip_hook(&[], "before", "stage")?;
         if self.prefix_arg.is_some() {
             self.git.stage_all_with_untracked()?;
             self.set_msg("staged all changes");
@@ -4791,6 +4844,7 @@ impl App {
             self.git.stage_all()?;
             self.set_msg("staged all modified");
         }
+        self.wip_hook(&[], "after", "stage")?;
         self.refresh();
         Ok(())
     }
@@ -4815,9 +4869,7 @@ impl App {
                     self.set_msg("Already unstaged");
                     return Ok(());
                 }
-                for f in &intent {
-                    self.git.unstage(f)?;
-                }
+                self.unstage_1(&intent)?;
             }
             ("unstaged", _) => {
                 self.set_msg("Already unstaged");
@@ -4832,18 +4884,23 @@ impl App {
             _ => {
                 if let Some((path, scope)) = Self::hunk_scope(&sel) {
                     let fd = self.file_diff("staged", &path)?;
+                    let files = [path];
+                    self.wip_hook(&files, "before", "unstage")?;
                     self.git.unstage_change(&fd, &scope, ctx)?;
+                    self.wip_hook(&files, "after", "unstage")?;
                 } else if ws {
-                    for p in self.sel_paths(&sel) {
-                        let fd = self.file_diff("staged", &p)?;
+                    let files = self.sel_paths(&sel);
+                    self.wip_hook(&files, "before", "unstage")?;
+                    for p in &files {
+                        let fd = self.file_diff("staged", p)?;
                         self.git.unstage_change(&fd, &Scope::File, ctx)?;
                     }
+                    self.wip_hook(&files, "after", "unstage")?;
                 } else if matches!(sel, DiffSel::List { .. }) {
                     return self.unstage_all();
                 } else {
-                    for p in self.sel_paths(&sel) {
-                        self.git.unstage(&p)?;
-                    }
+                    let files = self.sel_paths(&sel);
+                    self.unstage_1(&files)?;
                 }
             }
         }
@@ -4857,11 +4914,60 @@ impl App {
         let Some(files) = self.pick_files("Unstage file,s", &choices)? else {
             return Ok(());
         };
-        for f in &files {
-            self.git.unstage(f)?;
-        }
+        self.unstage_1(&files)?;
         self.set_msg("unstaged");
         self.refresh();
+        Ok(())
+    }
+
+    /// magit-read-branch-or-commit: a ref or commit, the default the
+    /// branch or commit at point, else the current branch.
+    fn read_branch_or_commit(&self, prompt: &str) -> Result<Option<String>> {
+        let default = self
+            .branch_at_point()
+            .or_else(|| self.commit_at_point().map(|c| self.git.rev_short(&c)))
+            .or_else(|| self.git.current_branch());
+        self.read_rev(prompt, default.as_deref())
+    }
+
+    /// magit-reset-internal: `git reset ARG COMMIT -- PATH` between the
+    /// wip hooks ("unstage" when only the index is reset to HEAD, else
+    /// "reset", which has no after hook).
+    fn reset_internal(&mut self, arg: Option<&str>, commit: &str, path: Option<&str>) -> Result<()> {
+        let task = if commit == "HEAD" && arg.is_none() { "unstage" } else { "reset" };
+        self.wip_hook(&[], "before", task)?;
+        let mut a = vec!["reset"];
+        a.extend(arg);
+        a.extend([commit, "--"]);
+        a.extend(path);
+        let res = self.git.git_interactive(&a);
+        if res.is_ok() && task == "unstage" {
+            self.wip_hook(&[], "after", "unstage")?;
+        }
+        self.done("", res.map(|_| String::new()));
+        Ok(())
+    }
+
+    /// magit-unstage-1: unstage FILES, between the wip hooks.
+    fn unstage_1(&mut self, files: &[String]) -> Result<()> {
+        self.wip_hook(files, "before", "unstage")?;
+        for f in files {
+            self.git.unstage(f)?;
+        }
+        self.wip_hook(files, "after", "unstage")
+    }
+
+    /// magit-run-before-change-functions (WHEN "before") and
+    /// magit-run-after-apply-functions ("after") with magit-wip-mode:
+    /// FILES (all tracked files when empty) committed to the wip refs,
+    /// the message ending with " WHEN TASK".
+    fn wip_hook(&mut self, files: &[String], when: &str, task: &str) -> Result<()> {
+        if !self.options.wip_mode {
+            return Ok(());
+        }
+        if let Some(m) = self.options.wip.commit(&self.git, files, Some(&format!(" {when} {task}")))? {
+            self.set_msg(&m);
+        }
         Ok(())
     }
 
@@ -4875,7 +4981,9 @@ impl App {
         if others && !self.confirm("unstage-all-changes", "Unstage all changes")? {
             return Ok(());
         }
+        self.wip_hook(&[], "before", "unstage")?;
         self.git.unstage_all()?;
+        self.wip_hook(&[], "after", "unstage")?;
         self.set_msg("unstaged all");
         self.refresh();
         Ok(())
@@ -4924,7 +5032,10 @@ impl App {
                 return self.call_smerge(Keep::Current, true);
             }
             let fd = self.file_diff(&group, &path)?;
+            let files = [path];
+            self.wip_hook(&files, "before", "discard")?;
             self.git.discard_change(&fd, &scope, typ == "staged", ctx)?;
+            self.wip_hook(&files, "after", "discard")?;
         } else {
             let r = if matches!(&sel, DiffSel::List { typ } if typ == "untracked") {
                 // magit-discard-untracked: magit-list-untracked-files
@@ -5050,25 +5161,36 @@ impl App {
             }
         }
         self.set_msg("");
+        self.wip_hook(files, "before", "discard")?;
+        if self.discard_files_kinds(typ, group, &status, [resolve, resurrect, delete, rename, discard, discard_new])? {
+            self.wip_hook(files, "after", "discard")?;
+        }
+        Ok(())
+    }
+
+    /// The kinds of files of magit-discard-files handled in order, false
+    /// when one of them is declined or fails.
+    fn discard_files_kinds(&mut self, typ: &str, group: &str, status: &[FileStatus], kinds: [Vec<String>; 6]) -> Result<bool> {
+        let [resolve, resurrect, delete, rename, discard, discard_new] = kinds;
         if !resolve.is_empty() && !self.discard_files_resolve(&resolve)? {
-            return Ok(());
+            return Ok(false);
         }
         if !resurrect.is_empty() {
             if !self.confirm_files("resurrect", "Resurrect", &resurrect)? {
-                return Ok(());
+                return Ok(false);
             }
             let mut args = if typ == "staged" { vec!["reset", "--"] } else { vec!["checkout", "--"] };
             args.extend(resurrect.iter().map(String::as_str));
             self.git.git_interactive(&args)?;
         }
-        if !delete.is_empty() && !self.discard_files_delete(&delete, typ, &status)? {
-            return Ok(());
+        if !delete.is_empty() && !self.discard_files_delete(&delete, typ, status)? {
+            return Ok(false);
         }
         if !rename.is_empty() {
             let orig = |f: &String| status.iter().find(|s| s.file == *f).and_then(|s| s.orig.clone()).unwrap_or_default();
             let items: Vec<String> = rename.iter().map(|f| format!("{} -> {f}", orig(f))).collect();
             if !self.confirm_items("rename", "Undo rename %s", "Undo %d renames", &items)? {
-                return Ok(());
+                return Ok(false);
             }
             let top = self.git.toplevel.clone();
             for f in &rename {
@@ -5085,22 +5207,22 @@ impl App {
             }
         }
         if !discard.is_empty() || !discard_new.is_empty() {
-            self.discard_files_discard(typ, group, &discard, &discard_new)?;
+            return self.discard_files_discard(typ, group, &discard, &discard_new);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// magit-discard-files--discard: FILES with changes and NEW_FILES
     /// (added and modified) of a TYP section, confirmed together.
-    fn discard_files_discard(&mut self, typ: &str, group: &str, files: &[String], new_files: &[String]) -> Result<()> {
+    fn discard_files_discard(&mut self, typ: &str, group: &str, files: &[String], new_files: &[String]) -> Result<bool> {
         let all: Vec<String> = files.iter().chain(new_files).cloned().collect();
         if !self.confirm_files("discard", &format!("Discard {typ} changes in"), &all)? {
-            return Ok(());
+            return Ok(false);
         }
         if typ == "unstaged" {
             let mut args = vec!["checkout", "--"];
             args.extend(files.iter().map(String::as_str));
-            return self.git.git_interactive(&args);
+            return self.git.git_interactive(&args).map(|_| true);
         }
         if !new_files.is_empty() {
             for cmd in ["add", "reset"] {
@@ -5142,9 +5264,10 @@ impl App {
                 self.set_msg(
                     "Cannot discard staged changes to binary files, which also have unstaged changes.  Unstage instead.",
                 );
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// magit-discard-files--resolve: check out a stage of the conflicted
@@ -5356,6 +5479,8 @@ impl App {
     fn reverse_sel(&mut self, sel: &DiffSel, args: &[&str]) -> Result<()> {
         let group = sel.typ().to_string();
         let ctx = self.context();
+        // the command in the wip messages: magit-unstage for committed changes
+        let task = if args.contains(&"--cached") { "unstage" } else { "reverse" };
         let mut a = vec!["--reverse"];
         a.extend(args);
         if !args.contains(&"--3way") {
@@ -5366,7 +5491,10 @@ impl App {
                 return Ok(());
             }
             let fd = self.file_diff(&group, &path)?;
+            let files = [path];
+            self.wip_hook(&files, "before", task)?;
             self.git.apply_scope(&fd, &scope, &a, ctx)?;
+            self.wip_hook(&files, "after", task)?;
         } else {
             let (binaries, files): (Vec<String>, Vec<String>) = self
                 .sel_paths(sel)
@@ -5376,7 +5504,9 @@ impl App {
                 return Ok(());
             }
             let fds = files.iter().map(|f| self.file_diff(&group, f)).collect::<Result<Vec<_>>>()?;
+            self.wip_hook(&files, "before", task)?;
             self.git.apply_files(&fds.iter().collect::<Vec<_>>(), &a, ctx)?;
+            self.wip_hook(&files, "after", task)?;
             if !binaries.is_empty() {
                 self.refresh();
                 self.set_msg("Cannot reverse binary files");
@@ -5417,10 +5547,16 @@ impl App {
                 let ctx = self.context();
                 if let Some((path, scope)) = Self::hunk_scope(&sel) {
                     let fd = self.file_diff(&group, &path)?;
+                    let files = [path];
+                    self.wip_hook(&files, "before", "apply")?;
                     self.git.apply_scope(&fd, &scope, &three, ctx)?;
+                    self.wip_hook(&files, "after", "apply")?;
                 } else {
-                    let fds = self.sel_paths(&sel).iter().map(|f| self.file_diff(&group, f)).collect::<Result<Vec<_>>>()?;
+                    let files = self.sel_paths(&sel);
+                    let fds = files.iter().map(|f| self.file_diff(&group, f)).collect::<Result<Vec<_>>>()?;
+                    self.wip_hook(&files, "before", "apply")?;
                     self.git.apply_files(&fds.iter().collect::<Vec<_>>(), &three, ctx)?;
+                    self.wip_hook(&files, "after", "apply")?;
                 }
                 self.refresh();
             }

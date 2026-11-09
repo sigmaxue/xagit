@@ -13,6 +13,9 @@
 //! transient-show-common-commands t
 //! magit-delete-by-moving-to-trash nil
 //! trash-directory ~/.trash
+//! magit-wip-mode t
+//! magit-wip-merge-branch nil
+//! magit-wip-namespace refs/wip/
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -77,6 +80,10 @@ pub struct Options {
     pub delete_by_moving_to_trash: bool,
     /// trash-directory: None is the system's trash
     pub trash_directory: Option<std::path::PathBuf>,
+    /// magit-wip-mode
+    pub wip_mode: bool,
+    /// magit-wip-namespace and magit-wip-merge-branch
+    pub wip: crate::git::wip::Wip,
 }
 
 impl Default for Options {
@@ -90,16 +97,24 @@ impl Default for Options {
             show_common_commands: false,
             delete_by_moving_to_trash: true,
             trash_directory: None,
+            wip_mode: false,
+            wip: crate::git::wip::Wip::default(),
         }
     }
 }
 
 impl Options {
     /// Whether ACTION isn't confirmed (magit-confirm). The action `t`
-    /// is always confirmed; safe-with-wip needs magit-wip-mode, which
-    /// ngit doesn't have.
+    /// is always confirmed; safe-with-wip covers discard, reverse,
+    /// stage-all-changes and unstage-all-changes when magit-wip-mode is
+    /// on (magit--no-confirm-alist).
     pub fn no_confirm(&self, action: &str) -> bool {
-        action != "t" && self.no_confirm.as_ref().is_none_or(|l| l.iter().any(|a| a == action))
+        let member = |a: &str| self.no_confirm.as_ref().is_none_or(|l| l.iter().any(|x| x == a));
+        action != "t"
+            && (member(action)
+                || (self.wip_mode
+                    && member("safe-with-wip")
+                    && ["discard", "reverse", "stage-all-changes", "unstage-all-changes"].contains(&action)))
     }
 
     /// Whether ACTION asks a "yes or no" question (magit-y-or-n-p).
@@ -165,6 +180,15 @@ impl Options {
                         None
                     }
                     _ => Some("expected a directory or nil".into()),
+                },
+                "magit-wip-mode" => boolean(&values).map(|b| o.wip_mode = b).err(),
+                "magit-wip-merge-branch" => boolean(&values).map(|b| o.wip.merge_branch = b).err(),
+                "magit-wip-namespace" => match values.as_slice() {
+                    [ns] => {
+                        o.wip.namespace = ns.to_string();
+                        None
+                    }
+                    _ => Some("expected a string".into()),
                 },
                 "magit-refs-filter-alist" => match values.as_slice() {
                     ["nil"] => {
@@ -270,5 +294,15 @@ mod tests {
         let (o, e) = Options::parse("transient-show-common-commands t\ntransient-show-common-commands 1");
         assert!(o.show_common_commands);
         assert_eq!(e, ["2: expected t or nil"]);
+        // magit-wip
+        assert!(!d.wip_mode && d.wip.namespace == "refs/wip/" && !d.wip.merge_branch);
+        let (o, e) = Options::parse("magit-wip-mode t\nmagit-wip-merge-branch t\nmagit-wip-namespace refs/w/\nmagit-wip-namespace");
+        assert!(o.wip_mode && o.wip.merge_branch && o.wip.namespace == "refs/w/");
+        assert_eq!(e, ["4: expected a string"]);
+        // safe-with-wip needs magit-wip-mode
+        let (o, _) = Options::parse("magit-no-confirm safe-with-wip");
+        assert!(!o.no_confirm("discard"));
+        let (o, _) = Options::parse("magit-no-confirm safe-with-wip\nmagit-wip-mode t");
+        assert!(o.no_confirm("discard") && o.no_confirm("unstage-all-changes") && !o.no_confirm("trash"));
     }
 }
