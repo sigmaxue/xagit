@@ -4,7 +4,7 @@
 //! of each commit in the right margin.
 
 use super::diffbuf::{insert_diff, RefLabeler};
-use super::view::{Builder, LineKind, StatusBuffer};
+use super::view::{head_header, upstream_header, Builder, LineKind, StatusBuffer};
 use crate::git::diff::FileDiff;
 use crate::git::Git;
 
@@ -355,5 +355,87 @@ pub fn build_reflog(g: &Git, refname: &str, args: &[String]) -> StatusBuffer {
     }
     let mut buf = StatusBuffer::new(b.lines, Vec::new(), title);
     buf.margin_width = REFLOG_MARGIN_WIDTH;
+    buf
+}
+
+// ---------------------------------------------------------------- stashes
+
+/// magit-stashes-refresh-buffer (magit-stashes-mode): a "Stashes" section
+/// with one section per entry of REFNAME's reflog.
+pub fn build_stashes(g: &Git, refname: &str) -> StatusBuffer {
+    let out = g
+        .git_output(&["reflog", "--format=%gd%x00%aN%x00%at%x00%gs", refname])
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let entries: Vec<Vec<&str>> = out
+        .lines()
+        .map(|l| l.splitn(4, '\0').collect::<Vec<_>>())
+        .filter(|f| f.len() == 4 && !f[0].is_empty())
+        .collect();
+    let title = if refname == "refs/stash" { "Stashes".to_string() } else { format!("Stashes [{refname}]") };
+    let mut b = Builder::new();
+    let n = entries.len();
+    b.heading_hide(title, LineKind::SectionHeader { section: "stashesbuf".into(), n }, "stashesbuf", 0, n > 0, false);
+    let now = now();
+    for (i, f) in entries.iter().enumerate() {
+        let kind = LineKind::Stash { idx: i, name: f[0].to_string(), msg: f[3].to_string() };
+        b.line(format!("{} {}", f[0], f[3]), kind, &format!("stash:{}", f[0]), true, 1);
+        b.margin(truncate(&age_margin(f[2], now, REFLOG_MARGIN_WIDTH), REFLOG_MARGIN_WIDTH));
+    }
+    let mut buf = StatusBuffer::new(b.lines, Vec::new(), String::new());
+    buf.margin_width = REFLOG_MARGIN_WIDTH;
+    buf
+}
+
+// ---------------------------------------------------------------- cherry
+
+/// magit-cherry-refresh-buffer (magit-cherry-mode): the headers of HEAD
+/// and UPSTREAM, then the commits of `git cherry -v UPSTREAM HEAD`, newest
+/// first, "+" for those not in UPSTREAM and "-" for equivalent ones.
+pub fn build_cherry(g: &Git, head: &str, upstream: &str) -> StatusBuffer {
+    let mut b = Builder::new();
+    // magit-insert-cherry-headers
+    b.line(head_header(g, Some(head)), LineKind::Head, "header:head", true, 0);
+    if let Some(text) = upstream_header(g, head, Some(upstream), Some("Upstream: ")) {
+        b.line(text, LineKind::Head, "header:upstream", true, 0);
+    }
+    b.root_blank();
+    // magit-insert-cherry-commits
+    let out = g.git_string(&["cherry", "-v", "--abbrev", upstream, head]).unwrap_or_default();
+    let cherries: Vec<(&str, &str, &str)> = out
+        .lines()
+        .rev()
+        .filter_map(|l| {
+            let (mark, rest) = l.split_once(' ')?;
+            let (hash, msg) = rest.split_once(' ').unwrap_or((rest, ""));
+            matches!(mark, "+" | "-").then_some((mark, hash, msg))
+        })
+        .collect();
+    let mut idents: Vec<(String, String)> = Vec::new();
+    if !cherries.is_empty() {
+        let mut a = vec!["log", "--no-walk=unsorted", "--format=%aN%x00%ct"];
+        a.extend(cherries.iter().map(|c| c.1));
+        if let Ok(o) = g.git_output(&a) {
+            idents = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| {
+                    let (a, d) = l.split_once('\0').unwrap_or((l, ""));
+                    (a.to_string(), d.to_string())
+                })
+                .collect();
+        }
+    }
+    let n = cherries.len();
+    b.heading_hide("Cherry commits".into(), LineKind::SectionHeader { section: "cherries".into(), n }, "cherries", 0, n > 0, false);
+    let now = now();
+    for (i, (mark, hash, msg)) in cherries.iter().enumerate() {
+        let kind = LineKind::Commit { section: "cherry".into(), hash: hash.to_string() };
+        b.line(format!("{mark} {hash} {msg}"), kind, &format!("commit:{hash}"), true, 1);
+        if let Some((author, date)) = idents.get(i) {
+            b.margin(author_margin(author, date, now));
+        }
+    }
+    let mut buf = StatusBuffer::new(b.lines, Vec::new(), String::new());
+    buf.margin_width = LOG_MARGIN_WIDTH;
     buf
 }

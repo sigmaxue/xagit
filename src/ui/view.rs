@@ -308,7 +308,7 @@ impl Builder {
     }
 
     /// A newline that belongs to the root section (after the headers).
-    fn root_blank(&mut self) {
+    pub(crate) fn root_blank(&mut self) {
         self.stack.clear();
         self.push(String::new(), LineKind::Info, "", false, 0, false, Vec::new());
     }
@@ -376,6 +376,39 @@ fn rev_exists(g: &Git, rev: &str) -> bool {
     g.git_ok(&["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])
 }
 
+/// magit-insert-head-branch-header for BRANCH (or a detached HEAD).
+pub(crate) fn head_header(g: &Git, branch: Option<&str>) -> String {
+    let (hash, summary) = rev_summary(g, branch.unwrap_or("HEAD")).unwrap_or_default();
+    format!("{:<10}{} {summary}", "Head: ", branch.unwrap_or(&hash))
+}
+
+/// magit-insert-upstream-branch-header: nothing unless BRANCH has an
+/// upstream configured; UPSTREAM is shown if it exists.
+pub(crate) fn upstream_header(g: &Git, br: &str, upstream: Option<&str>, keyword: Option<&str>) -> Option<String> {
+    let remote = config(g, &format!("branch.{br}.remote"));
+    let merge = config(g, &format!("branch.{br}.merge"));
+    if remote.is_none() && merge.is_none() {
+        return None;
+    }
+    let rebase = match config(g, &format!("branch.{br}.rebase")).as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        _ => config_bool(g, "pull.rebase"),
+    };
+    let keyword = keyword.unwrap_or(if rebase { "Rebase: " } else { "Merge: " });
+    let rest = match (upstream, &remote, &merge) {
+        (Some(up), _, _) => {
+            let s = rev_summary(g, up).map(|(_, s)| s).unwrap_or_else(|| "(no commit message)".into());
+            format!("{up} {s}")
+        }
+        (None, Some(r), Some(m)) if r == "." => format!("{m} does not exist"),
+        (None, Some(r), Some(m)) if g.remotes().contains(r) => format!("{m} does not exist on {r}"),
+        (None, Some(r), Some(m)) => format!("{m} from {r}"),
+        _ => "invalid upstream configuration".into(),
+    };
+    Some(format!("{keyword:<10}{rest}"))
+}
+
 fn insert_headers(b: &mut Builder, g: &Git) {
     if !rev_exists(g, "HEAD") {
         b.line("In the beginning there was darkness".into(), LineKind::Info, "", false, 0);
@@ -384,37 +417,11 @@ fn insert_headers(b: &mut Builder, g: &Git) {
     }
     let mut headers: Vec<(String, &str)> = Vec::new();
     let branch = g.current_branch();
-    let (hash, summary) = rev_summary(g, "HEAD").unwrap_or_default();
-    // magit-insert-head-branch-header
-    let text = match &branch {
-        Some(br) => format!("{:<10}{br} {summary}", "Head: "),
-        None => format!("{:<10}{hash} {summary}", "Head: "),
-    };
-    headers.push((text, "header:head"));
+    headers.push((head_header(g, branch.as_deref()), "header:head"));
 
     if let Some(br) = &branch {
-        // magit-insert-upstream-branch-header
-        let remote = config(g, &format!("branch.{br}.remote"));
-        let merge = config(g, &format!("branch.{br}.merge"));
-        if remote.is_some() || merge.is_some() {
-            let rebase = match config(g, &format!("branch.{br}.rebase")).as_deref() {
-                Some("true") => true,
-                Some("false") => false,
-                _ => config_bool(g, "pull.rebase"),
-            };
-            let keyword = if rebase { "Rebase: " } else { "Merge: " };
-            let upstream = g.upstream_shortname();
-            let rest = match (&upstream, &remote, &merge) {
-                (Some(up), _, _) => {
-                    let s = rev_summary(g, up).map(|(_, s)| s).unwrap_or_else(|| "(no commit message)".into());
-                    format!("{up} {s}")
-                }
-                (None, Some(r), Some(m)) if r == "." => format!("{m} does not exist"),
-                (None, Some(r), Some(m)) if g.remotes().contains(r) => format!("{m} does not exist on {r}"),
-                (None, Some(r), Some(m)) => format!("{m} from {r}"),
-                _ => "invalid upstream configuration".into(),
-            };
-            headers.push((format!("{keyword:<10}{rest}"), "header:upstream"));
+        if let Some(text) = upstream_header(g, br, g.upstream_shortname().as_deref(), None) {
+            headers.push((text, "header:upstream"));
         }
         // magit-insert-push-branch-header
         if let Some(target) = push_branch(g, br) {

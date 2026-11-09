@@ -288,3 +288,111 @@ fn reflog_subjects() {
     assert_eq!(reflog_subject("pull --rebase (finish)"), format!("{:<16} ", "pull --rebase finish"));
     assert_eq!(reflog_subject("rebase (start)"), format!("{:<16} ", "rebase start"));
 }
+
+#[test]
+fn stashes_buffer() {
+    let (_td, g) = merge_repo();
+    write(&g, "file.txt", "one\n");
+    g.git_interactive(&["stash", "-q"]).unwrap();
+    write(&g, "file.txt", "two\n");
+    g.git_interactive(&["stash", "-q", "-m", "custom"]).unwrap();
+    let mut app = App::new(g.clone());
+    app.press("z").unwrap();
+    app.press("l").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Stashes { refname: "refs/stash".into() });
+    let t = texts(&app);
+    assert_eq!(t.len(), 3, "{t:#?}");
+    assert_eq!(t[0], "Stashes");
+    assert_eq!(t[1], "stash@{0} On master: custom");
+    assert!(t[2].starts_with("stash@{1} WIP on master: "), "{t:#?}");
+    assert!(app.visible_lines()[1].margin.contains("second"), "{:?}", app.visible_lines()[1].margin);
+    // magit-stashes-mode derives from magit-reflog-mode
+    app.press("L").unwrap();
+    assert_eq!(app.message(), "Cannot change log arguments in reflog buffers");
+    // RET shows the stash, q comes back
+    goto(&mut app, "stash@{0}");
+    app.press("RET").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Stash { stash: "stash@{0}".into() });
+    app.press("q").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Stashes { .. }));
+    // k drops the stash at point
+    goto(&mut app, "stash@{1}");
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    assert_eq!(texts(&app), ["Stashes", "stash@{0} On master: custom"]);
+    // RET on the stashes section of the status buffer lists them too
+    app.press("q").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Status);
+    goto(&mut app, "Stashes (1)");
+    app.press("RET").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Stashes { .. }));
+}
+
+#[test]
+fn cherry_buffer() {
+    let (_td, g, _) = repo_with_commit();
+    g.git_interactive(&["checkout", "-q", "-b", "topic"]).unwrap();
+    for name in ["a", "b"] {
+        write(&g, &format!("{name}.txt"), "x\n");
+        g.git_interactive(&["add", "."]).unwrap();
+        g.git_interactive(&["commit", "-q", "-m", name]).unwrap();
+    }
+    g.git_interactive(&["checkout", "-q", "master"]).unwrap();
+    write(&g, "m.txt", "m\n");
+    g.git_interactive(&["add", "."]).unwrap();
+    g.git_interactive(&["commit", "-q", "-m", "m"]).unwrap();
+    g.git_interactive(&["cherry-pick", "topic~1"]).unwrap();
+    g.git_interactive(&["checkout", "-q", "topic"]).unwrap();
+    g.git_interactive(&["branch", "-q", "-u", "master"]).unwrap();
+    let (a, b) = (short(&g, "topic~1"), short(&g, "topic"));
+    let mut app = App::new(g.clone());
+    app.script_answers(&["topic", "master"]);
+    app.press("Y").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Cherry { head: "topic".into(), upstream: "master".into() });
+    assert_eq!(
+        texts(&app),
+        [
+            "Head:     topic b".to_string(),
+            "Upstream: master a".to_string(),
+            String::new(),
+            "Cherry commits".to_string(),
+            format!("+ {b} b"),
+            format!("- {a} a"),
+        ]
+    );
+    let author = g.git_string(&["log", "-1", "--format=%aN"]).unwrap();
+    assert!(app.visible_lines()[4].margin.starts_with(&author));
+    app.press("L").unwrap();
+    assert_eq!(app.message(), "Cannot change log arguments in cherry buffers");
+    goto(&mut app, "+ ");
+    app.press("RET").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Revision { rev: b, files: vec![] });
+    app.press("q").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Cherry { .. }));
+}
+
+#[test]
+fn shortlog() {
+    let (_td, g) = merge_repo();
+    let author = g.git_string(&["log", "-1", "--format=%aN"]).unwrap();
+    let mut app = App::new(g.clone());
+    app.press("l").unwrap();
+    app.press("s").unwrap();
+    assert_eq!(app.active_switches(), ["--numbered", "--summary"]);
+    app.script_answers(&["HEAD~2"]);
+    app.press("s").unwrap();
+    let (title, content) = app.text_view().unwrap();
+    assert_eq!(title, "*magit-shortlog*");
+    assert_eq!(content.trim(), format!("3\t{author}"));
+    app.press("q").unwrap();
+    // without --summary, for a range
+    app.press("l").unwrap();
+    app.press("s").unwrap();
+    app.press("-").unwrap();
+    app.press("s").unwrap();
+    app.script_answers(&["HEAD~1..HEAD"]);
+    app.press("r").unwrap();
+    let (_, content) = app.text_view().unwrap();
+    assert!(content.starts_with(&format!("{author} (2):")), "{content}");
+    assert!(content.contains("Merge branch 'side'"), "{content}");
+}

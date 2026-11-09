@@ -3,7 +3,7 @@
 use super::keys::Key;
 use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, RepoState};
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
-use super::logbuf::{build_log, build_reflog, set_commit_limit, Limit, REFLOG_LIMIT};
+use super::logbuf::{build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, REFLOG_LIMIT};
 use super::view::{build_status, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
@@ -72,8 +72,8 @@ pub struct App {
 }
 
 /// The major mode of a buffer: magit-status-mode, magit-diff-mode,
-/// magit-revision-mode, magit-stash-mode, magit-log-mode or
-/// magit-reflog-mode.
+/// magit-revision-mode, magit-stash-mode, magit-log-mode,
+/// magit-reflog-mode, magit-stashes-mode or magit-cherry-mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BufferMode {
     Status,
@@ -82,6 +82,8 @@ pub enum BufferMode {
     Stash { stash: String },
     Log { revs: Vec<String>, files: Vec<String> },
     Reflog { refname: String },
+    Stashes { refname: String },
+    Cherry { head: String, upstream: String },
 }
 
 impl BufferMode {
@@ -345,6 +347,8 @@ impl App {
             BufferMode::Stash { stash } => build_stash(&self.git, stash, &self.buf_args),
             BufferMode::Log { revs, files } => build_log(&self.git, revs, &self.buf_args, files),
             BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args),
+            BufferMode::Stashes { refname } => build_stashes(&self.git, refname),
+            BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream),
         }
     }
 
@@ -727,8 +731,12 @@ impl App {
             self.set_msg("C-c-");
             return Ok(());
         }
-        // magit-log-mode-map (also the parent of magit-reflog-mode-map)
-        if matches!(self.mode, BufferMode::Log { .. } | BufferMode::Reflog { .. }) && self.view_text.is_none() && !key.ctrl {
+        // magit-log-mode-map (also the parent of magit-reflog-mode-map and
+        // so of magit-stashes-mode-map)
+        if matches!(self.mode, BufferMode::Log { .. } | BufferMode::Reflog { .. } | BufferMode::Stashes { .. })
+            && self.view_text.is_none()
+            && !key.ctrl
+        {
             let limit = match key.code.as_str() {
                 "+" => Some(Limit::Double),
                 "-" => Some(Limit::Half),
@@ -792,12 +800,20 @@ impl App {
             let menu = diff_refresh_menu(self.mode != BufferMode::Status);
             self.menus.insert(name.clone(), menu);
         }
-        if name == "log-refresh-menu" && matches!(self.mode, BufferMode::Reflog { .. }) {
-            self.set_msg("Cannot change log arguments in reflog buffers");
-            return;
+        if name == "log-refresh-menu" {
+            let kind = match self.mode {
+                BufferMode::Reflog { .. } | BufferMode::Stashes { .. } => "reflog",
+                BufferMode::Cherry { .. } => "cherry",
+                _ => "",
+            };
+            if !kind.is_empty() {
+                self.set_msg(&format!("Cannot change log arguments in {kind} buffers"));
+                return;
+            }
         }
         // `d` starts with the arguments of the diff buffer shown, else the
         // current value of magit-diff-mode; `D` with the buffer's arguments
+        let shortlog_default = ["--numbered".to_string(), "--summary".to_string()];
         let preset: &[String] = match (name.as_str(), &self.mode) {
             ("diff-menu", BufferMode::Diff(_)) => &self.buf_args,
             ("diff-menu", _) => &self.diff_args,
@@ -805,6 +821,7 @@ impl App {
             ("diff-refresh-menu", _) => &self.buf_args,
             ("log-menu" | "log-refresh-menu", BufferMode::Log { .. }) => &self.buf_args,
             ("log-menu" | "log-refresh-menu", _) => &self.log_args,
+            ("shortlog-menu", _) => &shortlog_default,
             _ => &[],
         };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
@@ -1568,14 +1585,7 @@ impl App {
                     self.refresh();
                 }
             }
-            "stash-list" => {
-                let l = g!().stash_list();
-                if l.is_empty() {
-                    self.set_msg("no stashes");
-                } else {
-                    self.view_text = Some(("stash list".into(), l.join("\n")));
-                }
-            }
+            "stash-list" => self.setup_buffer(BufferMode::Stashes { refname: "refs/stash".into() }, Vec::new()),
 
             // -------- ignore / misc
             "ignore" => {
@@ -1663,10 +1673,34 @@ impl App {
                 };
                 self.setup_buffer(BufferMode::Reflog { refname }, vec![format!("-n{REFLOG_LIMIT}")]);
             }
-            "shortlog" => match g!().git_string(&["shortlog", "-s", "-n", "HEAD"]) {
-                Ok(o) => self.view_text = Some(("shortlog".into(), o)),
-                Err(e) => self.set_msg(&format!("{e}")),
-            },
+            // magit-shortlog-since / -range: `git shortlog ARGS REV` shown in
+            // the *magit-shortlog* buffer
+            "shortlog-since" | "shortlog-range" => {
+                let rev = if cmd == "shortlog-since" {
+                    let default = crate::ui::view::current_tag(g!()).map(|(t, _)| t);
+                    let Some(c) = self.read_line_prompt("Shortlog since", default.as_deref())? else {
+                        return Ok(());
+                    };
+                    format!("{c}..")
+                } else {
+                    let default = match self.dwim() {
+                        Dwim::Commit(c) => Some(self.git.rev_short(&c)),
+                        Dwim::Range(r) => Some(r),
+                        _ => g!().current_branch(),
+                    };
+                    let Some(r) = self.read_line_prompt("Shortlog for revision or range", default.as_deref())? else {
+                        return Ok(());
+                    };
+                    r
+                };
+                let mut a: Vec<&str> = vec!["shortlog"];
+                a.extend(args.iter().map(String::as_str));
+                a.push(&rev);
+                match g!().git_string(&a) {
+                    Ok(o) => self.view_text = Some(("*magit-shortlog*".into(), o)),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+            }
             "diff-unstaged" | "diff-staged" | "diff-worktree" | "diff-dwim" | "diff-range"
             | "show-commit" => {
                 let kind = if cmd == "show-commit" { "commit" } else { &cmd[5..] };
@@ -1830,6 +1864,11 @@ impl App {
                     | LineKind::DiffLine { section, .. }
                     | LineKind::Meta { section, .. },
                 ) => Dwim::Commit(section.clone()),
+                _ => Dwim::None,
+            },
+            BufferMode::Stashes { .. } | BufferMode::Cherry { .. } => match line.map(|l| &l.kind) {
+                Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
+                Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
                 _ => Dwim::None,
             },
             BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
@@ -2025,6 +2064,35 @@ impl App {
             Some(t) => self.goto_sec(t),
             None => self.set_msg(&format!("Parent {parent} not found.  Try typing + first")),
         }
+    }
+
+    /// magit-cherry ("Y"): read the head (magit-read-branch) and the upstream
+    /// (magit-read-other-branch, defaulting to the current branch unless that
+    /// is the head, else the head's upstream, else the previous branch).
+    fn cherry(&mut self) -> Result<()> {
+        let mut branches = self.git.branches();
+        branches.extend(self.git.remote_branches());
+        let current = self.git.current_branch();
+        let Some(head) = self.pick("Cherry head", &branches, current.as_deref())?.cloned() else {
+            return Ok(());
+        };
+        let upstream_of = self
+            .git
+            .git_string(&["rev-parse", "--abbrev-ref", &format!("{head}@{{upstream}}")])
+            .ok()
+            .filter(|s| !s.is_empty());
+        let previous = self
+            .git
+            .git_string(&["rev-parse", "--abbrev-ref", "@{-1}"])
+            .ok()
+            .filter(|s| !s.is_empty() && s != "HEAD");
+        let default = current.filter(|c| *c != head).or(upstream_of).or(previous);
+        let others: Vec<String> = branches.into_iter().filter(|b| *b != head).collect();
+        let Some(upstream) = self.pick("Cherry upstream", &others, default.as_deref())?.cloned() else {
+            return Ok(());
+        };
+        self.setup_buffer(BufferMode::Cherry { head, upstream }, Vec::new());
+        Ok(())
     }
 
     // ------------------------------------------------------------ sections (magit-section)
@@ -3053,8 +3121,7 @@ impl App {
                 self.diff_view(&section)?
             }
             LineKind::SectionHeader { section, .. } if section == "stashes" => {
-                let l = self.git.stash_list();
-                self.view_text = Some(("stash list".into(), l.join("\n")));
+                self.setup_buffer(BufferMode::Stashes { refname: "refs/stash".into() }, Vec::new())
             }
             LineKind::Stash { name, .. } => self.show_stash(&name),
             LineKind::Commit { hash, .. } => self.show_commit(&hash),
@@ -3106,7 +3173,7 @@ impl App {
             self.view_scroll = if up { self.view_scroll + page } else { self.view_scroll.saturating_sub(page) };
             return Ok(());
         }
-        if !matches!(self.mode, BufferMode::Status | BufferMode::Log { .. } | BufferMode::Reflog { .. }) {
+        if matches!(self.mode, BufferMode::Diff(_) | BufferMode::Revision { .. } | BufferMode::Stash { .. }) {
             if up {
                 if self.scroll + page >= self.lines.len() {
                     self.set_msg("End of buffer");
@@ -3522,12 +3589,7 @@ impl App {
                 }
                 self.view_text = Some(("status buffer".into(), out));
             }
-            "cherries" => {
-                let default = self.git.upstream_shortname();
-                let up = self.read_line_prompt("Cherry against upstream", default.as_deref())?;
-                let res = self.git.cherries(up.as_deref(), None);
-                self.show("cherries", res);
-            }
+            "cherries" => self.cherry()?,
 
             // ---- subtree
             "subtree-prefixes" => {
@@ -3612,7 +3674,11 @@ impl App {
                     BufferMode::Diff(s) => (s.range.clone(), s.typearg.clone(), s.files.clone()),
                     BufferMode::Revision { rev, files } => (Some(format!("{rev}^..{rev}")), None, files.clone()),
                     BufferMode::Stash { stash } => (Some(format!("{stash}^..{stash}")), None, Vec::new()),
-                    BufferMode::Status | BufferMode::Log { .. } | BufferMode::Reflog { .. } => {
+                    BufferMode::Status
+                    | BufferMode::Log { .. }
+                    | BufferMode::Reflog { .. }
+                    | BufferMode::Stashes { .. }
+                    | BufferMode::Cherry { .. } => {
                         self.set_msg("Only diff buffers can be saved as patches");
                         return Ok(());
                     }

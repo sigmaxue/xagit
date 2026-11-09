@@ -664,10 +664,27 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("r", "reflog current", "reflog-current"),
                     cmd("O", "reflog other", "reflog-other"),
                     cmd("H", "reflog HEAD", "reflog-head"),
-                    cmd("s", "shortlog", "shortlog"),
+                    sub("s", "shortlog", "shortlog-menu"),
                     // ngit extra (Magit: magit-log-buffer-file in the file dispatch)
                     cmd("f", "file at point", "log-change"),
                 ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-shortlog (l s)
+    m.insert(
+        "shortlog-menu".into(),
+        Menu {
+            name: "shortlog-menu".into(),
+            title: "Show a history summary".into(),
+            groups: vec![
+                vec![
+                    sw("-n", "Sort by number of commits", "--numbered"),
+                    sw("-s", "Show commit count summary only", "--summary"),
+                    sw("-e", "Show email addresses", "--email"),
+                ],
+                vec![cmd("s", "since", "shortlog-since"), cmd("r", "range", "shortlog-range")],
             ],
         },
     );

@@ -364,7 +364,13 @@ fn log_popup_layout() {
     assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "reflog-current"));
     assert!(matches!(action_of(&m, "O"), Action::Command(c) if c == "reflog-other"));
     assert!(matches!(action_of(&m, "H"), Action::Command(c) if c == "reflog-head"));
-    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "shortlog"));
+    assert!(matches!(action_of(&m, "s"), Action::Submenu(c) if c == "shortlog-menu"));
+
+    // magit-shortlog ("l s")
+    let s = menu("shortlog-menu");
+    assert_eq!(s.keys(), ["-n", "-s", "-e", "s", "r"]);
+    assert!(matches!(action_of(&s, "s"), Action::Command(c) if c == "shortlog-since"));
+    assert!(matches!(action_of(&s, "r"), Action::Command(c) if c == "shortlog-range"));
 
     // magit-log-refresh ("L")
     let r = menu("log-refresh-menu");
