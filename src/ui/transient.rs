@@ -108,6 +108,57 @@ fn sub(key: &str, desc: &str, menu: &str) -> MenuEntry {
     MenuEntry { key: key.into(), desc: desc.into(), action: Action::Submenu(menu.into()) }
 }
 
+/// magit-diff argument switches shared by `d` and `D` (default level).
+fn diff_switches() -> Vec<MenuEntry> {
+    vec![
+        sw("-b", "Ignore whitespace changes", "--ignore-space-change"),
+        sw("-w", "Ignore all whitespace", "--ignore-all-space"),
+        sw("-W", "Show surrounding functions", "--function-context"),
+    ]
+}
+
+/// magit-log argument switches shared by `l` and `L` (default level).
+fn log_switches() -> Vec<MenuEntry> {
+    vec![
+        sw("-D", "Simplify by decoration", "--simplify-by-decoration"),
+        sw("-f", "Follow renames when showing single-file log", "--follow"),
+        sw("-r", "Reverse order", "--reverse"),
+        sw("-g", "Show graph", "--graph"),
+        sw("-d", "Show refnames", "--decorate"),
+        sw("-p", "Show diffs", "--patch"),
+        sw("-s", "Show diffstats", "--stat"),
+    ]
+}
+
+/// Repository state behind Magit's `:if` predicates that swap menu suffixes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RepoState {
+    pub merge: bool,
+    pub rebase: bool,
+    /// cherry-pick or revert stopped (magit-sequencer-in-progress-p)
+    pub sequencer: bool,
+    pub am: bool,
+    pub bisect: bool,
+}
+
+/// Pick the layout Magit would show: `<name>@progress` while the matching
+/// operation is in progress, otherwise the normal menu.
+pub fn resolve_menu(name: &str, st: RepoState) -> String {
+    let busy = match name {
+        "merge-menu" => st.merge,
+        "rebase-menu" => st.rebase,
+        "cherry-pick-menu" | "revert-menu" => st.sequencer,
+        "patches-menu" => st.am,
+        "bisect-menu" => st.bisect,
+        _ => false,
+    };
+    if busy {
+        format!("{name}@progress")
+    } else {
+        name.to_string()
+    }
+}
+
 /// Build the menu registry — every menu mirrors a transient-define-prefix in Magit.
 pub fn registry() -> BTreeMap<String, Menu> {
     let mut m = BTreeMap::new();
@@ -126,7 +177,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("c", "Commit", "commit-menu"),
                     cmd("C", "Clone", "clone"),
                     cmd("d", "Diff", "diff-menu"),
-                    cmd("D", "Diff (change)", "diff-change"),
+                    cmd("D", "Diff (change)", "diff-refresh-menu"),
                     cmd("e", "Ediff (dwim)", "ediff-dwim"),
                     cmd("E", "Ediff", "ediff-menu"),
                     cmd("f", "Fetch", "fetch-menu"),
@@ -140,7 +191,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("j", "Jump to section", "jump"),
                     cmd("J", "Display buffer", "display-buffer"),
                     cmd("l", "Log", "log-menu"),
-                    cmd("L", "Log (change)", "log-change"),
+                    cmd("L", "Log (change)", "log-refresh-menu"),
                     cmd("m", "Merge", "merge-menu"),
                     cmd("M", "Remote", "remote-menu"),
                     cmd("o", "Submodule", "submodule-menu"),
@@ -153,9 +204,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("r", "Rebase", "rebase-menu"),
                     cmd("t", "Tag", "tag-menu"),
                     cmd("T", "Note", "notes-menu"),
-                    cmd("V", "Revert", "revert"),
+                    cmd("V", "Revert", "revert-menu"),
                     cmd("w", "Apply patches", "patches-menu"),
-                    cmd("W", "Format patches", "patches-format"),
+                    cmd("W", "Format patches", "patch-menu"),
                     cmd("X", "Reset", "reset-menu"),
                     cmd("y", "Show Refs", "show-refs"),
                     cmd("Y", "Cherries", "cherries"),
@@ -305,15 +356,25 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     sw("-f", "Force with lease", "--force-with-lease"),
                     sw("-F", "Force", "--force"),
+                    sw("-h", "Disable hooks", "--no-verify"),
                     sw("-n", "Dry run", "--dry-run"),
                     sw("-u", "Set upstream", "--set-upstream"),
+                    sw("-T", "Include all tags", "--tags"),
+                    sw("-t", "Include related annotated tags", "--follow-tags"),
                 ],
                 vec![
-                    cmd("u", "to upstream", "push-upstream"),
+                    cmd("p", "pushRemote", "push-pushremote"),
+                    cmd("u", "upstream", "push-upstream"),
                     cmd("e", "elsewhere", "push-other"),
-                    cmd("t", "a tag", "push-tag"),
-                    cmd("o", "another branch", "push-other-branch"),
                 ],
+                vec![
+                    cmd("o", "another branch", "push-other-branch"),
+                    cmd("r", "explicit refspecs", "push-refspecs"),
+                    cmd("m", "matching branches", "push-matching"),
+                    cmd("T", "a tag", "push-tag"),
+                    cmd("t", "all tags", "push-tags"),
+                ],
+                vec![cmd("C", "Set variables...", "branch-config-menu")],
             ],
         },
     );
@@ -328,14 +389,31 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     sw("-f", "Fast-forward only", "--ff-only"),
                     sw("-n", "No fast-forward", "--no-ff"),
+                    sw("-b", "Ignore changes in amount of whitespace", "-Xignore-space-change"),
+                    sw("-w", "Ignore whitespace when comparing lines", "-Xignore-all-space"),
                 ],
                 vec![
                     cmd("m", "Merge", "merge-plain"),
+                    cmd("e", "Merge and edit message", "merge-editmsg"),
                     cmd("n", "Merge but don't commit", "merge-nocommit"),
+                ],
+                vec![
+                    cmd("p", "Preview merge", "merge-preview"),
                     cmd("s", "Squash merge", "merge-squash"),
-                    cmd("a", "Abort merge", "merge-abort"),
                 ],
             ],
+        },
+    );
+    // :if magit-merge-in-progress-p
+    m.insert(
+        "merge-menu@progress".into(),
+        Menu {
+            name: "merge-menu@progress".into(),
+            title: "Merge in progress".into(),
+            groups: vec![vec![
+                cmd("m", "Commit merge", "merge-commit"),
+                cmd("a", "Abort merge", "merge-abort"),
+            ]],
         },
     );
 
@@ -347,6 +425,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Transplant commits and/or modify existing commits".into(),
             groups: vec![
                 vec![
+                    sw("-k", "Keep empty commits", "--keep-empty"),
+                    sw("-r", "Rebase merges", "--rebase-merges"),
+                    sw("-u", "Update branches", "--update-refs"),
                     sw("-d", "Use author date as committer date", "--committer-date-is-author-date"),
                     sw("-t", "Use current time as author date", "--ignore-date"),
                     sw("-a", "Autosquash", "--autosquash"),
@@ -355,13 +436,25 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-h", "Disable hooks", "--no-verify"),
                 ],
                 vec![
+                    cmd("p", "onto pushRemote", "rebase-pushremote"),
                     cmd("u", "onto upstream", "rebase-upstream"),
                     cmd("e", "elsewhere", "rebase-other"),
-                    cmd("r", "Continue", "rebase-continue"),
-                    cmd("s", "Skip", "rebase-skip"),
-                    cmd("a", "Abort", "rebase-abort"),
                 ],
+                vec![cmd("f", "to autosquash", "rebase-autosquash")],
             ],
+        },
+    );
+    // :if magit-rebase-in-progress-p
+    m.insert(
+        "rebase-menu@progress".into(),
+        Menu {
+            name: "rebase-menu@progress".into(),
+            title: "Rebase in progress".into(),
+            groups: vec![vec![
+                cmd("r", "Continue", "rebase-continue"),
+                cmd("s", "Skip", "rebase-skip"),
+                cmd("a", "Abort", "rebase-abort"),
+            ]],
         },
     );
 
@@ -455,12 +548,30 @@ pub fn registry() -> BTreeMap<String, Menu> {
         Menu {
             name: "diff-menu".into(),
             title: "Show changes between different versions".into(),
-            groups: vec![vec![
-                cmd("u", "Diff unstaged", "diff-unstaged"),
-                cmd("s", "Diff staged", "diff-staged"),
-                cmd("c", "Show commit", "show-commit"),
-                cmd("t", "Show stash", "stash-show"),
-            ]],
+            groups: vec![
+                diff_switches(),
+                vec![
+                    cmd("d", "Dwim", "diff-dwim"),
+                    cmd("r", "Diff range", "diff-range"),
+                    cmd("u", "Diff unstaged", "diff-unstaged"),
+                    cmd("s", "Diff staged", "diff-staged"),
+                    cmd("w", "Diff worktree", "diff-worktree"),
+                ],
+                vec![
+                    cmd("c", "Show commit", "show-commit"),
+                    cmd("t", "Show stash", "stash-show"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-diff-refresh (D)
+    m.insert(
+        "diff-refresh-menu".into(),
+        Menu {
+            name: "diff-refresh-menu".into(),
+            title: "Change arguments of diff buffers".into(),
+            groups: vec![diff_switches(), vec![cmd("g", "Refresh", "diff-refresh")]],
         },
     );
 
@@ -470,13 +581,34 @@ pub fn registry() -> BTreeMap<String, Menu> {
         Menu {
             name: "log-menu".into(),
             title: "Show a commit or reference log".into(),
-            groups: vec![vec![
-                cmd("l", "current", "log-current"),
-                cmd("o", "other", "log-other"),
-                cmd("L", "local branches", "log-branches"),
-                cmd("b", "all branches", "log-all-branches"),
-                cmd("r", "reflog current", "reflog-current"),
-            ]],
+            groups: vec![
+                log_switches(),
+                vec![
+                    cmd("l", "current", "log-current"),
+                    cmd("o", "other", "log-other"),
+                    cmd("L", "local branches", "log-branches"),
+                    cmd("b", "all branches", "log-all-branches"),
+                    cmd("a", "all references", "log-all"),
+                ],
+                vec![
+                    cmd("r", "reflog current", "reflog-current"),
+                    cmd("O", "reflog other", "reflog-other"),
+                    cmd("H", "reflog HEAD", "reflog-head"),
+                    cmd("s", "shortlog", "shortlog"),
+                    // ngit extra (Magit: magit-log-buffer-file in the file dispatch)
+                    cmd("f", "file at point", "log-change"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-log-refresh (L)
+    m.insert(
+        "log-refresh-menu".into(),
+        Menu {
+            name: "log-refresh-menu".into(),
+            title: "Change arguments of log buffers".into(),
+            groups: vec![log_switches(), vec![cmd("g", "Refresh", "log-refresh")]],
         },
     );
 
@@ -512,6 +644,51 @@ pub fn registry() -> BTreeMap<String, Menu> {
             ],
         },
     );
+    // :if magit-sequencer-in-progress-p
+    m.insert(
+        "cherry-pick-menu@progress".into(),
+        Menu {
+            name: "cherry-pick-menu@progress".into(),
+            title: "Cherry-pick in progress".into(),
+            groups: vec![vec![
+                cmd("A", "Continue", "sequencer-continue"),
+                cmd("s", "Skip", "sequencer-skip"),
+                cmd("a", "Abort", "sequencer-abort"),
+            ]],
+        },
+    );
+
+    // ------------------------------------------------ magit-revert (V)
+    m.insert(
+        "revert-menu".into(),
+        Menu {
+            name: "revert-menu".into(),
+            title: "Revert existing commits, with or without creating new commits".into(),
+            groups: vec![
+                vec![
+                    sw("-e", "Edit commit message", "--edit"),
+                    sw("-E", "Don't edit commit message", "--no-edit"),
+                ],
+                vec![
+                    cmd("V", "Revert commit(s)", "revert"),
+                    cmd("v", "Revert changes", "revert-no-commit"),
+                ],
+            ],
+        },
+    );
+    // :if magit-sequencer-in-progress-p
+    m.insert(
+        "revert-menu@progress".into(),
+        Menu {
+            name: "revert-menu@progress".into(),
+            title: "Revert in progress".into(),
+            groups: vec![vec![
+                cmd("V", "Continue", "sequencer-continue"),
+                cmd("s", "Skip", "sequencer-skip"),
+                cmd("a", "Abort", "sequencer-abort"),
+            ]],
+        },
+    );
 
     // ------------------------------------------------ magit-bisect (B)
     m.insert(
@@ -519,19 +696,28 @@ pub fn registry() -> BTreeMap<String, Menu> {
         Menu {
             name: "bisect-menu".into(),
             title: "Bisect".into(),
+            groups: vec![vec![
+                cmd("B", "Start", "bisect-start"),
+                cmd("s", "Start script", "bisect-start-run"),
+            ]],
+        },
+    );
+    // :if magit-bisect-in-progress-p
+    m.insert(
+        "bisect-menu@progress".into(),
+        Menu {
+            name: "bisect-menu@progress".into(),
+            title: "Bisect in progress".into(),
             groups: vec![
                 vec![
-                    cmd("B", "Start", "bisect-start"),
-                    cmd("b", "Bad", "bisect-bad"),
+                    cmd("B", "Bad", "bisect-bad"),
                     cmd("g", "Good", "bisect-good"),
-                    cmd("s", "Skip", "bisect-skip"),
-                ],
-                vec![
+                    cmd("k", "Skip", "bisect-skip"),
                     cmd("r", "Reset", "bisect-reset"),
-                    cmd("u", "Run", "bisect-run"),
-                    cmd("l", "Log", "bisect-log"),
-                    cmd("v", "Visualize", "bisect-log"),
+                    cmd("s", "Run script", "bisect-run"),
                 ],
+                // ngit extra: Magit shows the log in the status buffer
+                vec![cmd("l", "Log", "bisect-log")],
             ],
         },
     );
@@ -565,16 +751,26 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Submodule".into(),
             groups: vec![
                 vec![
-                    cmd("a", "Add", "submodule-add"),
-                    cmd("i", "Init", "submodule-init"),
-                    cmd("u", "Update", "submodule-update"),
-                    cmd("U", "Update recursively", "submodule-update-recursive"),
-                    cmd("s", "Sync", "submodule-sync"),
+                    sw("-f", "Force", "--force"),
+                    sw("-r", "Recursive", "--recursive"),
+                    sw("-N", "Do not fetch", "--no-fetch"),
+                    sw("-C", "Checkout tip", "--checkout"),
+                    sw("-R", "Rebase onto tip", "--rebase"),
+                    sw("-M", "Merge tip", "--merge"),
+                    sw("-U", "Use upstream tip", "--remote"),
                 ],
                 vec![
-                    cmd("d", "Deinit", "submodule-deinit"),
-                    cmd("r", "Remove", "submodule-remove"),
-                    cmd("l", "List", "submodule-list"),
+                    cmd("a", "Add", "submodule-add"),
+                    cmd("r", "Register", "submodule-register"),
+                    cmd("p", "Populate", "submodule-populate"),
+                    cmd("u", "Update", "submodule-update"),
+                    cmd("s", "Synchronize", "submodule-sync"),
+                    cmd("d", "Unpopulate", "submodule-unpopulate"),
+                    cmd("k", "Remove", "submodule-remove"),
+                ],
+                vec![
+                    cmd("l", "List modules", "submodule-list"),
+                    cmd("f", "Fetch modules", "submodule-fetch"),
                 ],
             ],
         },
@@ -605,15 +801,16 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "ediff-menu".into(),
             title: "Ediff (text diff view)".into(),
             groups: vec![
+                vec![cmd("E", "Dwim", "ediff-dwim")],
                 vec![
-                    cmd("e", "Dwim (thing at point)", "ediff-dwim"),
-                    cmd("u", "Unstaged", "ediff-unstaged"),
-                    cmd("s", "Staged", "ediff-staged"),
+                    cmd("u", "Show unstaged", "ediff-unstaged"),
+                    cmd("i", "Show staged", "ediff-staged"),
+                    cmd("w", "Show worktree", "ediff-worktree"),
                 ],
                 vec![
-                    cmd("c", "Commit", "ediff-commit"),
-                    cmd("r", "Ranges", "ediff-range"),
-                    cmd("D", "Change", "diff-change"),
+                    cmd("c", "Show commit", "ediff-commit"),
+                    cmd("r", "Show range", "ediff-range"),
+                    cmd("z", "Show stash", "ediff-stash"),
                 ],
             ],
         },
@@ -637,7 +834,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
         },
     );
 
-    // ------------------------------------------------ magit-am / format-patch (w / W)
+    // ------------------------------------------------ magit-am (w)
     m.insert(
         "patches-menu".into(),
         Menu {
@@ -645,17 +842,52 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Apply patches".into(),
             groups: vec![
                 vec![
-                    cmd("w", "Apply (git am)", "patches-apply"),
-                    cmd("A", "Apply 3-way", "patches-apply-3way"),
-                    cmd("a", "Apply to worktree", "patches-apply-worktree"),
+                    sw("-3", "Fall back on 3way merge", "--3way"),
+                    sw("-R", "Reject only failed hunks", "--reject"),
+                    sw("-c", "Remove text before scissors line", "--scissors"),
+                    sw("-k", "Inhibit removal of email cruft", "--keep"),
+                    sw("-b", "Limit removal of email cruft", "--keep-non-patch"),
+                    sw("-d", "Use author date as committer date", "--committer-date-is-author-date"),
+                    sw("-t", "Use current time as author date", "--ignore-date"),
                 ],
                 vec![
-                    cmd("r", "Abort", "patches-abort"),
-                    cmd("c", "Continue", "patches-continue"),
-                    cmd("l", "Show current", "patches-show"),
-                    cmd("W", "Format patches", "patches-format"),
+                    cmd("w", "patches", "patches-apply"),
+                    cmd("a", "plain patch", "patches-apply-worktree"),
                 ],
             ],
+        },
+    );
+    // :if magit-am-in-progress-p
+    m.insert(
+        "patches-menu@progress".into(),
+        Menu {
+            name: "patches-menu@progress".into(),
+            title: "Applying patches".into(),
+            groups: vec![
+                vec![
+                    cmd("w", "Continue", "patches-continue"),
+                    cmd("s", "Skip", "patches-skip"),
+                    cmd("a", "Abort", "patches-abort"),
+                ],
+                // ngit extra
+                vec![cmd("l", "Show current patch", "patches-show")],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-patch (W)
+    m.insert(
+        "patch-menu".into(),
+        Menu {
+            name: "patch-menu".into(),
+            title: "Patches".into(),
+            groups: vec![vec![
+                cmd("c", "Create patches", "patches-format"),
+                cmd("w", "Apply patches", "patches-menu"),
+                cmd("a", "Apply plain patch", "patches-apply-worktree"),
+                cmd("s", "Save diff as patch", "patch-save"),
+                cmd("r", "Request pull", "request-pull"),
+            ]],
         },
     );
 
@@ -667,15 +899,19 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Configure branch".into(),
             groups: vec![
                 vec![
-                    cmd("s", "Show settings", "branch-config-show"),
-                    cmd("u", "Set upstream", "branch-config-upstream"),
-                    cmd("U", "Unset upstream", "branch-config-unset-upstream"),
+                    cmd("d", "branch.<branch>.description", "branch-config-description"),
+                    cmd("u", "branch.<branch>.merge/remote", "branch-config-upstream"),
+                    cmd("r", "branch.<branch>.rebase (cycle)", "branch-config-rebase"),
+                    cmd("p", "branch.<branch>.pushRemote", "branch-config-pushremote"),
                 ],
                 vec![
-                    cmd("r", "Rebase on", "branch-config-rebase-on"),
-                    cmd("R", "Rebase off", "branch-config-rebase-off"),
-                    cmd("d", "Description", "branch-config-description"),
-                    cmd("p", "pushRemote", "branch-config-pushremote"),
+                    cmd("R", "pull.rebase (cycle)", "pull-rebase"),
+                    cmd("P", "remote.pushDefault", "remote-pushdefault"),
+                ],
+                // ngit extras
+                vec![
+                    cmd("s", "Show settings", "branch-config-show"),
+                    cmd("U", "Unset upstream", "branch-config-unset-upstream"),
                 ],
             ],
         },

@@ -1,7 +1,7 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::Key;
-use super::transient::{registry, Action, Menu, MenuEntry};
+use super::transient::{registry, resolve_menu, Action, Menu, MenuEntry, RepoState};
 use super::view::{render_status, BufferLine, LineKind};
 use crate::git::ops::Untracked;
 use crate::git::status::Status;
@@ -29,6 +29,13 @@ pub struct App {
     view_text: Option<(String, String)>, // (title, content)
     /// directory ngit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
+    /// arguments for diff views, changed with `D` (magit-diff-refresh)
+    pub diff_args: Vec<String>,
+    /// arguments for log views, changed with `L` (magit-log-refresh);
+    /// Magit's default is "--graph --decorate"
+    pub log_args: Vec<String>,
+    /// command that produced the current text view, re-run by `D g` / `L g`
+    last_view: Option<String>,
 }
 
 /// What a key does in the status buffer when no transient is open.
@@ -46,8 +53,8 @@ pub enum Binding {
 }
 
 /// Status buffer key map (magit-status-mode-map + magit-mode-map).
-/// `k` is magit-discard (Magit has no vi-style `k` = up); move with
-/// arrows, `j`, or C-n / C-p.
+/// `k` is magit-discard and `j` is magit-status-jump (Magit has no vi-style
+/// movement); move with n / p, arrows, or C-n / C-p.
 pub fn status_binding(key: &Key) -> Option<Binding> {
     use Binding::*;
     if key.ctrl {
@@ -60,12 +67,19 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
     Some(match key.code.as_str() {
         "q" | "esc" => Bury,
         "h" | "?" => Menu("dispatch"),
-        "g" => Refresh,
-        "j" | "down" => Down,
-        "up" => Up,
+        "g" | "G" => Refresh,
+        "n" | "down" => Down,
+        "p" | "up" => Up,
+        "j" => Command("jump"),
+        "^" => Command("section-up"),
         "tab" => Toggle,
         "enter" => Visit,
-        "$" | "!" => Menu("run-menu"),
+        "!" => Menu("run-menu"),
+        "$" => Command("process-buffer"),
+        "H" => Command("section-info"),
+        "J" => Command("display-buffer"),
+        "Y" => Command("cherries"),
+        "%" => Menu("worktree-menu"),
         "s" => Command("stage"),
         "S" => Command("stage-all"),
         "u" => Command("unstage"),
@@ -73,21 +87,34 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
         "k" => Command("discard"),
         "K" => Command("untrack"),
         "x" => Command("reset-quickly"),
-        "V" => Command("revert"),
+        "a" => Command("apply"),
+        "v" => Command("reverse"),
         "y" => Command("show-refs"),
         ":" | "Q" => Command("git-command"),
         "I" => Command("init"),
         "C" => Command("clone"),
+        "e" => Command("ediff-dwim"),
+        "D" => Menu("diff-refresh-menu"),
+        "L" => Menu("log-refresh-menu"),
+        "V" => Menu("revert-menu"),
         "c" => Menu("commit-menu"),
         "b" => Menu("branch-menu"),
+        "B" => Menu("bisect-menu"),
+        "E" => Menu("ediff-menu"),
         "f" => Menu("fetch-menu"),
         "F" => Menu("pull-menu"),
         "P" => Menu("push-menu"),
         "m" => Menu("merge-menu"),
         "M" => Menu("remote-menu"),
+        "o" => Menu("submodule-menu"),
+        "O" => Menu("subtree-menu"),
         "r" => Menu("rebase-menu"),
         "t" => Menu("tag-menu"),
+        "T" => Menu("notes-menu"),
+        "w" => Menu("patches-menu"),
+        "W" => Menu("patch-menu"),
         "z" => Menu("stash-menu"),
+        "Z" => Menu("worktree-menu"),
         "X" => Menu("reset-menu"),
         "i" => Menu("gitignore-menu"),
         "l" => Menu("log-menu"),
@@ -110,6 +137,9 @@ impl App {
             quit: false,
             view_text: None,
             cwd,
+            diff_args: Vec::new(),
+            log_args: vec!["--graph".into(), "--decorate".into()],
+            last_view: None,
         };
         app.refresh();
         app
@@ -389,9 +419,44 @@ impl App {
     }
 
     fn open_menu(&mut self, name: &str) {
-        if self.menus.contains_key(name) {
-            self.stack.push((name.to_string(), BTreeMap::new()));
+        let name = resolve_menu(name, self.repo_state());
+        if !self.menus.contains_key(&name) {
+            return;
         }
+        // diff/log menus start with the arguments currently in use, like
+        // Magit's buffer-local magit-diff/log arguments
+        let preset: &[String] = match name.as_str() {
+            "diff-menu" | "diff-refresh-menu" => &self.diff_args,
+            "log-menu" | "log-refresh-menu" => &self.log_args,
+            _ => &[],
+        };
+        let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
+        self.stack.push((name, active));
+    }
+
+    fn repo_state(&self) -> RepoState {
+        RepoState {
+            merge: self.git.merge_in_progress(),
+            rebase: self.git.rebase_in_progress(),
+            sequencer: self.git.pick_or_revert_in_progress(),
+            am: self.git.am_in_progress(),
+            bisect: self.git.bisect_in_progress(),
+        }
+    }
+
+    /// Name of the transient currently shown, if any.
+    pub fn current_menu(&self) -> Option<&str> {
+        self.stack.last().map(|(n, _)| n.as_str())
+    }
+
+    /// Feed one key (Emacs notation, e.g. "h", "C-g", "<tab>") as if typed.
+    /// Only keys that do not prompt should be used outside the terminal.
+    pub fn press(&mut self, label: &str) -> Result<()> {
+        self.handle_key(super::keys::key_from_label(label))
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     fn handle_transient_key(
@@ -449,6 +514,11 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn run_command(&mut self, cmd: &str, active: &BTreeMap<String, bool>) -> Result<()> {
+        // a menu used as a command (e.g. dispatch "b Branch") opens that menu
+        if self.menus.contains_key(cmd) {
+            self.open_menu(cmd);
+            return Ok(());
+        }
         let args = self.args_from(active);
         macro_rules! g {
             () => {
@@ -468,11 +538,13 @@ impl App {
                 self.view_text = Some((
                     "Key bindings".into(),
                     "h/? dispatch popup — all commands live there.\n\
+                     n/p move, j jump to section, ^ section up\n\
                      s stage, u unstage, S stage all, U unstage all\n\
-                     k discard, K untrack, x reset quickly\n\
+                     k discard, K untrack, x reset quickly, a apply, v reverse\n\
                      c commit, b branch, z stash, P push, F pull, f fetch\n\
                      m merge, r rebase, X reset, t tag, M remote\n\
-                     l log, d diff, A cherry-pick, V revert\n\
+                     l log, d diff, L/D change log/diff arguments, A cherry-pick, V revert\n\
+                     w apply patches, W patch, o submodule, $ git process log\n\
                      g refresh, TAB toggle section, RET visit, q quit"
                         .into(),
                 ));
@@ -792,24 +864,102 @@ impl App {
                 }
                 self.refresh();
             }
+            "push-pushremote" => {
+                match g!().push_pushremote(&args) {
+                    Ok(r) => self.set_msg(&format!("pushed to {r}")),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+                self.refresh();
+            }
+            "push-tags" | "push-matching" | "push-refspecs" => {
+                let remotes = g!().remotes();
+                let default = g!()
+                    .current_branch()
+                    .and_then(|b| g!().upstream_of(&b))
+                    .map(|(r, _)| r)
+                    .filter(|r| r != ".");
+                let Some(remote) = self.pick("Push to remote", &remotes, default.as_deref())?.cloned() else {
+                    return Ok(());
+                };
+                let res = match cmd {
+                    "push-tags" => g!().push_tags(&remote, &args),
+                    "push-matching" => g!().push_matching(&remote, &args),
+                    _ => {
+                        let Some(specs) = self.read_line_prompt("Refspecs (space separated)", None)? else {
+                            return Ok(());
+                        };
+                        let specs: Vec<String> = specs.split_whitespace().map(str::to_string).collect();
+                        g!().push_refspecs(&remote, &specs, &args)
+                    }
+                };
+                match res {
+                    Ok(()) => self.set_msg(&format!("pushed to {remote}")),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+                self.refresh();
+            }
 
             // -------- merge / rebase
-            "merge-plain" | "merge-nocommit" | "merge-squash" => {
-                let bs = g!().branches();
-                if let Some(rev) = self.pick("Merge revision", &bs, None)? {
-                    match cmd {
-                        "merge-plain" => g!().merge(rev, &args)?,
-                        "merge-nocommit" => g!().merge_nocommit(rev)?,
-                        "merge-squash" => g!().merge_squash(rev)?,
-                        _ => unreachable!(),
+            "merge-plain" | "merge-nocommit" | "merge-squash" | "merge-editmsg" | "merge-preview" => {
+                let mut bs = g!().branches();
+                bs.extend(g!().remote_branches());
+                let Some(rev) = self.pick("Merge revision", &bs, None)?.cloned() else {
+                    return Ok(());
+                };
+                match cmd {
+                    "merge-plain" => g!().merge(&rev, &args)?,
+                    "merge-nocommit" => g!().merge_nocommit(&rev)?,
+                    "merge-squash" => g!().merge_squash(&rev)?,
+                    "merge-editmsg" => {
+                        let into = g!().current_branch().unwrap_or_else(|| "HEAD".into());
+                        let default = format!("Merge branch '{rev}' into {into}");
+                        let Some(msg) = self.read_line_prompt("Merge message", Some(&default))? else {
+                            return Ok(());
+                        };
+                        g!().merge_with_message(&rev, &msg, &args)?;
                     }
-                    self.set_msg("merged");
-                    self.refresh();
+                    _ => {
+                        match g!().merge_preview(&rev) {
+                            Ok(p) if p.trim().is_empty() => self.set_msg("merge would not change anything"),
+                            Ok(p) => self.view_text = Some((format!("preview merge of {rev}"), p)),
+                            Err(e) => self.set_msg(&format!("{e}")),
+                        }
+                        return Ok(());
+                    }
                 }
+                self.set_msg("merged");
+                self.refresh();
+            }
+            "merge-commit" => {
+                match g!().merge_commit() {
+                    Ok(()) => self.set_msg("merge committed"),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+                self.refresh();
             }
             "merge-abort" => {
                 g!().merge_abort()?;
                 self.set_msg("merge aborted");
+                self.refresh();
+            }
+            "rebase-pushremote" => {
+                match g!().rebase_pushremote(&args) {
+                    Ok(t) => self.set_msg(&format!("rebased onto {t}")),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+                self.refresh();
+            }
+            "rebase-autosquash" => {
+                let default = g!().autosquash_base();
+                let Some(base) =
+                    self.read_line_prompt("Autosquash commits after", default.as_deref().or(Some("HEAD~10")))?
+                else {
+                    return Ok(());
+                };
+                match g!().rebase_autosquash_with(&base, &args) {
+                    Ok(()) => self.set_msg("autosquashed"),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
                 self.refresh();
             }
             "rebase-upstream" | "rebase-other" => {
@@ -900,12 +1050,25 @@ impl App {
             }
 
             // -------- revert / cherry-pick
-            "revert" => {
+            "revert" | "revert-no-commit" => {
                 let Some(r) = self.pick_recent_commit("Revert commit")? else {
                     return Ok(());
                 };
-                g!().revert(&[r], &[], false)?;
-                self.set_msg("reverted");
+                let no_commit = cmd == "revert-no-commit";
+                g!().revert(&[r.clone()], &args, no_commit)?;
+                self.set_msg(if no_commit {
+                    "reverted changes in the working tree"
+                } else {
+                    "reverted"
+                });
+                self.refresh();
+            }
+            "sequencer-continue" | "sequencer-skip" | "sequencer-abort" => {
+                let action = cmd.trim_start_matches("sequencer-");
+                match g!().sequencer(action) {
+                    Ok(()) => self.set_msg(&format!("sequencer {action}")),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
                 self.refresh();
             }
             // magit-apply: apply the thing at point to the working tree
@@ -1112,44 +1275,60 @@ impl App {
                 self.view_text = Some(("refs".into(), out));
             }
 
-            // -------- log / diff / show
-            "log-current" | "log-other" | "log-branches" | "log-all-branches" => {
-                let (rev, limit) = match cmd {
-                    "log-current" => (None, 50),
-                    "log-other" => {
-                        let bs = g!().branches();
-                        (self.pick("Log branch", &bs, None)?.map(|s| s.clone()), 50)
-                    }
-                    "log-branches" => (Some("--branches".into()), 50),
-                    _ => (Some("--all".into()), 50),
+            // -------- log / diff / show (arguments come from the l/d menus)
+            "log-current" | "log-other" | "log-branches" | "log-all-branches" | "log-all" => {
+                self.log_args = args.clone();
+                self.log_view(cmd)?;
+            }
+            "log-refresh" => {
+                self.log_args = args.clone();
+                match self.last_view.clone() {
+                    Some(v) if v.starts_with("log:") => self.log_view(&v[4..])?,
+                    _ => self.set_msg(&format!("log arguments: {}", self.log_args.join(" "))),
+                }
+            }
+            "reflog-other" | "reflog-head" => {
+                let rev = if cmd == "reflog-head" {
+                    "HEAD".to_string()
+                } else {
+                    let bs = g!().branches();
+                    let Some(b) = self.pick("Reflog of branch", &bs, None)?.cloned() else {
+                        return Ok(());
+                    };
+                    b
                 };
-                match g!().log(rev.as_deref(), limit) {
-                    Ok(l) if l.is_empty() => self.set_msg("no commits"),
-                    Ok(l) => self.view_text = Some(("log".into(), l.join("\n"))),
+                match g!().reflog(Some(&rev), 50) {
+                    Ok(o) => self.view_text = Some((format!("reflog {rev}"), o)),
                     Err(e) => self.set_msg(&format!("{e}")),
                 }
             }
-            "diff-unstaged" => match g!().diff_unstaged() {
-                Ok(d) => self.view_text = Some(("diff unstaged".into(), d)),
+            "shortlog" => match g!().git_string(&["shortlog", "-s", "-n", "HEAD"]) {
+                Ok(o) => self.view_text = Some(("shortlog".into(), o)),
                 Err(e) => self.set_msg(&format!("{e}")),
             },
-            "diff-staged" => match g!().diff_staged() {
-                Ok(d) => self.view_text = Some(("diff staged".into(), d)),
-                Err(e) => self.set_msg(&format!("{e}")),
-            },
-            "show-commit" => {
-                let log = g!().log(None, 30)?;
-                let revs: Vec<String> = log
-                    .iter()
-                    .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
-                    .collect();
-                if let Some(r) = self.pick("Show commit", &revs, None)? {
-                    match g!().show_commit(r) {
-                        Ok(s) => self.view_text = Some((format!("commit {r}"), s)),
-                        Err(e) => self.set_msg(&format!("{e}")),
-                    }
+            "diff-unstaged" | "diff-staged" | "diff-worktree" | "diff-dwim" | "diff-range"
+            | "show-commit" => {
+                self.diff_args = args.clone();
+                let kind = if cmd == "show-commit" { "commit" } else { &cmd[5..] };
+                self.diff_view(kind)?;
+            }
+            "diff-refresh" => {
+                self.diff_args = args.clone();
+                match self.last_view.clone() {
+                    Some(v) if v.starts_with("diff:") => self.diff_view(&v[5..])?,
+                    _ => self.set_msg(&format!("diff arguments: {}", self.diff_args.join(" "))),
                 }
             }
+            "process-buffer" => {
+                let log = crate::git::exec::process_log();
+                let text = if log.is_empty() {
+                    "No git commands run yet".to_string()
+                } else {
+                    log.join("\n")
+                };
+                self.view_text = Some(("git process log".into(), text));
+            }
+            "section-up" => self.section_up(),
 
             // -------- repo-level
             "init" => {
@@ -1173,9 +1352,125 @@ impl App {
             }
 
             // All remaining commands are Magit extras
-            _ => self.run_extra(cmd)?,
+            _ => self.run_extra(cmd, &args)?,
         }
         Ok(())
+    }
+
+    // ------------------------------------------------------------ diff / log views
+
+    /// Show a diff buffer using `self.diff_args` (magit-diff-arguments).
+    fn diff_view(&mut self, kind: &str) -> Result<()> {
+        let a = self.diff_args.clone();
+        let (title, res, rerun): (String, Result<String>, bool) = match kind {
+            "unstaged" => ("diff unstaged".into(), self.git.diff_with(&a, &[]), true),
+            "staged" => ("diff staged".into(), self.git.diff_with(&a, &["--cached"]), true),
+            "worktree" => ("diff worktree".into(), self.git.diff_with(&a, &["HEAD"]), true),
+            "dwim" => match self.current_line().map(|l| l.kind.clone()) {
+                Some(LineKind::File { section, path }) if section == "untracked" => (
+                    format!("new file {path}"),
+                    Ok(std::fs::read_to_string(self.git.toplevel.join(&path)).unwrap_or_default()),
+                    false,
+                ),
+                Some(LineKind::File { section, path }) => {
+                    let mut rest = vec![];
+                    if section == "staged" {
+                        rest.push("--cached");
+                    }
+                    rest.extend(["--", path.as_str()]);
+                    (format!("diff {path}"), self.git.diff_with(&a, &rest), false)
+                }
+                Some(LineKind::SectionHeader { section, .. }) if section == "staged" => {
+                    ("diff staged".into(), self.git.diff_with(&a, &["--cached"]), false)
+                }
+                Some(LineKind::Stash { name, .. }) => {
+                    (format!("stash {name}"), self.git.stash_show(&name), false)
+                }
+                _ => ("diff unstaged".into(), self.git.diff_with(&a, &[]), false),
+            },
+            "range" => {
+                let Some(from) = self.read_line_prompt("Diff from revision", Some("HEAD~1"))? else {
+                    return Ok(());
+                };
+                let Some(to) = self.read_line_prompt("Diff to revision", Some("HEAD"))? else {
+                    return Ok(());
+                };
+                (format!("{from}..{to}"), self.git.diff_with(&a, &[&from, &to]), false)
+            }
+            "commit" => {
+                let Some(rev) = self.pick_recent_commit("Show commit")? else {
+                    return Ok(());
+                };
+                (format!("commit {rev}"), self.git.show_with(&rev, &a), false)
+            }
+            "stash" => {
+                let names: Vec<String> = self.git.stashes().into_iter().map(|(n, _)| n).collect();
+                let Some(name) = self.pick("Show stash", &names, None)?.cloned() else {
+                    return Ok(());
+                };
+                (format!("stash {name}"), self.git.stash_show(&name), false)
+            }
+            _ => return Ok(()),
+        };
+        match res {
+            Ok(out) if out.trim().is_empty() => self.set_msg("(no differences)"),
+            Ok(out) => {
+                self.view_text = Some((title, out));
+                self.last_view = rerun.then(|| format!("diff:{kind}"));
+            }
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        Ok(())
+    }
+
+    /// Show a log buffer using `self.log_args` (magit-log-arguments, -n256).
+    fn log_view(&mut self, cmd: &str) -> Result<()> {
+        let mut a = self.log_args.clone();
+        let title = match cmd {
+            "log-current" => "log".to_string(),
+            "log-other" => {
+                let mut refs = self.git.branches();
+                refs.extend(self.git.remote_branches());
+                refs.extend(self.git.tags());
+                let Some(r) = self.pick("Log rev", &refs, None)?.cloned() else {
+                    return Ok(());
+                };
+                a.push(r.clone());
+                format!("log {r}")
+            }
+            "log-branches" => {
+                a.push("--branches".into());
+                "log local branches".into()
+            }
+            "log-all-branches" => {
+                a.extend(["--branches".into(), "--remotes".into()]);
+                "log all branches".into()
+            }
+            "log-all" => {
+                a.push("--all".into());
+                "log all references".into()
+            }
+            _ => return Ok(()),
+        };
+        match self.git.log_with(None, 256, &a) {
+            Ok(l) if l.is_empty() => self.set_msg("no commits"),
+            Ok(l) => {
+                self.view_text = Some((title, l.join("\n")));
+                self.last_view = (cmd != "log-other").then(|| format!("log:{cmd}"));
+            }
+            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        Ok(())
+    }
+
+    /// magit-section-up: move to the header of the section containing point.
+    fn section_up(&mut self) {
+        if let Some(i) = (0..self.cursor)
+            .rev()
+            .find(|&i| matches!(self.lines[i].kind, LineKind::SectionHeader { .. }))
+        {
+            self.cursor = i;
+        }
     }
 
     // ------------------------------------------------------------ point helpers
@@ -1365,7 +1660,7 @@ impl App {
         }
     }
 
-    fn run_extra(&mut self, cmd: &str) -> Result<()> {
+    fn run_extra(&mut self, cmd: &str, args: &[String]) -> Result<()> {
         match cmd {
             // ---- bisect
             "bisect-start" => {
@@ -1401,12 +1696,26 @@ impl App {
                 let res = self.git.bisect_log();
                 self.show("bisect log", res);
             }
-            "bisect-run" => {
+            "bisect-run" | "bisect-start-run" => {
+                // magit-bisect-run: when not bisecting yet, start first
+                if cmd == "bisect-start-run" || !self.git.bisect_in_progress() {
+                    let Some(bad) = self.read_line_prompt("Bisect bad revision", Some("HEAD"))? else {
+                        return Ok(());
+                    };
+                    let Some(good) = self.read_line_prompt("Bisect good revision", None)? else {
+                        return Ok(());
+                    };
+                    if let Err(e) = self.git.bisect_start(Some(&bad), &[good]) {
+                        self.set_msg(&format!("{e}"));
+                        return Ok(());
+                    }
+                }
                 let Some(command) = self.read_line_prompt("Bisect run shell command", None)? else {
                     return Ok(());
                 };
                 let res = self.git.bisect_run(&command);
                 self.show("bisect run", res);
+                self.refresh();
             }
 
             // ---- worktree
@@ -1469,33 +1778,38 @@ impl App {
                 let res = self.git.submodule_add(&url, &path);
                 self.done("submodule added", res);
             }
-            "submodule-init" => {
-                let res = self.git.submodule_init();
-                self.done("submodules initialized", res);
-            }
-            "submodule-update" | "submodule-update-recursive" => {
-                let recursive = cmd == "submodule-update-recursive";
-                let res = self.git.submodule_update(true, recursive);
-                self.done("submodules updated", res);
+            // magit-submodule-register / populate / update / unpopulate:
+            // act on one module or on all of them ("(all)")
+            "submodule-register" | "submodule-populate" | "submodule-update" | "submodule-unpopulate" => {
+                let Some(modules) = self.pick_submodules(cmd != "submodule-unpopulate")? else {
+                    return Ok(());
+                };
+                let res = match cmd {
+                    "submodule-register" => self.git.submodule_register(&modules),
+                    "submodule-populate" => self.git.submodule_populate(args, &modules),
+                    "submodule-update" => self.git.submodule_update_with(args, &modules),
+                    _ => self.git.submodule_unpopulate(args, &modules),
+                };
+                self.done(&cmd.replace('-', " "), res);
             }
             "submodule-sync" => {
                 let res = self.git.submodule_sync();
                 self.done("submodules synced", res);
             }
-            "submodule-deinit" | "submodule-remove" => {
+            "submodule-fetch" => {
+                let res = self.git.fetch_modules(args);
+                self.done("fetched modules", res);
+            }
+            "submodule-remove" => {
                 let paths = self.git.submodule_paths();
-                let Some(path) = self.pick("Submodule", &paths, None)?.cloned() else {
+                let Some(path) = self.pick("Remove submodule", &paths, None)?.cloned() else {
                     return Ok(());
                 };
-                if !self.yes_no(&format!("{cmd} {path}?"))? {
+                if !self.yes_no(&format!("Remove submodule {path}?"))? {
                     return Ok(());
                 }
-                let res = if cmd == "submodule-deinit" {
-                    self.git.submodule_deinit(&path)
-                } else {
-                    self.git.submodule_remove(&path)
-                };
-                self.done("submodule updated", res);
+                let res = self.git.submodule_remove(&path);
+                self.done("submodule removed", res);
             }
 
             // ---- notes
@@ -1535,53 +1849,10 @@ impl App {
                 self.done("notes pruned", res);
             }
 
-            // ---- ediff / diff views (text buffers instead of Emacs sessions)
-            "ediff-dwim" => {
-                let cur = self.current_file();
-                let res: Result<String> = match cur {
-                    Some((section, path)) if section == "untracked" => Ok(format!(
-                        "New file: {path}\n\n{}",
-                        std::fs::read_to_string(self.git.toplevel.join(&path))
-                            .unwrap_or_default()
-                    )),
-                    Some((section, path)) => self.git.diff_file(&path, section == "staged"),
-                    None => self.git.diff_unstaged(),
-                };
-                self.show("ediff dwim", res);
-            }
-            "ediff-unstaged" | "ediff-staged" => {
-                let res = if cmd == "ediff-staged" {
-                    self.git.diff_staged()
-                } else {
-                    self.git.diff_unstaged()
-                };
-                self.show("ediff", res);
-            }
-            "ediff-range" => {
-                let Some(from) = self.read_line_prompt("Diff from revision", Some("HEAD~1"))? else {
-                    return Ok(());
-                };
-                let Some(to) = self.read_line_prompt("Diff to revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                let res = self.git.diff_range(&from, &to);
-                self.show(&format!("{from}..{to}"), res);
-            }
-            "ediff-commit" | "diff-change" => {
-                let log = self.git.log(None, 30)?;
-                let revs: Vec<String> = log
-                    .iter()
-                    .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
-                    .collect();
-                let Some(rev) = self.pick("Commit", &revs, None)?.cloned() else {
-                    return Ok(());
-                };
-                let res = if cmd == "diff-change" {
-                    self.git.diff_change(&rev)
-                } else {
-                    self.git.show_commit(&rev)
-                };
-                self.show(&format!("commit {rev}"), res);
+            // ---- ediff (text diff buffers instead of Emacs ediff sessions)
+            "ediff-dwim" | "ediff-unstaged" | "ediff-staged" | "ediff-worktree" | "ediff-range"
+            | "ediff-commit" | "ediff-stash" => {
+                self.diff_view(&cmd["ediff-".len()..])?;
             }
 
             // ---- section info / buffer display
@@ -1686,21 +1957,26 @@ impl App {
                 let res = self.git.patch_format(&range, &dir);
                 self.show("format-patch", res);
             }
-            "patches-apply" | "patches-apply-3way" | "patches-apply-worktree" => {
-                let Some(path) = self.read_line_prompt("Patch file", None)? else {
+            "patches-apply" | "patches-apply-worktree" => {
+                let Some(path) = self.read_line_prompt("Patch file(s), space separated", None)? else {
                     return Ok(());
                 };
-                let res = match cmd {
-                    "patches-apply" => self.git.patch_apply_am(&path, false),
-                    "patches-apply-3way" => self.git.patch_apply_am(&path, true),
-                    _ => self.git.patch_apply_worktree(&path),
+                let files: Vec<String> = path.split_whitespace().map(str::to_string).collect();
+                let res = if cmd == "patches-apply" {
+                    self.git.am_apply(&files, args)
+                } else {
+                    match files.as_slice() {
+                        [one] => self.git.patch_apply_worktree(one),
+                        _ => Err(anyhow::anyhow!("git apply takes exactly one patch file")),
+                    }
                 };
                 self.done("patch applied", res);
             }
-            "patches-abort" | "patches-continue" | "patches-show" => {
+            "patches-abort" | "patches-continue" | "patches-skip" | "patches-show" => {
                 let res = match cmd {
                     "patches-abort" => self.git.patch_am_abort(),
                     "patches-continue" => self.git.patch_am_continue(),
+                    "patches-skip" => self.git.am_skip(),
                     _ => self.git.patch_am_show(),
                 };
                 if cmd == "patches-show" {
@@ -1708,6 +1984,44 @@ impl App {
                 } else {
                     self.done("git am", res);
                 }
+            }
+            // magit-patch-save: write the diff being viewed (or all changes) to a file
+            "patch-save" => {
+                let diff = match &self.view_text {
+                    Some((title, body))
+                        if title.starts_with("diff") || title.starts_with("commit") || title.starts_with("stash") =>
+                    {
+                        body.clone()
+                    }
+                    _ => self.git.diff_with(&self.diff_args, &["HEAD"])?,
+                };
+                if diff.trim().is_empty() {
+                    self.set_msg("no changes to save");
+                    return Ok(());
+                }
+                let Some(file) = self.read_line_prompt("Save patch as", Some("changes.patch"))? else {
+                    return Ok(());
+                };
+                let path = self.git.toplevel.join(&file);
+                std::fs::write(&path, format!("{}\n", diff.trim_end_matches('\n')))?;
+                self.set_msg(&format!("saved {}", path.display()));
+            }
+            "request-pull" => {
+                let default_start = self.git.upstream_shortname();
+                let Some(start) = self.read_line_prompt("Start (first commit not to include)", default_start.as_deref())? else {
+                    return Ok(());
+                };
+                let default_url = self
+                    .git
+                    .remotes()
+                    .first()
+                    .and_then(|r| self.git.git_string(&["remote", "get-url", r]).ok());
+                let Some(url) = self.read_line_prompt("Public repository url", default_url.as_deref())? else {
+                    return Ok(());
+                };
+                let end = self.read_line_prompt("End (default HEAD)", None)?;
+                let res = self.git.request_pull(&start, &url, end.as_deref());
+                self.show("request-pull", res);
             }
 
             // ---- branch configuration
@@ -1727,10 +2041,35 @@ impl App {
                 let res = self.git.branch_unset_upstream();
                 self.done("upstream unset", res);
             }
-            "branch-config-rebase-on" | "branch-config-rebase-off" => {
-                let value = if cmd == "branch-config-rebase-on" { "true" } else { "false" };
-                let res = self.git.branch_set_config("rebase", value);
-                self.done("branch rebase configured", res);
+            // magit-branch.<branch>.rebase / pull.rebase: cycle true -> false -> unset
+            "branch-config-rebase" | "pull-rebase" => {
+                let key = if cmd == "pull-rebase" {
+                    "pull.rebase".to_string()
+                } else {
+                    match self.git.current_branch() {
+                        Some(b) => format!("branch.{b}.rebase"),
+                        None => {
+                            self.set_msg("cannot configure a branch on detached HEAD");
+                            return Ok(());
+                        }
+                    }
+                };
+                match self.git.cycle_config(&key, &["true", "false"]) {
+                    Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
+            }
+            "remote-pushdefault" => {
+                let mut choices = self.git.remotes();
+                choices.push("(unset)".into());
+                let Some(r) = self.pick("remote.pushDefault", &choices, None)?.cloned() else {
+                    return Ok(());
+                };
+                let value = (r != "(unset)").then_some(r.as_str());
+                match self.git.set_config("remote.pushDefault", value) {
+                    Ok(()) => self.set_msg(&format!("remote.pushDefault = {}", value.unwrap_or("(unset)"))),
+                    Err(e) => self.set_msg(&format!("{e}")),
+                }
             }
             "branch-config-description" | "branch-config-pushremote" => {
                 let (key, prompt) = if cmd == "branch-config-description" {
@@ -1748,6 +2087,23 @@ impl App {
             _ => self.set_msg(&format!("unknown command: {cmd}")),
         }
         Ok(())
+    }
+
+    /// Pick a submodule, or "(all)" (empty list = every module) when allowed.
+    fn pick_submodules(&mut self, allow_all: bool) -> Result<Option<Vec<String>>> {
+        let mut choices = Vec::new();
+        if allow_all {
+            choices.push("(all)".to_string());
+        }
+        choices.extend(self.git.submodule_paths());
+        if choices.is_empty() || (allow_all && choices.len() == 1) {
+            self.set_msg("no submodules");
+            return Ok(None);
+        }
+        Ok(self
+            .pick("Submodule", &choices, None)?
+            .cloned()
+            .map(|c| if c == "(all)" { vec![] } else { vec![c] }))
     }
 
     /// Pick a known subtree prefix, or ask for one when none is recorded.

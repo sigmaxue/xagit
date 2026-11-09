@@ -1,21 +1,18 @@
 //! tests/keymaps.rs — verify every menu matches Magit's key bindings extracted
 //! from the lisp sources (magit.el, magit-branch.el, magit-commit.el, ...).
 
-use ngit_lib::ui::transient::{registry, Action};
+use ngit_lib::ui::transient::{registry, resolve_menu, Action, RepoState};
 
 fn menu(name: &str) -> ngit_lib::ui::transient::Menu {
     registry().get(name).expect("menu exists").clone()
 }
 
+fn find(m: &ngit_lib::ui::transient::Menu, key: &str) -> Option<Action> {
+    m.groups.iter().flatten().find(|e| e.key == key).map(|e| e.action.clone())
+}
+
 fn action_of(m: &ngit_lib::ui::transient::Menu, key: &str) -> Action {
-    for g in &m.groups {
-        for e in g {
-            if e.key == key {
-                return e.action.clone();
-            }
-        }
-    }
-    panic!("key {key} not found in {}", m.name);
+    find(m, key).unwrap_or_else(|| panic!("key {key} not found in {}", m.name))
 }
 
 /// magit.el:330-403 magit-dispatch
@@ -43,7 +40,10 @@ fn dispatch_popup_layout() {
     assert!(matches!(action_of(&d, "u"), Action::Command(c) if c == "unstage"));
     assert!(matches!(action_of(&d, "U"), Action::Command(c) if c == "unstage-all"));
     assert!(matches!(action_of(&d, "k"), Action::Command(c) if c == "discard"));
-    assert!(matches!(action_of(&d, "V"), Action::Command(c) if c == "revert"));
+    // magit-dispatch "V" is the magit-revert transient, not a direct revert
+    assert!(matches!(action_of(&d, "V"), Action::Command(c) if c == "revert-menu"));
+    assert!(matches!(action_of(&d, "a"), Action::Command(c) if c == "apply"));
+    assert!(matches!(action_of(&d, "v"), Action::Command(c) if c == "reverse"));
     assert!(matches!(action_of(&d, "!"), Action::Command(c) if c == "run-menu"));
     // essential
     assert!(matches!(action_of(&d, "g"), Action::Command(c) if c == "refresh"));
@@ -191,9 +191,19 @@ fn push_popup_layout() {
     assert!(matches!(action_of(&m, "-F"), Action::Switch(s) if s == "--force"));
     assert!(matches!(action_of(&m, "-n"), Action::Switch(s) if s == "--dry-run"));
     assert!(matches!(action_of(&m, "-u"), Action::Switch(s) if s == "--set-upstream"));
+    assert!(matches!(action_of(&m, "-h"), Action::Switch(s) if s == "--no-verify"));
+    assert!(matches!(action_of(&m, "-T"), Action::Switch(s) if s == "--tags"));
+    assert!(matches!(action_of(&m, "-t"), Action::Switch(s) if s == "--follow-tags"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "push-pushremote"));
     assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "push-upstream"));
     assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "push-other"));
-    assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "push-tag"));
+    assert!(matches!(action_of(&m, "o"), Action::Command(c) if c == "push-other-branch"));
+    assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "push-refspecs"));
+    assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "push-matching"));
+    // magit-push-tag is "T"; "t" is magit-push-tags (all tags)
+    assert!(matches!(action_of(&m, "T"), Action::Command(c) if c == "push-tag"));
+    assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "push-tags"));
+    assert!(matches!(action_of(&m, "C"), Action::Command(c) if c == "branch-config-menu"));
 }
 
 /// magit-merge.el:37 magit-merge prefix
@@ -203,9 +213,17 @@ fn merge_popup_layout() {
     assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "--ff-only"));
     assert!(matches!(action_of(&m, "-n"), Action::Switch(s) if s == "--no-ff"));
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "merge-plain"));
+    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "merge-editmsg"));
     assert!(matches!(action_of(&m, "n"), Action::Command(c) if c == "merge-nocommit"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "merge-preview"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "merge-squash"));
-    assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "merge-abort"));
+    // abort only exists while merging (:if magit-merge-in-progress-p)
+    assert!(find(&m, "a").is_none());
+
+    let p = menu("merge-menu@progress");
+    assert!(matches!(action_of(&p, "m"), Action::Command(c) if c == "merge-commit"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "merge-abort"));
+    assert!(find(&p, "s").is_none());
 }
 
 /// magit-sequence.el:526 magit-rebase prefix
@@ -217,11 +235,23 @@ fn rebase_popup_layout() {
     assert!(matches!(action_of(&m, "-i"), Action::Switch(s) if s == "--interactive"));
     assert!(matches!(action_of(&m, "-d"), Action::Switch(s) if s == "--committer-date-is-author-date"));
     assert!(matches!(action_of(&m, "-t"), Action::Switch(s) if s == "--ignore-date"));
+    assert!(matches!(action_of(&m, "-k"), Action::Switch(s) if s == "--keep-empty"));
+    assert!(matches!(action_of(&m, "-r"), Action::Switch(s) if s == "--rebase-merges"));
+    assert!(matches!(action_of(&m, "-u"), Action::Switch(s) if s == "--update-refs"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "rebase-pushremote"));
     assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "rebase-upstream"));
     assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "rebase-other"));
-    assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "rebase-continue"));
-    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "rebase-skip"));
-    assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "rebase-abort"));
+    assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "rebase-autosquash"));
+    // continue/skip/abort only while rebasing (:if magit-rebase-in-progress-p)
+    for k in ["r", "s", "a"] {
+        assert!(find(&m, k).is_none(), "{k} must not be in the idle rebase menu");
+    }
+
+    let p = menu("rebase-menu@progress");
+    assert!(matches!(action_of(&p, "r"), Action::Command(c) if c == "rebase-continue"));
+    assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "rebase-skip"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "rebase-abort"));
+    assert!(find(&p, "u").is_none());
 }
 
 /// magit-reset.el:34 magit-reset prefix
@@ -280,20 +310,45 @@ fn gitignore_popup_layout() {
 #[test]
 fn diff_popup_layout() {
     let m = menu("diff-menu");
+    assert!(matches!(action_of(&m, "-b"), Action::Switch(s) if s == "--ignore-space-change"));
+    assert!(matches!(action_of(&m, "-w"), Action::Switch(s) if s == "--ignore-all-space"));
+    assert!(matches!(action_of(&m, "-W"), Action::Switch(s) if s == "--function-context"));
+    assert!(matches!(action_of(&m, "d"), Action::Command(c) if c == "diff-dwim"));
+    assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "diff-range"));
     assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "diff-unstaged"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "diff-staged"));
+    assert!(matches!(action_of(&m, "w"), Action::Command(c) if c == "diff-worktree"));
     assert!(matches!(action_of(&m, "c"), Action::Command(c) if c == "show-commit"));
     assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "stash-show"));
+
+    // magit-diff-refresh ("D"): same switches, "g" re-runs the current diff
+    let r = menu("diff-refresh-menu");
+    assert!(matches!(action_of(&r, "-w"), Action::Switch(s) if s == "--ignore-all-space"));
+    assert!(matches!(action_of(&r, "g"), Action::Command(c) if c == "diff-refresh"));
 }
 
 /// magit-log.el magit-log prefix
 #[test]
 fn log_popup_layout() {
     let m = menu("log-menu");
+    assert!(matches!(action_of(&m, "-g"), Action::Switch(s) if s == "--graph"));
+    assert!(matches!(action_of(&m, "-d"), Action::Switch(s) if s == "--decorate"));
+    assert!(matches!(action_of(&m, "-D"), Action::Switch(s) if s == "--simplify-by-decoration"));
+    assert!(matches!(action_of(&m, "-r"), Action::Switch(s) if s == "--reverse"));
     assert!(matches!(action_of(&m, "l"), Action::Command(c) if c == "log-current"));
     assert!(matches!(action_of(&m, "o"), Action::Command(c) if c == "log-other"));
     assert!(matches!(action_of(&m, "L"), Action::Command(c) if c == "log-branches"));
     assert!(matches!(action_of(&m, "b"), Action::Command(c) if c == "log-all-branches"));
+    assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "log-all"));
+    assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "reflog-current"));
+    assert!(matches!(action_of(&m, "O"), Action::Command(c) if c == "reflog-other"));
+    assert!(matches!(action_of(&m, "H"), Action::Command(c) if c == "reflog-head"));
+    assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "shortlog"));
+
+    // magit-log-refresh ("L")
+    let r = menu("log-refresh-menu");
+    assert!(matches!(action_of(&r, "-g"), Action::Switch(s) if s == "--graph"));
+    assert!(matches!(action_of(&r, "g"), Action::Command(c) if c == "log-refresh"));
 }
 
 /// magit-run prefix ("!")
@@ -312,6 +367,73 @@ fn cherry_pick_popup_layout() {
     assert!(matches!(action_of(&m, "-e"), Action::Switch(s) if s == "--edit"));
     assert!(matches!(action_of(&m, "A"), Action::Command(c) if c == "cherry-pick"));
     assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "cherry-apply"));
+
+    // :if magit-sequencer-in-progress-p
+    let p = menu("cherry-pick-menu@progress");
+    assert!(matches!(action_of(&p, "A"), Action::Command(c) if c == "sequencer-continue"));
+    assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "sequencer-skip"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "sequencer-abort"));
+}
+
+/// magit-sequence.el magit-revert prefix ("V")
+#[test]
+fn revert_popup_layout() {
+    let m = menu("revert-menu");
+    assert!(matches!(action_of(&m, "-e"), Action::Switch(s) if s == "--edit"));
+    assert!(matches!(action_of(&m, "-E"), Action::Switch(s) if s == "--no-edit"));
+    assert!(matches!(action_of(&m, "V"), Action::Command(c) if c == "revert"));
+    assert!(matches!(action_of(&m, "v"), Action::Command(c) if c == "revert-no-commit"));
+
+    let p = menu("revert-menu@progress");
+    assert!(matches!(action_of(&p, "V"), Action::Command(c) if c == "sequencer-continue"));
+    assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "sequencer-skip"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "sequencer-abort"));
+    assert!(find(&p, "v").is_none());
+}
+
+/// Menus with `:if` suffixes switch layout while the operation is in progress.
+#[test]
+fn in_progress_menus_are_selected_by_repo_state() {
+    let idle = RepoState::default();
+    for name in ["merge-menu", "rebase-menu", "cherry-pick-menu", "revert-menu", "patches-menu", "bisect-menu"] {
+        assert_eq!(resolve_menu(name, idle), name);
+    }
+    let st = |f: fn(&mut RepoState)| {
+        let mut s = RepoState::default();
+        f(&mut s);
+        s
+    };
+    assert_eq!(resolve_menu("merge-menu", st(|s| s.merge = true)), "merge-menu@progress");
+    assert_eq!(resolve_menu("rebase-menu", st(|s| s.rebase = true)), "rebase-menu@progress");
+    assert_eq!(resolve_menu("cherry-pick-menu", st(|s| s.sequencer = true)), "cherry-pick-menu@progress");
+    assert_eq!(resolve_menu("revert-menu", st(|s| s.sequencer = true)), "revert-menu@progress");
+    assert_eq!(resolve_menu("patches-menu", st(|s| s.am = true)), "patches-menu@progress");
+    assert_eq!(resolve_menu("bisect-menu", st(|s| s.bisect = true)), "bisect-menu@progress");
+    // a state only affects its own menu
+    assert_eq!(resolve_menu("rebase-menu", st(|s| s.merge = true)), "rebase-menu");
+    assert_eq!(resolve_menu("commit-menu", st(|s| s.merge = true)), "commit-menu");
+
+    // every variant resolves to a registered menu
+    let reg = registry();
+    for name in reg.keys().filter(|n| n.ends_with("@progress")) {
+        let base = name.trim_end_matches("@progress");
+        assert!(reg.contains_key(base), "{name} has no idle menu");
+    }
+}
+
+/// Every command that names a menu must point at a registered one.
+#[test]
+fn menu_targets_exist() {
+    let reg = registry();
+    for (name, m) in &reg {
+        for e in m.groups.iter().flatten() {
+            if let Action::Command(c) | Action::Submenu(c) = &e.action {
+                if c.ends_with("-menu") {
+                    assert!(reg.contains_key(c), "{name} {} -> missing {c}", e.key);
+                }
+            }
+        }
+    }
 }
 
 /// Key translation mirrors Emacs notation.
@@ -356,22 +478,61 @@ fn extra_features_popup_layout() {
         ("T", "notes-menu"),
         ("E", "ediff-menu"),
         ("e", "ediff-dwim"),
-        ("D", "diff-change"),
+        ("D", "diff-refresh-menu"),
     ] {
         assert!(matches!(action_of(&d, key), Action::Command(c) if c == target), "{key}");
     }
 
+    // magit-bisect: idle menu only starts; marking needs a running bisect
     let b = menu("bisect-menu");
     assert!(matches!(action_of(&b, "B"), Action::Command(c) if c == "bisect-start"));
+    assert!(matches!(action_of(&b, "s"), Action::Command(c) if c == "bisect-start-run"));
+    assert!(find(&b, "g").is_none());
+    let b = menu("bisect-menu@progress");
+    assert!(matches!(action_of(&b, "B"), Action::Command(c) if c == "bisect-bad"));
     assert!(matches!(action_of(&b, "g"), Action::Command(c) if c == "bisect-good"));
+    assert!(matches!(action_of(&b, "k"), Action::Command(c) if c == "bisect-skip"));
+    assert!(matches!(action_of(&b, "r"), Action::Command(c) if c == "bisect-reset"));
+    assert!(matches!(action_of(&b, "s"), Action::Command(c) if c == "bisect-run"));
+
     let w = menu("worktree-menu");
     assert!(matches!(action_of(&w, "k"), Action::Command(c) if c == "worktree-delete"));
+
+    // magit-submodule: "r" registers (git submodule init), "k" removes
     let s = menu("submodule-menu");
-    assert!(matches!(action_of(&s, "a"), Action::Command(c) if c == "submodule-add"));
+    for (key, target) in [
+        ("a", "submodule-add"),
+        ("r", "submodule-register"),
+        ("p", "submodule-populate"),
+        ("u", "submodule-update"),
+        ("s", "submodule-sync"),
+        ("d", "submodule-unpopulate"),
+        ("k", "submodule-remove"),
+        ("l", "submodule-list"),
+        ("f", "submodule-fetch"),
+    ] {
+        assert!(matches!(action_of(&s, key), Action::Command(c) if c == target), "o {key}");
+    }
+    for (key, flag) in [("-f", "--force"), ("-r", "--recursive"), ("-N", "--no-fetch"), ("-U", "--remote")] {
+        assert!(matches!(action_of(&s, key), Action::Switch(x) if x == flag), "o {key}");
+    }
+
     let n = menu("notes-menu");
     assert!(matches!(action_of(&n, "T"), Action::Command(c) if c == "notes-edit"));
+
+    // magit-ediff: "E" is dwim (shown as text diffs in ngit)
     let e = menu("ediff-menu");
-    assert!(matches!(action_of(&e, "e"), Action::Command(c) if c == "ediff-dwim"));
+    for (key, target) in [
+        ("E", "ediff-dwim"),
+        ("u", "ediff-unstaged"),
+        ("i", "ediff-staged"),
+        ("w", "ediff-worktree"),
+        ("c", "ediff-commit"),
+        ("r", "ediff-range"),
+        ("z", "ediff-stash"),
+    ] {
+        assert!(matches!(action_of(&e, key), Action::Command(c) if c == target), "E {key}");
+    }
 }
 
 /// No transient entry may remain a placeholder.
@@ -399,10 +560,10 @@ fn remaining_extras_popup_layout() {
     for (key, target) in [
         ("H", "section-info"),
         ("J", "display-buffer"),
-        ("L", "log-change"),
+        ("L", "log-refresh-menu"),
         ("O", "subtree-menu"),
         ("w", "patches-menu"),
-        ("W", "patches-format"),
+        ("W", "patch-menu"),
         ("Y", "cherries"),
     ] {
         assert!(matches!(action_of(&d, key), Action::Command(c) if c == target), "{key}");
@@ -413,13 +574,42 @@ fn remaining_extras_popup_layout() {
     assert!(matches!(action_of(&l, "r"), Action::Command(c) if c == "reflog-current"));
     let s = menu("subtree-menu");
     assert!(matches!(action_of(&s, "a"), Action::Command(c) if c == "subtree-add"));
+
+    // magit-am ("w")
     let p = menu("patches-menu");
+    assert!(matches!(action_of(&p, "-3"), Action::Switch(s) if s == "--3way"));
     assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-apply"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-apply-worktree"));
+    let p = menu("patches-menu@progress");
+    assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-continue"));
+    assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "patches-skip"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-abort"));
+
+    // magit-patch ("W")
+    let p = menu("patch-menu");
+    assert!(matches!(action_of(&p, "c"), Action::Command(c) if c == "patches-format"));
+    assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-menu"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-apply-worktree"));
+    assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "patch-save"));
+    assert!(matches!(action_of(&p, "r"), Action::Command(c) if c == "request-pull"));
+
+    // magit-branch-configure: "r" cycles branch.<b>.rebase, "R" pull.rebase,
+    // "P" remote.pushDefault
     let c = menu("branch-config-menu");
-    assert!(matches!(action_of(&c, "u"), Action::Command(c) if c == "branch-config-upstream"));
+    for (key, target) in [
+        ("d", "branch-config-description"),
+        ("u", "branch-config-upstream"),
+        ("r", "branch-config-rebase"),
+        ("p", "branch-config-pushremote"),
+        ("R", "pull-rebase"),
+        ("P", "remote-pushdefault"),
+    ] {
+        assert!(matches!(action_of(&c, key), Action::Command(x) if x == target), "b C {key}");
+    }
 }
 
-/// magit-status-mode-map: `k` is magit-discard, not vi-style "up".
+/// magit-status-mode-map: `k` is magit-discard, `j` is magit-status-jump;
+/// there is no vi-style movement (move with n / p).
 #[test]
 fn status_buffer_direct_keys() {
     use ngit_lib::ui::app::{status_binding, Binding};
@@ -429,17 +619,114 @@ fn status_buffer_direct_keys() {
     assert_eq!(b("K"), Some(Binding::Command("untrack")));
     assert_eq!(b("s"), Some(Binding::Command("stage")));
     assert_eq!(b("u"), Some(Binding::Command("unstage")));
+    assert_eq!(b("n"), Some(Binding::Down));
+    assert_eq!(b("p"), Some(Binding::Up));
     assert_eq!(b("<up>"), Some(Binding::Up));
+    assert_eq!(b("<down>"), Some(Binding::Down));
     assert_eq!(b("C-p"), Some(Binding::Up));
     assert_eq!(b("C-n"), Some(Binding::Down));
-    assert_eq!(b("j"), Some(Binding::Down));
+    assert_eq!(b("j"), Some(Binding::Command("jump")));
+    assert_eq!(b("^"), Some(Binding::Command("section-up")));
     assert_eq!(b("<tab>"), Some(Binding::Toggle));
     assert_eq!(b("RET"), Some(Binding::Visit));
     assert_eq!(b("q"), Some(Binding::Bury));
+    assert_eq!(b("g"), Some(Binding::Refresh));
     assert_eq!(b("c"), Some(Binding::Menu("commit-menu")));
     assert_eq!(b("C-k"), None);
+
+    // keys whose meaning used to differ from magit-mode-map
+    assert_eq!(b("$"), Some(Binding::Command("process-buffer")));
+    assert_eq!(b("a"), Some(Binding::Command("apply")));
+    assert_eq!(b("v"), Some(Binding::Command("reverse")));
+    assert_eq!(b("e"), Some(Binding::Command("ediff-dwim")));
+    assert_eq!(b("D"), Some(Binding::Menu("diff-refresh-menu")));
+    assert_eq!(b("L"), Some(Binding::Menu("log-refresh-menu")));
+    assert_eq!(b("V"), Some(Binding::Menu("revert-menu")));
+    assert_eq!(b("%"), Some(Binding::Menu("worktree-menu")));
+    assert_eq!(b("Z"), Some(Binding::Menu("worktree-menu")));
+    assert_eq!(b("w"), Some(Binding::Menu("patches-menu")));
+    assert_eq!(b("W"), Some(Binding::Menu("patch-menu")));
+    assert_eq!(b("o"), Some(Binding::Menu("submodule-menu")));
+
     // no direct key may be shadowed: every target must be a menu or a command
     for l in ["s", "S", "u", "U", "k", "K", "x", "V", "y", "c", "b", "f", "F", "P", "z", "i", "l", "d", "A"] {
         assert!(b(l).is_some(), "{l} unbound");
     }
+    // every direct menu key opens a registered menu
+    let reg = registry();
+    for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!$%^:?".chars() {
+        if let Some(Binding::Menu(m)) = b(&c.to_string()) {
+            assert!(reg.contains_key(m), "{c} -> missing menu {m}");
+        }
+    }
+}
+
+/// Pressing keys in the App opens the layout Magit would show.
+#[test]
+fn app_opens_in_progress_menu_variants() {
+    use ngit_lib::prelude::*;
+    use ngit_lib::ui::app::App;
+    let td = TempDir::new().unwrap();
+    let run = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(td.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+    };
+    run(&["init", "-q"]);
+    run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+    let g = Git::discover(td.path()).unwrap();
+    let mut app = App::new(g.clone());
+
+    for (key, want) in [
+        ("m", "merge-menu"),
+        ("r", "rebase-menu"),
+        ("A", "cherry-pick-menu"),
+        ("V", "revert-menu"),
+        ("B", "bisect-menu"),
+        ("w", "patches-menu"),
+        ("D", "diff-refresh-menu"),
+        ("L", "log-refresh-menu"),
+        ("W", "patch-menu"),
+    ] {
+        app.press(key).unwrap();
+        assert_eq!(app.current_menu(), Some(want), "{key}");
+        app.press("C-g").unwrap();
+        assert_eq!(app.current_menu(), None);
+    }
+    // W w opens the am transient
+    app.press("W").unwrap();
+    app.press("w").unwrap();
+    assert_eq!(app.current_menu(), Some("patches-menu"));
+    app.press("q").unwrap();
+
+    // simulate in-progress states via the files Magit's predicates check
+    std::fs::write(g.gitdir.join("MERGE_HEAD"), g.rev_parse("HEAD").unwrap()).unwrap();
+    app.press("m").unwrap();
+    assert_eq!(app.current_menu(), Some("merge-menu@progress"));
+    app.press("q").unwrap();
+    std::fs::remove_file(g.gitdir.join("MERGE_HEAD")).unwrap();
+
+    std::fs::write(g.gitdir.join("BISECT_LOG"), "").unwrap();
+    app.press("B").unwrap();
+    assert_eq!(app.current_menu(), Some("bisect-menu@progress"));
+    app.press("q").unwrap();
+    std::fs::remove_file(g.gitdir.join("BISECT_LOG")).unwrap();
+
+    std::fs::create_dir_all(g.gitdir.join("rebase-apply")).unwrap();
+    std::fs::write(g.gitdir.join("rebase-apply/applying"), "").unwrap();
+    // git am in progress is not a rebase (magit-rebase-in-progress-p)
+    app.press("r").unwrap();
+    assert_eq!(app.current_menu(), Some("rebase-menu"));
+    app.press("q").unwrap();
+    app.press("w").unwrap();
+    assert_eq!(app.current_menu(), Some("patches-menu@progress"));
+    app.press("q").unwrap();
+    std::fs::remove_file(g.gitdir.join("rebase-apply/applying")).unwrap();
+    app.press("r").unwrap();
+    assert_eq!(app.current_menu(), Some("rebase-menu@progress"));
+    app.press("q").unwrap();
 }

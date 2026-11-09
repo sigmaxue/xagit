@@ -1,11 +1,48 @@
 //! git/exec.rs — running git commands (mirrors magit-git.el behavior)
 
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 /// Global arguments Magit passes to every git invocation (magit-git-global-arguments).
 const GLOBAL_ARGS: [&str; 4] = ["-c", "core.editor=true", "-c", "color.ui=false"];
+
+/// Recent side-effecting git invocations, shown by `$` (magit-process-buffer).
+/// Like Magit, plain queries (status, rev-parse, ...) are not recorded.
+static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+const PROCESS_LOG_MAX: usize = 200;
+
+fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
+    let mut entry = format!(
+        "{} git {}  [{}]",
+        if ok { " " } else { "!" },
+        args.join(" "),
+        match code {
+            Some(c) => format!("exit {c}"),
+            None => "signal".into(),
+        }
+    );
+    entry.push_str(&format!("\n    in {}", dir.display()));
+    for l in stderr.lines().filter(|l| !l.trim().is_empty()).take(8) {
+        entry.push_str(&format!("\n    {l}"));
+    }
+    if let Ok(mut log) = PROCESS_LOG.lock() {
+        if log.len() >= PROCESS_LOG_MAX {
+            log.pop_front();
+        }
+        log.push_back(entry);
+    }
+}
+
+/// Snapshot of the process log, oldest first.
+pub fn process_log() -> Vec<String> {
+    PROCESS_LOG
+        .lock()
+        .map(|l| l.iter().cloned().collect())
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -230,11 +267,13 @@ impl Git {
             .current_dir(dir)
             .output()
             .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        record(dir, args, out.status.success(), out.status.code(), &stderr);
         if !out.status.success() {
             bail!(
                 "git {} failed: {}",
                 args.first().unwrap_or(&""),
-                String::from_utf8_lossy(&out.stderr).trim()
+                stderr.trim()
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
@@ -259,11 +298,13 @@ impl Git {
             .context("git stdin unavailable")?
             .write_all(input)?;
         let out = child.wait_with_output()?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        record(&self.toplevel, args, out.status.success(), out.status.code(), &stderr);
         if !out.status.success() {
             bail!(
                 "git {} failed: {}",
                 args.first().unwrap_or(&""),
-                String::from_utf8_lossy(&out.stderr).trim()
+                stderr.trim()
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
@@ -277,6 +318,7 @@ impl Git {
             .current_dir(&self.toplevel)
             .status()
             .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        record(&self.toplevel, args, st.success(), st.code(), "");
         if !st.success() {
             bail!(
                 "git {} failed: {}",
@@ -287,10 +329,21 @@ impl Git {
         Ok(())
     }
 
-    /// magit-git-string for arbitrary single-line queries with formatting args.
+    /// Run a side-effecting git command and return its stdout (recorded in the
+    /// process log, unlike `git_string` which is used for queries).
     pub fn git_fmt(&self, args: &[String]) -> Result<String> {
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        self.git_string(&refs)
+        let out = self.git_output(&refs)?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        record(&self.toplevel, &refs, out.status.success(), out.status.code(), &stderr);
+        if !out.status.success() {
+            bail!(
+                "git {} failed: {}",
+                refs.first().unwrap_or(&""),
+                stderr.trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
 
     /// Anything modified/staged/untracked? (magit-anything-modified-p)
@@ -308,9 +361,19 @@ impl Git {
     pub fn merge_in_progress(&self) -> bool {
         self.gitdir.join("MERGE_HEAD").exists()
     }
+    /// magit-rebase-in-progress-p: rebase-merge, or rebase-apply that is not `git am`.
     pub fn rebase_in_progress(&self) -> bool {
         let g = &self.gitdir;
-        g.join("rebase-merge").exists() || g.join("rebase-apply").exists()
+        g.join("rebase-merge").exists()
+            || (g.join("rebase-apply").exists() && !g.join("rebase-apply/applying").exists())
+    }
+    /// magit-am-in-progress-p
+    pub fn am_in_progress(&self) -> bool {
+        self.gitdir.join("rebase-apply/applying").exists()
+    }
+    /// magit-bisect-in-progress-p
+    pub fn bisect_in_progress(&self) -> bool {
+        self.gitdir.join("BISECT_LOG").exists()
     }
     pub fn revert_in_progress(&self) -> bool {
         self.gitdir.join("REVERT_HEAD").exists()
@@ -318,6 +381,14 @@ impl Git {
     pub fn cherry_in_progress(&self) -> bool {
         self.gitdir.join("CHERRY_PICK_HEAD").exists()
     }
+    /// magit-sequencer-in-progress-p: a cherry-pick or revert is stopped
+    /// (including multi-commit sequences recorded in .git/sequencer).
+    pub fn pick_or_revert_in_progress(&self) -> bool {
+        self.cherry_in_progress()
+            || self.revert_in_progress()
+            || self.gitdir.join("sequencer/todo").exists()
+    }
+    /// Any operation in progress (merge / rebase / revert / cherry-pick).
     pub fn sequencer_in_progress(&self) -> bool {
         self.merge_in_progress()
             || self.rebase_in_progress()

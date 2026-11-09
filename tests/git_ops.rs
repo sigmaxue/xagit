@@ -706,7 +706,7 @@ fn rebase_onto_upstream_and_abort() {
     // local commit ahead
     write(&g, "ahead.txt", "a");
     g.stage("ahead.txt").unwrap();
-    g.commit(Some("ahead"), &[]);
+    g.commit(Some("ahead"), &[]).unwrap();
     let target = format!("{cur}@{{u}}");
     g.rebase(&target, &[]).unwrap();
     assert!(exists(&g, "ahead.txt"));
@@ -1358,4 +1358,282 @@ fn git_command_in_working_directory() {
     std::fs::create_dir(&sub).unwrap();
     assert_eq!(g.git_string_in(&sub, &["rev-parse", "--show-prefix"]).unwrap(), "sub/");
     assert_eq!(g.git_string(&["rev-parse", "--show-prefix"]).unwrap(), "");
+}
+
+// =============================================================== regression: keys that meant something else
+
+fn subject(g: &Git) -> String {
+    g.git_string(&["log", "-1", "--pretty=%s"]).unwrap()
+}
+
+fn parent_count(g: &Git) -> usize {
+    g.git_string(&["rev-list", "--parents", "-n1", "HEAD"])
+        .unwrap()
+        .split_whitespace()
+        .count()
+        - 1
+}
+
+fn local_config(g: &Git, key: &str) -> Option<String> {
+    g.git_string(&["config", "--local", key])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// "o r" is magit-submodule-register (`git submodule init`): it must never
+/// remove anything. Removing is "o k".
+#[test]
+fn submodule_register_populate_unpopulate() {
+    let (_td, g, _head) = repo_with_commit();
+    let src = TempDir::new().unwrap();
+    git_init(src.path());
+    std::fs::write(src.path().join("a"), "x").unwrap();
+    let sg = Git::discover(src.path()).unwrap();
+    sg.git_interactive(&["add", "."]).unwrap();
+    sg.commit(Some("initial"), &[]).unwrap();
+    g.submodule_add(src.path().to_str().unwrap(), "sub").unwrap();
+    g.commit(Some("add sub"), &[]).unwrap();
+    let sub = ["sub".to_string()];
+
+    // o d: deinit empties the checkout and forgets the url
+    g.submodule_unpopulate(&[], &sub).unwrap();
+    assert!(!exists(&g, "sub/a"));
+    assert_eq!(local_config(&g, "submodule.sub.url"), None);
+
+    // o r: registers again, nothing is checked out or removed
+    g.submodule_register(&[]).unwrap();
+    assert!(local_config(&g, "submodule.sub.url").is_some());
+    assert_eq!(g.submodule_paths(), vec!["sub".to_string()]);
+    assert!(exists(&g, ".gitmodules"));
+    assert!(!exists(&g, "sub/a"));
+
+    // o p: populate checks it out
+    g.submodule_populate(&[], &sub).unwrap();
+    assert!(exists(&g, "sub/a"));
+    // o u on all modules
+    g.submodule_update_with(&[], &[]).unwrap();
+    assert!(exists(&g, "sub/a"));
+}
+
+/// b C r / b C R cycle true -> false -> unset like magit--set-popup-variable.
+#[test]
+fn cycle_branch_and_pull_rebase_config() {
+    let (_td, g, _head) = repo_with_commit();
+    let key = format!("branch.{}.rebase", g.current_branch().unwrap());
+    for want in [Some("true"), Some("false"), None, Some("true")] {
+        assert_eq!(g.cycle_config(&key, &["true", "false"]).unwrap().as_deref(), want);
+        assert_eq!(local_config(&g, &key).as_deref(), want);
+    }
+    // a value outside the choices is unset on the next press
+    g.set_config("pull.rebase", Some("merges")).unwrap();
+    assert_eq!(g.cycle_config("pull.rebase", &["true", "false"]).unwrap(), None);
+    assert_eq!(local_config(&g, "pull.rebase"), None);
+    // unsetting a missing key is not an error
+    g.set_config("pull.rebase", None).unwrap();
+}
+
+/// P p pushes to the push-remote (branch.<b>.pushRemote, then remote.pushDefault),
+/// P t pushes all tags, P m matching branches, P r explicit refspecs.
+#[test]
+fn push_pushremote_tags_matching_refspecs() {
+    let (td, g, _td2, _g2) = remote_sandbox();
+    let cur = g.current_branch().unwrap();
+    assert_eq!(g.push_remote_of(&cur), None);
+    assert!(g.push_pushremote(&[]).is_err());
+
+    assert!(std::process::Command::new("git")
+        .args(["clone", "-q", "--bare", ".", "pub.git"])
+        .current_dir(&g.toplevel)
+        .status()
+        .unwrap()
+        .success());
+    g.remote_add("pub", td.path().join("pub.git").to_str().unwrap(), false)
+        .unwrap();
+    g.set_config("remote.pushDefault", Some("origin")).unwrap();
+    assert_eq!(g.push_remote_of(&cur).as_deref(), Some("origin"));
+    g.set_config(&format!("branch.{cur}.pushRemote"), Some("pub")).unwrap();
+    assert_eq!(g.push_remote_of(&cur).as_deref(), Some("pub"));
+
+    write(&g, "pr.txt", "p");
+    g.stage("pr.txt").unwrap();
+    g.commit(Some("to pushremote"), &[]).unwrap();
+    let head = g.rev_parse("HEAD").unwrap();
+    assert_eq!(g.push_pushremote(&[]).unwrap(), "pub");
+    let remote_head = |r: &str, b: &str| {
+        g.git_string(&["ls-remote", r, &format!("refs/heads/{b}")])
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .map(str::to_string)
+    };
+    assert_eq!(remote_head("pub", &cur).as_deref(), Some(head.as_str()));
+    assert_ne!(remote_head("origin", &cur).as_deref(), Some(head.as_str()), "upstream untouched");
+
+    g.tag_create("t1", "HEAD", false, None).unwrap();
+    g.tag_create("t2", "HEAD~1", false, None).unwrap();
+    g.push_tags("origin", &[]).unwrap();
+    let tags = g.git_string(&["ls-remote", "--tags", "origin"]).unwrap();
+    assert!(tags.contains("refs/tags/t1") && tags.contains("refs/tags/t2"), "{tags}");
+
+    assert!(g.push_refspecs("origin", &[], &[]).is_err());
+    g.push_refspecs("origin", &[format!("{cur}:refs/heads/side")], &[]).unwrap();
+    assert_eq!(remote_head("origin", "side").as_deref(), Some(head.as_str()));
+
+    // matching: only branches that exist on both sides are pushed
+    g.git_interactive(&["branch", "local-only"]).unwrap();
+    g.push_matching("origin", &[]).unwrap();
+    assert_eq!(remote_head("origin", &cur).as_deref(), Some(head.as_str()));
+    assert_eq!(remote_head("origin", "local-only"), None);
+}
+
+/// m p previews without touching the worktree; m e always creates a merge commit.
+#[test]
+fn merge_preview_and_editmsg() {
+    let (_td, g) = repo_two_branches();
+    let before = g.rev_parse("HEAD").unwrap();
+    let p = g.merge_preview("feature").unwrap();
+    assert!(p.contains("feature.txt"), "{p}");
+    assert!(!exists(&g, "feature.txt"));
+    assert_eq!(g.rev_parse("HEAD").unwrap(), before);
+
+    // fast-forward would be possible, but magit-merge-editmsg uses --no-ff
+    g.merge_with_message("feature", "custom merge message", &["--ff-only".into()])
+        .unwrap();
+    assert_eq!(subject(&g), "custom merge message");
+    assert_eq!(parent_count(&g), 2);
+    assert!(exists(&g, "feature.txt"));
+}
+
+/// m m while merging commits the merge (magit-commit-create in the merge menu).
+#[test]
+fn merge_commit_finishes_merge_in_progress() {
+    let (_td, g) = repo_two_branches();
+    assert!(g.merge_commit().is_err());
+    write(&g, "master.txt", "m");
+    g.stage("master.txt").unwrap();
+    g.commit(Some("master work"), &[]).unwrap();
+    g.merge_nocommit("feature").unwrap();
+    assert!(g.merge_in_progress());
+    g.merge_commit().unwrap();
+    assert!(!g.merge_in_progress());
+    assert_eq!(parent_count(&g), 2);
+}
+
+fn repo_with_conflicting_history() -> (TempDir, Git, String) {
+    let (td, g) = repo_with_history(3); // file.txt: hello -> v2 -> v3
+    let second = g.rev_parse("HEAD~1").unwrap();
+    (td, g, second)
+}
+
+/// A / V while a cherry-pick or revert is stopped: continue, skip, abort.
+#[test]
+fn sequencer_continue_skip_abort() {
+    let (_td, g, second) = repo_with_conflicting_history();
+    let head = g.rev_parse("HEAD").unwrap();
+    assert!(!g.pick_or_revert_in_progress());
+    assert!(g.sequencer("abort").is_err());
+    assert!(g.sequencer("bogus").is_err());
+
+    // revert of v2 conflicts with v3
+    assert!(g.revert(&[second.clone()], &[], false).is_err());
+    assert!(g.revert_in_progress() && g.pick_or_revert_in_progress());
+    g.sequencer("abort").unwrap();
+    assert!(!g.pick_or_revert_in_progress());
+    assert_eq!(g.rev_parse("HEAD").unwrap(), head);
+    assert_eq!(read(&g, "file.txt"), "v3\n");
+
+    // cherry-pick: resolve, then continue
+    assert!(g.cherry_pick(&[second.clone()], &[]).is_err());
+    assert!(g.cherry_in_progress() && g.pick_or_revert_in_progress());
+    write(&g, "file.txt", "resolved\n");
+    g.stage("file.txt").unwrap();
+    g.sequencer("continue").unwrap();
+    assert!(!g.pick_or_revert_in_progress());
+    assert_eq!(subject(&g), "c2");
+    assert_eq!(read(&g, "file.txt"), "resolved\n");
+
+    // skip drops the stopped commit
+    let head = g.rev_parse("HEAD").unwrap();
+    assert!(g.revert(&[second], &[], false).is_err());
+    g.sequencer("skip").unwrap();
+    assert!(!g.pick_or_revert_in_progress());
+    assert_eq!(g.rev_parse("HEAD").unwrap(), head);
+}
+
+/// `git am` uses rebase-apply too, but it is not a rebase (magit-am-in-progress-p).
+#[test]
+fn am_in_progress_is_not_rebase_and_can_be_skipped() {
+    let (_td, g) = repo_with_history(2);
+    let out_dir = TempDir::new().unwrap();
+    let out = g
+        .patch_format("HEAD~1..HEAD", out_dir.path().to_str().unwrap())
+        .unwrap();
+    let patch = out.lines().next().unwrap().trim().to_string();
+
+    let (_td2, g2, _h2) = repo_with_commit();
+    write(&g2, "file.txt", "diverged\n");
+    g2.stage("file.txt").unwrap();
+    g2.commit(Some("diverged"), &[]).unwrap();
+    assert!(g2.am_apply(&[patch], &[]).is_err());
+    assert!(g2.am_in_progress());
+    assert!(!g2.rebase_in_progress());
+    g2.am_skip().unwrap();
+    assert!(!g2.am_in_progress());
+    assert_eq!(subject(&g2), "diverged");
+}
+
+#[test]
+fn bisect_in_progress_tracks_bisect_log() {
+    let (_td, g) = repo_with_history(3);
+    assert!(!g.bisect_in_progress());
+    g.bisect_start(Some("HEAD"), &["HEAD~2".to_string()]).unwrap();
+    assert!(g.bisect_in_progress());
+    g.bisect_reset(None).unwrap();
+    assert!(!g.bisect_in_progress());
+}
+
+/// r f: magit-rebase-autosquash folds fixup! commits without an editor.
+#[test]
+fn rebase_autosquash_folds_fixups() {
+    let (_td, g) = repo_with_history(2);
+    assert_eq!(g.autosquash_base(), None, "no upstream");
+    let c2 = g.rev_parse("HEAD").unwrap();
+    write(&g, "extra.txt", "e");
+    g.stage("extra.txt").unwrap();
+    g.git_interactive(&["commit", "--fixup", &c2]).unwrap();
+    g.rebase_autosquash_with("HEAD~2", &["--interactive".into()]).unwrap();
+    assert!(!g.rebase_in_progress());
+    assert_eq!(g.git_string(&["rev-list", "--count", "HEAD"]).unwrap(), "2");
+    assert_eq!(subject(&g), "c2");
+    assert!(exists(&g, "extra.txt"));
+}
+
+/// `$` shows side-effecting git calls (with failures marked), not queries.
+#[test]
+fn process_log_records_commands_not_queries() {
+    use ngit_lib::git::exec::process_log;
+    let (_td, g, _head) = repo_with_commit();
+    g.tag_create("proclog-marker", "HEAD", false, None).unwrap();
+    let _ = g.git_string(&["rev-parse", "--verify", "proclog-query^{commit}"]);
+    let _ = g.git_interactive(&["checkout", "proclog-missing-branch"]);
+    let log = process_log();
+    assert!(log.iter().any(|e| e.starts_with(' ') && e.contains("proclog-marker")));
+    assert!(!log.iter().any(|e| e.contains("proclog-query")));
+    let failed = log.iter().find(|e| e.contains("proclog-missing-branch")).unwrap();
+    assert!(failed.starts_with('!'), "{failed}");
+}
+
+/// D / L arguments are passed through to diff and log.
+#[test]
+fn diff_and_log_arguments() {
+    let (_td, g, _head) = repo_with_commit();
+    write(&g, "file.txt", "hello  \n");
+    assert!(!g.diff_with(&[], &[]).unwrap().is_empty());
+    assert!(g.diff_with(&["--ignore-all-space".into()], &[]).unwrap().is_empty());
+    let l = g
+        .log_with(None, 10, &["--follow".into(), "--reverse".into()])
+        .unwrap();
+    assert_eq!(l.len(), 1);
+    assert!(l[0].contains("initial"));
 }

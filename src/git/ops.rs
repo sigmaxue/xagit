@@ -1268,3 +1268,286 @@ impl Git {
         self.git_fmt(&["config".into(), format!("branch.{b}.{key}"), value.into()])
     }
 }
+
+// ---------------------------------------------------------------------------
+// Commands whose keys previously meant something else than in Magit.
+
+impl Git {
+    // ---- push (magit-push)
+
+    /// magit-get-push-remote: `branch.<b>.pushRemote`, else `remote.pushDefault`.
+    pub fn push_remote_of(&self, branch: &str) -> Option<String> {
+        [format!("branch.{branch}.pushRemote"), "remote.pushDefault".to_string()]
+            .iter()
+            .find_map(|k| {
+                self.git_string(&["config", k])
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+    }
+
+    /// magit-push-current-to-pushremote ("P p"); returns the remote used.
+    pub fn push_pushremote(&self, args: &[String]) -> Result<String> {
+        let Some(branch) = self.current_branch() else {
+            bail!("no current branch (detached HEAD)");
+        };
+        let Some(remote) = self.push_remote_of(&branch) else {
+            bail!("no push-remote configured for {branch} (set it with b C p)");
+        };
+        self.push_refspec(&remote, &branch, &branch, args)?;
+        Ok(remote)
+    }
+
+    /// magit-push-tags ("P t"): `git push <args> <remote> --tags`
+    pub fn push_tags(&self, remote: &str, args: &[String]) -> Result<()> {
+        self.run_args(vec!["push".into()], args, &[remote.into(), "--tags".into()])
+    }
+
+    /// magit-push-matching ("P m"): `git push <args> <remote> :`
+    pub fn push_matching(&self, remote: &str, args: &[String]) -> Result<()> {
+        self.run_args(vec!["push".into()], args, &[remote.into(), ":".into()])
+    }
+
+    /// magit-push-refspecs ("P r"): `git push <args> <remote> <refspec>...`
+    pub fn push_refspecs(&self, remote: &str, refspecs: &[String], args: &[String]) -> Result<()> {
+        if refspecs.is_empty() {
+            bail!("no refspecs given");
+        }
+        let mut tail = vec![remote.to_string()];
+        tail.extend(refspecs.iter().cloned());
+        self.run_args(vec!["push".into()], args, &tail)
+    }
+
+    // ---- merge (magit-merge)
+
+    /// magit-merge-editmsg ("m e"): `git merge --edit --no-ff [args] <rev>`.
+    /// Without an editor buffer the message is given on the prompt (`-m`).
+    pub fn merge_with_message(&self, rev: &str, message: &str, args: &[String]) -> Result<()> {
+        let mut a: Vec<String> = vec!["merge".into(), "--no-ff".into()];
+        a.extend(args.iter().filter(|x| *x != "--ff-only" && *x != "--no-ff").cloned());
+        a.push("-m".into());
+        a.push(message.into());
+        a.push(rev.into());
+        let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+        self.git_interactive(&strs)
+    }
+
+    /// magit-merge-preview ("m p"): `git merge-tree <base> HEAD <rev>`.
+    pub fn merge_preview(&self, rev: &str) -> Result<String> {
+        let base = self.git_string(&["merge-base", "HEAD", rev])?;
+        self.git_string(&["merge-tree", base.trim(), "HEAD", rev])
+    }
+
+    /// Commit an in-progress merge with the prepared MERGE_MSG ("m m" while merging).
+    pub fn merge_commit(&self) -> Result<()> {
+        if !self.merge_in_progress() {
+            bail!("no merge in progress");
+        }
+        self.git_interactive(&["commit", "--no-edit"])
+    }
+
+    // ---- rebase (magit-rebase)
+
+    /// magit-rebase-onto-pushremote ("r p"): `git rebase <args> <pushremote>/<branch>`
+    pub fn rebase_pushremote(&self, args: &[String]) -> Result<String> {
+        let Some(branch) = self.current_branch() else {
+            bail!("no current branch (detached HEAD)");
+        };
+        let Some(remote) = self.push_remote_of(&branch) else {
+            bail!("no push-remote configured for {branch} (set it with b C p)");
+        };
+        let target = format!("{remote}/{branch}");
+        self.rebase(&target, args)?;
+        Ok(target)
+    }
+
+    /// magit-rebase-autosquash ("r f"): `git rebase -i --autosquash --keep-empty
+    /// [args] <base>`, with the todo list accepted unchanged.
+    pub fn rebase_autosquash_with(&self, base: &str, args: &[String]) -> Result<()> {
+        let mut a: Vec<String> = vec![
+            "-c".into(),
+            "sequence.editor=true".into(),
+            "rebase".into(),
+            "-i".into(),
+            "--autosquash".into(),
+            "--keep-empty".into(),
+        ];
+        a.extend(args.iter().filter(|x| *x != "--interactive").cloned());
+        a.push(base.into());
+        let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+        self.git_interactive(&strs)
+    }
+
+    /// Default base for autosquash: merge-base with the upstream (as in Magit).
+    pub fn autosquash_base(&self) -> Option<String> {
+        let up = self.upstream_shortname()?;
+        self.git_string(&["merge-base", &up, "HEAD"])
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    // ---- cherry-pick / revert sequencer (magit-sequencer-*)
+
+    fn sequencer_command(&self) -> Result<&'static str> {
+        if self.revert_in_progress() {
+            return Ok("revert");
+        }
+        if self.cherry_in_progress() {
+            return Ok("cherry-pick");
+        }
+        let todo = std::fs::read_to_string(self.gitdir.join("sequencer/todo")).unwrap_or_default();
+        match todo.split_whitespace().next() {
+            Some("revert") => Ok("revert"),
+            Some(_) => Ok("cherry-pick"),
+            None => bail!("no cherry-pick or revert in progress"),
+        }
+    }
+
+    /// magit-sequencer-continue / -skip / -abort
+    pub fn sequencer(&self, action: &str) -> Result<()> {
+        if !matches!(action, "continue" | "skip" | "abort") {
+            bail!("invalid sequencer action: {action}");
+        }
+        let cmd = self.sequencer_command()?;
+        self.git_interactive(&[cmd, &format!("--{action}")])
+    }
+
+    // ---- am (magit-am)
+
+    /// magit-am-apply-patches ("w w"): `git am <args> <files>`
+    pub fn am_apply(&self, files: &[String], args: &[String]) -> Result<String> {
+        let mut a: Vec<String> = vec!["am".into()];
+        a.extend(args.iter().cloned());
+        a.extend(files.iter().cloned());
+        self.git_fmt(&a)
+    }
+
+    /// magit-am-skip ("w s" while applying)
+    pub fn am_skip(&self) -> Result<String> {
+        self.git_fmt(&["am".into(), "--skip".into()])
+    }
+
+    // ---- patch (magit-patch)
+
+    /// magit-request-pull ("W r"): `git request-pull <start> <url> [<end>]`
+    pub fn request_pull(&self, start: &str, url: &str, end: Option<&str>) -> Result<String> {
+        let mut a: Vec<String> = vec!["request-pull".into(), start.into(), url.into()];
+        if let Some(e) = end {
+            a.push(e.into());
+        }
+        self.git_fmt(&a)
+    }
+
+    // ---- submodule (magit-submodule)
+
+    /// magit-submodule-register ("o r"): `git submodule init -- <modules>`
+    pub fn submodule_register(&self, modules: &[String]) -> Result<String> {
+        let mut a: Vec<String> = vec!["submodule".into(), "init".into(), "--".into()];
+        a.extend(modules.iter().cloned());
+        self.git_fmt(&a)
+    }
+
+    fn submodule_cmd(&self, sub: &[&str], args: &[String], modules: &[String]) -> Result<String> {
+        let mut a: Vec<String> = vec!["-c".into(), "protocol.file.allow=always".into(), "submodule".into()];
+        a.extend(sub.iter().map(|s| s.to_string()));
+        a.extend(args.iter().cloned());
+        a.push("--".into());
+        a.extend(modules.iter().cloned());
+        self.git_fmt(&a)
+    }
+
+    /// magit-submodule-populate ("o p"): `git submodule update --init <args> -- <modules>`
+    pub fn submodule_populate(&self, args: &[String], modules: &[String]) -> Result<String> {
+        self.submodule_cmd(&["update", "--init"], args, modules)
+    }
+
+    /// magit-submodule-update ("o u"): `git submodule update <args> -- <modules>`
+    pub fn submodule_update_with(&self, args: &[String], modules: &[String]) -> Result<String> {
+        self.submodule_cmd(&["update"], args, modules)
+    }
+
+    /// magit-submodule-unpopulate ("o d"): `git submodule deinit <args> -- <modules>`
+    pub fn submodule_unpopulate(&self, args: &[String], modules: &[String]) -> Result<String> {
+        self.submodule_cmd(&["deinit"], args, modules)
+    }
+
+    /// magit-fetch-modules ("o f"): `git fetch --recurse-submodules <args>`
+    pub fn fetch_modules(&self, args: &[String]) -> Result<String> {
+        let mut a: Vec<String> = vec![
+            "-c".into(),
+            "protocol.file.allow=always".into(),
+            "fetch".into(),
+            "--recurse-submodules".into(),
+        ];
+        a.extend(args.iter().cloned());
+        self.git_fmt(&a)
+    }
+
+    // ---- variables (magit--set-popup-variable)
+
+    /// Cycle a repository variable through `choices`, then back to unset.
+    /// Returns the new value (None = unset).
+    pub fn cycle_config(&self, key: &str, choices: &[&str]) -> Result<Option<String>> {
+        let cur = self
+            .git_string(&["config", "--local", key])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let next = match cur.as_deref() {
+            None => choices.first().copied(),
+            Some(c) => choices
+                .iter()
+                .position(|x| *x == c)
+                .and_then(|i| choices.get(i + 1))
+                .copied(),
+        };
+        self.set_config(key, next)?;
+        Ok(next.map(str::to_string))
+    }
+
+    /// `git config --local <key> <value>`, or `--unset` when value is None.
+    pub fn set_config(&self, key: &str, value: Option<&str>) -> Result<()> {
+        match value {
+            Some(v) => {
+                self.git_fmt(&["config".into(), "--local".into(), key.into(), v.into()])?;
+            }
+            None => {
+                // exit 5 when the key is not set: nothing to do
+                let _ = self.git_fmt(&["config".into(), "--local".into(), "--unset".into(), key.into()]);
+            }
+        }
+        Ok(())
+    }
+
+    // ---- diff / log arguments (magit-diff-refresh / magit-log-refresh)
+
+    /// `git diff --no-color <args> <rest...>`
+    pub fn diff_with(&self, args: &[String], rest: &[&str]) -> Result<String> {
+        let mut a: Vec<&str> = vec!["diff", "--no-color"];
+        a.extend(args.iter().map(|s| s.as_str()));
+        a.extend_from_slice(rest);
+        self.git_string(&a)
+    }
+
+    /// `git show --no-color <args> <rev>`
+    pub fn show_with(&self, rev: &str, args: &[String]) -> Result<String> {
+        let mut a: Vec<&str> = vec!["show", "--no-color"];
+        a.extend(args.iter().map(|s| s.as_str()));
+        a.push(rev);
+        self.git_string(&a)
+    }
+
+    /// `git log --oneline -n <limit> <args> [rev]`. `--follow` needs exactly one
+    /// path, so it is dropped here (file logs use `log_file`).
+    pub fn log_with(&self, rev: Option<&str>, limit: usize, args: &[String]) -> Result<Vec<String>> {
+        let mut a: Vec<String> = vec!["log".into(), "--oneline".into(), "-n".into(), limit.to_string()];
+        a.extend(args.iter().filter(|x| *x != "--follow").cloned());
+        if let Some(r) = rev {
+            a.push(r.into());
+        }
+        let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+        let out = self.git_string(&strs)?;
+        Ok(out.lines().map(|l| l.to_string()).collect())
+    }
+}
