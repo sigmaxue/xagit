@@ -320,7 +320,7 @@ fn diff_menu_arguments_apply_to_the_new_buffer_only() {
     assert_eq!(app.active_switches(), ["--ignore-submodules=none", "--no-ext-diff"]);
     app.press("-").unwrap();
     app.press("s").unwrap();
-    assert_eq!(app.message(), "- s is undefined");
+    assert_eq!(app.message(), "Unbound suffix: `- s' (Use `C-g' to abort, `?' for help) [nil]");
     app.press("q").unwrap();
     // `d -s u`: the diff buffer uses the transient's arguments
     app.press("d").unwrap();

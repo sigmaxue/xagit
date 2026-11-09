@@ -69,8 +69,8 @@ fn history() {
     // C-g after C-x only cancels the key sequence
     press_all(&mut app, &["C-x", "C-g"]);
     assert_eq!(app.current_menu(), Some("commit-menu"));
-    press_all(&mut app, &["C-x", "z"]);
-    assert_eq!(app.message(), "C-x z is undefined");
+    press_all(&mut app, &["C-x", "y"]);
+    assert_eq!(app.message(), "Unbound suffix: `C-x y' (Use `C-g' to abort, `?' for help) [nil]");
 }
 
 #[test]
@@ -124,4 +124,57 @@ fn status_log_defaults_are_per_mode() {
     app.load_values(file);
     app.press("L").unwrap();
     assert_eq!(app.active_switches(), ["--decorate", "--graph", "-n256"]);
+}
+
+const HELP: &str = "(Use `C-g' to abort, `?' for help)";
+
+#[test]
+fn unbound_suffix() {
+    let (_td, g, _) = repo_with_commit();
+    let mut app = App::new(g.clone());
+    app.press("c").unwrap();
+    // a key bound in the buffer but not a suffix (transient--do-warn):
+    // the menu stays
+    app.press("M-1").unwrap();
+    assert_eq!(app.message(), format!("Unbound suffix: `M-1' {HELP} [magit-section-show-level-1-all]"));
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    let suffixes = app.menu_keys();
+    for (k, cmd) in [("p", "magit-section-backward"), ("k", "magit-discard"), ("b", "magit-branch"), ("C-n", "next-line")] {
+        assert!(!suffixes.contains(&k.to_string()), "{suffixes:?}");
+        app.press(k).unwrap();
+        assert_eq!(app.message(), format!("Unbound suffix: `{k}' {HELP} [{cmd}]"));
+    }
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    // a key bound nowhere
+    app.press("C-t").unwrap();
+    assert_eq!(app.message(), "C-t is undefined");
+    // digit-argument stays transient (M-5 isn't a section command)
+    app.press("M-5").unwrap();
+    assert_eq!(app.current_menu(), Some("commit-menu"));
+    assert_eq!(app.message(), "C-u 5-");
+    app.press("C-g").unwrap();
+    // C-q: transient-quit-all
+    app.press("C-q").unwrap();
+    assert_eq!(app.current_menu(), None);
+    // in a file buffer only its own bindings count
+    write(&g, "file.txt", "changed\n");
+    app.refresh();
+    for _ in 0..app.visible_lines().len() {
+        app.press("C-p").unwrap();
+    }
+    for _ in 0..app.visible_lines().len() {
+        if app.point_text() == "modified   file.txt" {
+            break;
+        }
+        app.press("C-n").unwrap();
+    }
+    app.press("RET").unwrap();
+    assert_eq!(app.header_line(), "file.txt");
+    press_all(&mut app, &["C-c", "M-g"]);
+    assert!(app.current_menu().is_some());
+    assert!(!app.menu_keys().contains(&"k".to_string()));
+    app.press("k").unwrap();
+    assert_eq!(app.message(), "k is undefined");
+    app.press("C-p").unwrap();
+    assert_eq!(app.message(), format!("Unbound suffix: `C-p' {HELP} [previous-line]"));
 }

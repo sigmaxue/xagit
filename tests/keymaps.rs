@@ -720,7 +720,7 @@ fn app_reads_multi_key_bindings() {
     assert!(app.active_switches().is_empty(), "second -f toggles off");
     app.press("-").unwrap();
     app.press("z").unwrap();
-    assert_eq!(app.message(), "- z is undefined");
+    assert_eq!(app.message(), "Unbound suffix: `- z' (Use `C-g' to abort, `?' for help) [nil]");
     assert_eq!(app.current_menu(), Some("push-menu"));
     // after an undefined sequence the next key starts afresh
     app.press("-").unwrap();

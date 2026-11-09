@@ -335,6 +335,40 @@ impl PrefixArg {
     }
 }
 
+/// The name of the Emacs command of the binding B.
+fn binding_command(b: &Binding) -> String {
+    let name = match b {
+        Binding::Bury => "magit-mode-bury-buffer",
+        Binding::Refresh => "magit-refresh",
+        Binding::Down => "next-line",
+        Binding::Up => "previous-line",
+        Binding::SectionForward => "magit-section-forward",
+        Binding::SectionBackward => "magit-section-backward",
+        Binding::SiblingForward => "magit-section-forward-sibling",
+        Binding::SiblingBackward => "magit-section-backward-sibling",
+        Binding::Toggle => "magit-section-toggle",
+        Binding::Cycle => "magit-section-cycle",
+        Binding::CycleGlobal => "magit-section-cycle-global",
+        Binding::CycleDiffs => "magit-section-cycle-diffs",
+        Binding::ShowLevel(n) => return format!("magit-section-show-level-{n}"),
+        Binding::ShowLevelAll(n) => return format!("magit-section-show-level-{n}-all"),
+        Binding::SetMark => "set-mark-command",
+        Binding::KeyboardQuit => "keyboard-quit",
+        Binding::Visit => "magit-visit-thing",
+        Binding::Command("stage-all") => "magit-stage-modified",
+        Binding::Command("jump") => "magit-status-jump",
+        Binding::Command("section-info") => "magit-describe-section",
+        Binding::Command("cherries") => "magit-cherry",
+        Binding::Command("display-buffer") => "magit-display-repository-buffer",
+        Binding::Command("untrack") => "magit-file-untrack",
+        Binding::Command("rename-thing") => "magit-file-rename",
+        Binding::Command("discard") => "magit-discard",
+        Binding::Command(c) => return format!("magit-{c}"),
+        Binding::Menu(m) => return format!("magit-{}", m.trim_end_matches("-menu")),
+    };
+    name.to_string()
+}
+
 /// Status buffer key map (magit-status-mode-map + magit-mode-map +
 /// magit-section-mode-map). `k` is magit-discard and `j` is
 /// magit-status-jump (Magit has no vi-style movement); `n` / `p` move
@@ -1843,7 +1877,7 @@ impl App {
                 (false, "n") => self.transient_history(false),
                 // transient-quit-seq
                 (true, "g") => {}
-                _ => self.set_msg(&format!("C-x {} is undefined", key.label())),
+                _ => self.transient_undefined(&format!("C-x {}", key.label()), None),
             }
             return Ok(());
         }
@@ -1859,6 +1893,11 @@ impl App {
             self.stack.pop();
             return Ok(());
         }
+        // transient-quit-all
+        if key.ctrl && key.code == "q" && self.pending.is_empty() {
+            self.stack.clear();
+            return Ok(());
+        }
         let mut typed = std::mem::take(&mut self.pending);
         typed.push(key);
         let entry: MenuEntry = match menu.lookup(&typed) {
@@ -1869,7 +1908,21 @@ impl App {
             }
             Lookup::None => {
                 let keys: Vec<String> = typed.iter().map(Key::label).collect();
-                self.set_msg(&format!("{} is undefined", keys.join(" ")));
+                let keys = keys.join(" ");
+                match typed.as_slice() {
+                    // an incomplete sequence followed by an unbound key:
+                    // `undefined', this-command nil
+                    [_, _, ..] => self.transient_undefined(&keys, None),
+                    // a key bound in the buffer's keymaps (a non-suffix:
+                    // transient--do-warn), else not bound at all
+                    // transient-help (? and C-h) isn't implemented
+                    [k] if k.code == "?" || (k.ctrl && k.code == "h") => self.set_msg(&format!("{keys} is undefined")),
+                    [k] => match self.buffer_binding(k) {
+                        Some(cmd) => self.transient_undefined(&keys, Some(&cmd)),
+                        None => self.set_msg(&format!("{keys} is undefined")),
+                    },
+                    [] => {}
+                }
                 return Ok(());
             }
         };
@@ -1958,6 +2011,24 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// transient-undefined: KEYS bound to CMD (nil: none) aren't a
+    /// suffix of the transient shown.
+    fn transient_undefined(&mut self, keys: &str, cmd: Option<&str>) {
+        let cmd = cmd.unwrap_or("nil");
+        self.set_msg(&format!("Unbound suffix: `{keys}' (Use `C-g' to abort, `?' for help) [{cmd}]"));
+    }
+
+    /// The command KEY is bound to in the keymaps of the buffer shown
+    /// (the name of the Magit command), if any.
+    fn buffer_binding(&self, key: &Key) -> Option<String> {
+        let file = matches!(self.mode, BufferMode::File { .. }) && self.view_text.is_none();
+        let b = status_binding(key)?;
+        if file && !matches!(b, Binding::Down | Binding::Up | Binding::SetMark | Binding::KeyboardQuit) {
+            return None;
+        }
+        Some(binding_command(&b))
     }
 
     // ------------------------------------------------------------ commands

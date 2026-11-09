@@ -580,7 +580,7 @@ fn status_log_arguments() {
     for k in ["-", "r"] {
         app.press(k).unwrap();
     }
-    assert_eq!(app.message(), "- r is undefined");
+    assert_eq!(app.message(), "Unbound suffix: `- r' (Use `C-g' to abort, `?' for help) [nil]");
     for k in ["-", "g", "g"] {
         app.press(k).unwrap();
     }
