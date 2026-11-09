@@ -15,16 +15,16 @@ impl Git {
         self.git_interactive(&["add", "--", file])
     }
 
-    /// magit-stage-modified ("S"): stage all modified and deleted tracked files,
-    /// plus untracked files (magit stages untracked via `git add` too).
-    /// Implementation mirrors magit-stage-modified: `git add -u` then `git add` untracked.
+    /// magit-stage-modified ("S"): `git add -u .` — stage all new content of
+    /// tracked files and remove deleted ones; untracked files are left alone
+    /// (they are only included with a prefix argument, `git add --all .`).
     pub fn stage_all(&self) -> Result<()> {
-        self.git_interactive(&["add", "-u"])?;
-        let untracked = self.untracked_files();
-        for f in untracked {
-            self.git_interactive(&["add", "--", &f])?;
-        }
-        Ok(())
+        self.git_interactive(&["add", "-u", "."])
+    }
+
+    /// magit-stage-modified with a prefix argument: `git add --all .`
+    pub fn stage_all_with_untracked(&self) -> Result<()> {
+        self.git_interactive(&["add", "--all", "."])
     }
 
     /// magit-unstage-1: before first commit `git rm --cached -- <file>`,

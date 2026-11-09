@@ -191,10 +191,15 @@ fn stage_file() {
 
 #[test]
 fn stage_all_stages_modified_and_untracked() {
+    // magit-stage-modified: `git add -u .` leaves untracked files alone,
+    // `git add --all .` (prefix argument) includes them
     let (_td, g, _head) = repo_with_commit();
     write(&g, "file.txt", "modified");
     write(&g, "extra.txt", "extra");
     g.stage_all().unwrap();
+    assert_eq!(g.staged_files(), vec!["file.txt"]);
+    assert_eq!(g.untracked_files(), vec!["extra.txt"]);
+    g.stage_all_with_untracked().unwrap();
     let mut staged = g.staged_files();
     staged.sort();
     assert_eq!(staged, vec!["extra.txt", "file.txt"]);
@@ -236,7 +241,7 @@ fn unstage_all() {
     let (_td, g, _head) = repo_with_commit();
     write(&g, "file.txt", "m");
     write(&g, "b.txt", "b");
-    g.stage_all().unwrap();
+    g.stage_all_with_untracked().unwrap();
     assert_eq!(g.staged_files().len(), 2);
     g.unstage_all().unwrap();
     assert!(g.staged_files().is_empty());

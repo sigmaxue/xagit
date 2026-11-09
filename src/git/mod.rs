@@ -1,3 +1,5 @@
+pub mod apply;
+pub mod diff;
 pub mod exec;
 pub mod libgit2;
 pub mod ops;

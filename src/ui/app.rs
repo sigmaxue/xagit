@@ -1,8 +1,11 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
 use super::keys::Key;
-use super::transient::{registry, resolve_menu, Action, Lookup, Menu, MenuEntry, RepoState};
-use super::view::{render_status, BufferLine, LineKind};
+use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, RepoState};
+use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
+use super::view::{build_status, BufferLine, LineKind, Section, StatusBuffer, Visibility};
+use crate::git::apply::diff_context;
+use crate::git::diff::{FileDiff, Scope};
 use crate::git::exec::Editor;
 use crate::git::ops::Untracked;
 use crate::git::status::Status;
@@ -24,21 +27,72 @@ pub struct App {
     stack: Vec<(String, BTreeMap<String, bool>)>,
     /// keys typed so far of a multi-key transient binding ("-" of "-a")
     pending: Vec<Key>,
+    /// every section of the status buffer, expanded, plus the diffs
+    buf: StatusBuffer,
+    /// section visibility (ident -> hidden), kept across refreshes
+    vis: Visibility,
+    /// the visible lines of the status buffer
     lines: Vec<BufferLine>,
     cursor: usize,
+    /// first visible line of the status buffer window
+    scroll: usize,
+    /// the mark (index into `buf.all`) while the region is active (C-SPC)
+    mark: Option<usize>,
+    /// the major mode of the buffer shown (status, diff, revision, stash)
+    mode: BufferMode,
+    /// magit-buffer-diff-args of the diff / revision / stash buffer shown
+    buf_args: Vec<String>,
+    /// diff arguments of the status buffer
+    status_args: Vec<String>,
+    /// buffers below the one shown (the status buffer under a diff buffer)
+    buried: Vec<SavedBuffer>,
+    /// the arguments of the `d` transient while one of its suffixes runs
+    /// (magit-diff-arguments when transient-current-command is magit-diff)
+    transient_diff_args: Option<Vec<String>>,
     message: String,
     quit: bool,
     /// pending text-mode buffer shown instead of status (diff/log/show output)
     view_text: Option<(String, String)>, // (title, content)
+    view_scroll: usize,
     /// directory ngit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
-    /// arguments for diff views, changed with `D` (magit-diff-refresh)
+    /// arguments of new diff / revision / stash buffers (the current value
+    /// of magit-diff, initially magit-diff-mode's "--stat --no-ext-diff")
     pub diff_args: Vec<String>,
     /// arguments for log views, changed with `L` (magit-log-refresh);
     /// Magit's default is "--graph --decorate"
     pub log_args: Vec<String>,
     /// command that produced the current text view, re-run by `D g` / `L g`
     last_view: Option<String>,
+    /// answers used instead of reading from the terminal (tests)
+    scripted: std::cell::RefCell<std::collections::VecDeque<String>>,
+}
+
+/// The major mode of a buffer: magit-status-mode, magit-diff-mode,
+/// magit-revision-mode or magit-stash-mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BufferMode {
+    Status,
+    Diff(DiffSpec),
+    Revision { rev: String, files: Vec<String> },
+    Stash { stash: String },
+}
+
+impl BufferMode {
+    /// Magit has one buffer per mode and repository.
+    fn same_kind(&self, other: &BufferMode) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+/// A buffer that is not shown.
+struct SavedBuffer {
+    mode: BufferMode,
+    args: Vec<String>,
+    buf: StatusBuffer,
+    vis: Visibility,
+    cursor: usize,
+    scroll: usize,
 }
 
 /// What a key does in the status buffer when no transient is open.
@@ -47,9 +101,30 @@ pub enum Binding {
     /// q / ESC: leave the text view, or quit (magit-mode-bury-buffer)
     Bury,
     Refresh,
+    /// next-line / previous-line (C-n, C-p, arrows)
     Down,
     Up,
+    /// magit-section-forward / magit-section-backward (n, p)
+    SectionForward,
+    SectionBackward,
+    /// magit-section-forward-sibling / -backward-sibling (M-n, M-p)
+    SiblingForward,
+    SiblingBackward,
+    /// magit-section-toggle (TAB)
     Toggle,
+    /// magit-section-cycle (C-TAB)
+    Cycle,
+    /// magit-section-cycle-global (S-TAB)
+    CycleGlobal,
+    /// magit-section-cycle-diffs (M-TAB)
+    CycleDiffs,
+    /// magit-section-show-level-N (1..4) and -N-all (M-1..M-4)
+    ShowLevel(u8),
+    ShowLevelAll(u8),
+    /// set-mark-command (C-SPC, C-@)
+    SetMark,
+    /// keyboard-quit (C-g): deactivate the region
+    KeyboardQuit,
     Visit,
     Menu(&'static str),
     Command(&'static str),
@@ -64,15 +139,20 @@ pub const AUTOSETUP_REBASE_CHOICES: &[&str] = &["always", "local", "remote", "ne
 /// magit-published-branches (default)
 const PUBLISHED_BRANCHES: &[&str] = &["origin/master"];
 
-/// Status buffer key map (magit-status-mode-map + magit-mode-map).
-/// `k` is magit-discard and `j` is magit-status-jump (Magit has no vi-style
-/// movement); move with n / p, arrows, or C-n / C-p.
+/// Status buffer key map (magit-status-mode-map + magit-mode-map +
+/// magit-section-mode-map). `k` is magit-discard and `j` is
+/// magit-status-jump (Magit has no vi-style movement); `n` / `p` move
+/// between sections, C-n / C-p and the arrows between lines.
 pub fn status_binding(key: &Key) -> Option<Binding> {
     use Binding::*;
     if key.ctrl {
         return match key.code.as_str() {
             "n" => Some(Down),
             "p" => Some(Up),
+            " " => Some(SetMark),
+            "g" => Some(KeyboardQuit),
+            "tab" => Some(Cycle),
+            "j" | "enter" => Some(Command("diff-visit-worktree-file")),
             _ => None,
         };
     }
@@ -80,11 +160,30 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
         "q" | "esc" => Bury,
         "h" | "?" => Menu("dispatch"),
         "g" | "G" => Refresh,
-        "n" | "down" => Down,
-        "p" | "up" => Up,
+        "n" => SectionForward,
+        "p" => SectionBackward,
+        "down" => Down,
+        "up" => Up,
+        "M-n" => SiblingForward,
+        "M-p" => SiblingBackward,
         "j" => Command("jump"),
         "^" => Command("section-up"),
         "tab" => Toggle,
+        "M-tab" => CycleDiffs,
+        " " => Command("diff-show-or-scroll-up"),
+        "backspace" => Command("diff-show-or-scroll-down"),
+        "+" => Command("diff-more-context"),
+        "-" => Command("diff-less-context"),
+        "0" => Command("diff-default-context"),
+        "backtab" => CycleGlobal,
+        "1" => ShowLevel(1),
+        "2" => ShowLevel(2),
+        "3" => ShowLevel(3),
+        "4" => ShowLevel(4),
+        "M-1" => ShowLevelAll(1),
+        "M-2" => ShowLevelAll(2),
+        "M-3" => ShowLevelAll(3),
+        "M-4" => ShowLevelAll(4),
         "enter" => Visit,
         "!" => Menu("run-menu"),
         "$" => Command("process-buffer"),
@@ -144,130 +243,309 @@ impl App {
             menus: registry(),
             stack: Vec::new(),
             pending: Vec::new(),
+            buf: StatusBuffer::default(),
+            vis: Visibility::new(),
             lines: Vec::new(),
             cursor: 0,
+            scroll: 0,
+            mark: None,
+            mode: BufferMode::Status,
+            buf_args: Vec::new(),
+            status_args: vec!["--no-ext-diff".into(), "--ignore-submodules=none".into()],
+            buried: Vec::new(),
+            transient_diff_args: None,
             message: String::new(),
             quit: false,
             view_text: None,
+            view_scroll: 0,
             cwd,
-            diff_args: Vec::new(),
+            diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "--decorate".into()],
             last_view: None,
+            scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
         };
         app.refresh();
+        // magit-status-initial-section '(1): the first section after the headers
+        if let Some(i) = app.lines.iter().position(|l| l.heading && l.depth == 0 && l.kind != LineKind::Head) {
+            app.cursor = i;
+        }
         app
     }
 
+    /// Diff arguments of the status buffer's diffs.
+    fn status_diff_args(&self) -> Vec<String> {
+        self.status_args
+            .iter()
+            .filter(|a| !matches!(a.as_str(), "--stat" | "--no-index" | "--color-moved"))
+            .cloned()
+            .collect()
+    }
+
+    /// magit-buffer-diff-args of the buffer shown.
+    fn buffer_args(&self) -> Vec<String> {
+        match self.mode {
+            BufferMode::Status => self.status_diff_args(),
+            _ => self.buf_args.clone(),
+        }
+    }
+
+    /// magit-diff-type of the diff group GROUP in the buffer shown.
+    fn diff_type<'a>(&'a self, group: &'a str) -> &'a str {
+        match &self.mode {
+            BufferMode::Status => group,
+            BufferMode::Diff(spec) => spec.typ.as_str(),
+            _ => "committed",
+        }
+    }
+
+    /// The major mode of the buffer shown.
+    pub fn mode(&self) -> &BufferMode {
+        &self.mode
+    }
+
+    /// The header line of the buffer shown (empty for the status buffer).
+    pub fn header_line(&self) -> &str {
+        &self.buf.title
+    }
+
+    /// magit-refresh: rebuild the buffer, keeping point in the same section
+    /// at the same offset (or at the same line when that section is gone).
     pub fn refresh(&mut self) {
-        let st = Status::load(&self.git);
-        self.lines = render_status(&self.git, &st);
-        if self.cursor >= self.lines.len() {
-            self.cursor = self.lines.len().saturating_sub(1);
+        let anchor = self.anchor();
+        self.buf = self.build_buffer();
+        self.mark = None;
+        self.lines = self.buf.visible(&self.vis);
+        let (id, fallback) = anchor;
+        let target = id.and_then(|(ident, off)| {
+            let sec = self.buf.sections.iter().skip(1).find(|s| s.ident == ident)?;
+            Some(if sec.start + off < sec.end { sec.start + off } else { sec.start })
+        });
+        self.cursor = match target {
+            Some(p) => self.visible_index_near(p),
+            None => fallback.min(self.lines.len().saturating_sub(1)),
+        };
+    }
+
+    /// The refresh function of the buffer's mode.
+    fn build_buffer(&self) -> StatusBuffer {
+        match &self.mode {
+            BufferMode::Status => {
+                let st = Status::load(&self.git);
+                build_status(&self.git, &st, &self.status_diff_args())
+            }
+            BufferMode::Diff(spec) => build_diff(&self.git, spec, &self.buf_args),
+            BufferMode::Revision { rev, files } => build_revision(&self.git, rev, &self.buf_args, files),
+            BufferMode::Stash { stash } => build_stash(&self.git, stash, &self.buf_args),
         }
-        if !self.stack.is_empty() {
-            // transient stays on top after refresh (Magit refreshes but keeps popup)
+    }
+
+    /// magit-setup-buffer: show a buffer in MODE with ARGS, reusing the
+    /// buffer of that mode (or burying the buffer shown).
+    fn setup_buffer(&mut self, mode: BufferMode, args: Vec<String>) {
+        self.view_text = None;
+        let same = self.mode == mode;
+        if !self.mode.same_kind(&mode) {
+            let saved = SavedBuffer {
+                mode: std::mem::replace(&mut self.mode, BufferMode::Status),
+                args: std::mem::take(&mut self.buf_args),
+                buf: std::mem::take(&mut self.buf),
+                vis: std::mem::take(&mut self.vis),
+                cursor: self.cursor,
+                scroll: self.scroll,
+            };
+            self.buried.retain(|b| !b.mode.same_kind(&mode));
+            self.buried.push(saved);
+        } else if !same {
+            self.vis.clear();
         }
+        if !same {
+            self.buf = StatusBuffer::default();
+            self.lines.clear();
+            self.cursor = 0;
+            self.scroll = 0;
+        }
+        self.mode = mode;
+        self.buf_args = args;
+        self.refresh();
+    }
+
+    /// magit-mode-bury-buffer (q): leave the text view, else show the
+    /// buffer below (refreshed), else quit.
+    fn bury_buffer(&mut self) {
+        if self.view_text.take().is_some() {
+            self.set_msg("");
+            return;
+        }
+        let Some(b) = self.buried.pop() else {
+            self.quit = true;
+            return;
+        };
+        self.mode = b.mode;
+        self.buf_args = b.args;
+        self.buf = b.buf;
+        self.vis = b.vis;
+        self.lines = self.buf.visible(&self.vis);
+        self.cursor = b.cursor.min(self.lines.len().saturating_sub(1));
+        self.scroll = b.scroll;
+        self.refresh();
+    }
+
+    /// (ident of the section at point, offset from its heading), plus the
+    /// visible index as fallback.
+    fn anchor(&self) -> (Option<(String, usize)>, usize) {
+        if self.lines.is_empty() || self.buf.sections.is_empty() {
+            return (None, self.cursor);
+        }
+        let p = self.point();
+        let sec = &self.buf.sections[self.buf.section_at(p)];
+        (Some((sec.ident.clone(), p.saturating_sub(sec.start))), self.cursor)
+    }
+
+    /// Position (index into `buf.all`) of point.
+    fn point(&self) -> usize {
+        self.lines.get(self.cursor).map_or(0, |l| l.pos)
+    }
+
+    /// Visible index of buffer position P; when P is inside a hidden body,
+    /// the heading of the outermost hidden section around it.
+    fn visible_index_near(&self, p: usize) -> usize {
+        if let Ok(i) = self.lines.binary_search_by_key(&p, |l| l.pos) {
+            return i;
+        }
+        let mut s = self.buf.section_at(p);
+        if self.buf.sections.get(s).is_some_and(|x| x.start == p) {
+            s = self.buf.sections[s].parent.unwrap_or(0);
+        }
+        let mut target = None;
+        while s != 0 {
+            if self.hidden(s) {
+                target = Some(self.buf.sections[s].start);
+            }
+            s = self.buf.sections[s].parent.unwrap_or(0);
+        }
+        if let Some(Ok(i)) = target.map(|t| self.lines.binary_search_by_key(&t, |l| l.pos)) {
+            return i;
+        }
+        self.lines.iter().position(|l| l.pos > p).unwrap_or(self.lines.len().saturating_sub(1))
+    }
+
+    /// Re-show the buffer after a visibility change with point at P.
+    fn relayout_at(&mut self, p: usize) {
+        self.lines = self.buf.visible(&self.vis);
+        self.cursor = self.visible_index_near(p);
+    }
+
+    /// Visible indices covered by the active region (mark to point).
+    fn region_bounds(&self) -> Option<(usize, usize)> {
+        let m = self.visible_index_near(self.mark?);
+        Some((m.min(self.cursor), m.max(self.cursor)))
     }
 
     // ------------------------------------------------------------ rendering
 
-    fn draw(&self) {
-        let mut out = stdout();
-        let _ = execute!(out, Clear(ClearType::All));
-        let mut y = 0;
-        let mut shown = self.lines.iter().enumerate();
+    fn draw(&mut self) {
+        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (w, h) = (w as usize, h as usize);
+        let mut rows: Vec<String> = Vec::new();
 
-        // status buffer
-        for (i, line) in &mut shown {
-            let marker = if i == self.cursor { "> " } else { "  " };
-            let _ = execute!(
-                out,
-                crossterm::cursor::MoveTo(0, y as u16),
-                crossterm::style::Print(format!("{marker}{}\r\n", line.text))
-            );
-            y += 1;
-        }
-
-        // transient popup
+        // transient popup (shown in a window at the bottom, like transient)
+        let mut popup: Vec<String> = Vec::new();
         if let Some((name, active)) = self.stack.last() {
             if let Some(menu) = self.menus.get(name) {
-                let _ = execute!(
-                    out,
-                    crossterm::cursor::MoveTo(0, y as u16),
-                    crossterm::style::Print(format!("\r\n{}\r\n", menu.title))
-                );
-                y += 2;
-                for l in menu.render(active).lines() {
-                    let _ = execute!(
-                        out,
-                        crossterm::cursor::MoveTo(0, y as u16),
-                        crossterm::style::Print(format!("  {l}\r\n"))
-                    );
-                    y += 1;
-                }
-                let _ = execute!(
-                    out,
-                    crossterm::cursor::MoveTo(0, y as u16),
-                    crossterm::style::Print(format!("  q/C-g quit popup\r\n"))
-                );
-                y += 1;
+                popup.push(String::new());
+                popup.push(menu.title.clone());
+                popup.extend(menu.render(active).lines().map(|l| format!("  {l}")));
+                popup.push("  q/C-g quit popup".into());
             }
         }
+        let body = h.saturating_sub(2 + popup.len()).max(1);
 
-        // text view (diff/log/show)
         if let Some((title, content)) = &self.view_text {
-            let _ = execute!(
-                out,
-                crossterm::cursor::MoveTo(0, y as u16),
-                crossterm::style::Print(format!("\r\n--- {title} ---\r\n"))
-            );
-            y += 2;
-            for l in content.lines().take(200) {
-                let _ = execute!(
-                    out,
-                    crossterm::cursor::MoveTo(0, y as u16),
-                    crossterm::style::Print(format!("  {l}\r\n"))
-                );
-                y += 1;
+            rows.push(format!("--- {title} ---"));
+            let total = content.lines().count();
+            self.view_scroll = self.view_scroll.min(total.saturating_sub(1));
+            rows.extend(content.lines().skip(self.view_scroll).take(body.saturating_sub(1)).map(str::to_string));
+        } else {
+            let mut body = body;
+            if self.mode != BufferMode::Status {
+                rows.push(self.buf.title.clone());
+                body = body.saturating_sub(1).max(1);
+            }
+            if self.cursor < self.scroll {
+                self.scroll = self.cursor;
+            } else if self.cursor >= self.scroll + body {
+                self.scroll = self.cursor + 1 - body;
+            }
+            let region = self.region_bounds();
+            for (i, line) in self.lines.iter().enumerate().skip(self.scroll).take(body) {
+                let cur = if i == self.cursor {
+                    '>'
+                } else if region.is_some_and(|(a, b)| i >= a && i <= b) {
+                    '|'
+                } else {
+                    ' '
+                };
+                let fringe = match line.hidden {
+                    Some(true) => '▸',
+                    Some(false) => '▾',
+                    None => ' ',
+                };
+                rows.push(format!("{cur}{fringe}{}", line.text));
             }
         }
-
-        // footer
+        while rows.len() < body {
+            rows.push(String::new());
+        }
+        rows.extend(popup);
         let branch = self.git.head_desc();
-        let _ = execute!(
-            out,
-            crossterm::cursor::MoveTo(0, y as u16),
-            crossterm::style::Print(format!(
-                "\r\n[ngit:{branch}] {}\r\n(h/? dispatch, g refresh, q quit, TAB toggle, RET visit, n/p move)",
-                self.message
-            ))
-        );
+        rows.push(format!("[ngit:{branch}] {}", self.message));
+        rows.push("(h/? dispatch, g refresh, q quit, TAB toggle, RET visit, n/p section, C-n/C-p line)".into());
+
+        let mut out = stdout();
+        let _ = execute!(out, Clear(ClearType::All));
+        for (y, r) in rows.iter().take(h).enumerate() {
+            let r: String = r.chars().take(w).collect();
+            let _ = execute!(out, crossterm::cursor::MoveTo(0, y as u16), crossterm::style::Print(r));
+        }
         let _ = out.flush();
     }
 
     // ------------------------------------------------------------ input helpers
 
+    /// Answers consumed by prompts instead of reading the terminal (tests).
+    pub fn script_answers(&mut self, answers: &[&str]) {
+        self.scripted.borrow_mut().extend(answers.iter().map(|s| s.to_string()));
+    }
+
     fn read_line_prompt(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
-        // Leave raw mode temporarily to read a normal line.
-        let _ = disable_raw_mode();
-        let mut out = stdout();
-        let _ = execute!(
-            out,
-            crossterm::cursor::MoveTo(0, 500),
-            crossterm::style::Print(format!("\r\n{prompt}")),
-            crossterm::style::Print(
-                default
-                    .map(|d| format!(" (default: {d}): "))
-                    .unwrap_or_else(|| ": ".into())
-            )
-        );
-        let _ = out.flush();
-        let mut buf = String::new();
-        let n = std::io::stdin().read_line(&mut buf)?;
-        let _ = enable_raw_mode();
-        if n == 0 {
-            return Ok(None); // EOF / C-d
-        }
+        let scripted = self.scripted.borrow_mut().pop_front();
+        let buf = if let Some(ans) = scripted {
+            ans
+        } else {
+            // Leave raw mode temporarily to read a normal line.
+            let _ = disable_raw_mode();
+            let mut out = stdout();
+            let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
+            let _ = execute!(
+                out,
+                crossterm::cursor::MoveTo(0, h.saturating_sub(1)),
+                Clear(ClearType::CurrentLine),
+                crossterm::style::Print(prompt),
+                crossterm::style::Print(
+                    default
+                        .map(|d| format!(" (default: {d}): "))
+                        .unwrap_or_else(|| ": ".into())
+                )
+            );
+            let _ = out.flush();
+            let mut buf = String::new();
+            let n = std::io::stdin().read_line(&mut buf)?;
+            let _ = enable_raw_mode();
+            if n == 0 {
+                return Ok(None); // EOF / C-d
+            }
+            buf
+        };
         let mut s = buf.trim().to_string();
         if s.is_empty() {
             if let Some(d) = default {
@@ -341,23 +619,40 @@ impl App {
         Ok(self.pick(prompt, &revs, None)?.cloned())
     }
 
-    fn current_file(&self) -> Option<(String, String)> {
-        match self.current_line() {
-            Some(BufferLine { kind: LineKind::File { section, path }, .. }) => {
-                Some((section.clone(), path.clone()))
+    /// Read a commit, defaulting to the commit at point
+    /// (magit-read-other-branch-or-commit).
+    fn read_commit(&mut self, prompt: &str) -> Result<Option<String>> {
+        match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Commit { hash, .. }) => {
+                let short = self.git.rev_short(&hash);
+                self.read_line_prompt(prompt, Some(&short))
             }
+            _ => self.pick_recent_commit(prompt),
+        }
+    }
+
+    /// (section, path) of the file the line at point belongs to.
+    fn current_file(&self) -> Option<(String, String)> {
+        match &self.current_line()?.kind {
+            LineKind::File { section, path }
+            | LineKind::Hunk { section, path, .. }
+            | LineKind::DiffLine { section, path, .. } => Some((section.clone(), path.clone())),
             _ => None,
         }
     }
 
+    /// Files of the untracked / unstaged / staged section around point.
     fn files_in_current_section(&self) -> Vec<String> {
         let Some(cur) = self.current_line() else { return vec![] };
         let section = match &cur.kind {
-            LineKind::File { section, .. } => section.clone(),
-            LineKind::SectionHeader { section, .. } => section.clone(),
+            LineKind::File { section, .. }
+            | LineKind::Hunk { section, .. }
+            | LineKind::DiffLine { section, .. }
+            | LineKind::SectionHeader { section, .. } => section.clone(),
             _ => return vec![],
         };
-        self.lines
+        self.buf
+            .all
             .iter()
             .filter_map(|l| match &l.kind {
                 LineKind::File { section: s, path } if *s == section => Some(path.clone()),
@@ -382,7 +677,9 @@ impl App {
                         continue;
                     }
                     let key = Key::from_event(&ev);
-                    self.handle_key(key)?;
+                    if let Err(e) = self.handle_key(key) {
+                        self.set_msg(&format!("{e}"));
+                    }
                 }
                 _ => {}
             }
@@ -405,25 +702,36 @@ impl App {
             return Ok(());
         };
         match binding {
-            Binding::Bury => {
-                if self.view_text.is_some() {
-                    self.view_text = None;
-                    self.set_msg("");
-                } else {
-                    self.quit = true;
-                }
-            }
+            Binding::Bury => self.bury_buffer(),
             Binding::Refresh => {
                 self.refresh();
                 self.set_msg("refreshed");
             }
-            Binding::Down => {
-                if self.cursor + 1 < self.lines.len() {
-                    self.cursor += 1;
-                }
+            // the text view (diff / log / show output) scrolls by line
+            Binding::Down | Binding::SectionForward if self.view_text.is_some() => self.view_scroll += 1,
+            Binding::Up | Binding::SectionBackward if self.view_text.is_some() => {
+                self.view_scroll = self.view_scroll.saturating_sub(1)
             }
-            Binding::Up => self.cursor = self.cursor.saturating_sub(1),
+            Binding::Down => self.forward_line(1),
+            Binding::Up => self.forward_line(-1),
+            Binding::SectionForward => self.section_forward(),
+            Binding::SectionBackward => self.section_backward(),
+            Binding::SiblingForward => self.sibling_forward(),
+            Binding::SiblingBackward => self.sibling_backward(),
             Binding::Toggle => self.toggle_section(),
+            Binding::Cycle => self.cycle_section(),
+            Binding::CycleGlobal => self.cycle_global(),
+            Binding::CycleDiffs => self.cycle_diffs(),
+            Binding::ShowLevel(n) => self.show_level(i32::from(n)),
+            Binding::ShowLevelAll(n) => self.show_level(-i32::from(n)),
+            Binding::SetMark => {
+                self.mark = Some(self.point());
+                self.set_msg("Mark set");
+            }
+            Binding::KeyboardQuit => {
+                self.mark = None;
+                self.set_msg("Quit");
+            }
             Binding::Visit => self.visit_thing()?,
             Binding::Menu(m) => self.open_menu(m),
             Binding::Command(c) => self.run_command(c, &BTreeMap::new())?,
@@ -436,11 +744,18 @@ impl App {
         if !self.menus.contains_key(&name) {
             return;
         }
-        // diff/log menus start with the arguments currently in use, like
-        // Magit's buffer-local magit-diff/log arguments
-        let preset: &[String] = match name.as_str() {
-            "diff-menu" | "diff-refresh-menu" => &self.diff_args,
-            "log-menu" | "log-refresh-menu" => &self.log_args,
+        if name == "diff-refresh-menu" {
+            let menu = diff_refresh_menu(self.mode != BufferMode::Status);
+            self.menus.insert(name.clone(), menu);
+        }
+        // `d` starts with the arguments of the diff buffer shown, else the
+        // current value of magit-diff-mode; `D` with the buffer's arguments
+        let preset: &[String] = match (name.as_str(), &self.mode) {
+            ("diff-menu", BufferMode::Diff(_)) => &self.buf_args,
+            ("diff-menu", _) => &self.diff_args,
+            ("diff-refresh-menu", BufferMode::Status) => &self.status_args,
+            ("diff-refresh-menu", _) => &self.buf_args,
+            ("log-menu" | "log-refresh-menu", _) => &self.log_args,
             _ => &[],
         };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
@@ -471,6 +786,26 @@ impl App {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// The visible lines of the status buffer.
+    pub fn visible_lines(&self) -> &[BufferLine] {
+        &self.lines
+    }
+
+    /// Text of the line at point.
+    pub fn point_text(&self) -> &str {
+        self.current_line().map_or("", |l| l.text.as_str())
+    }
+
+    /// Title and content of the text view (diff / log / file), if shown.
+    pub fn text_view(&self) -> Option<(&str, &str)> {
+        self.view_text.as_ref().map(|(t, c)| (t.as_str(), c.as_str()))
+    }
+
+    /// First line of the text view shown on screen.
+    pub fn text_view_scroll(&self) -> usize {
+        self.view_scroll
     }
 
     /// Switches enabled in the transient currently shown.
@@ -531,7 +866,12 @@ impl App {
             }
             Action::Command(cmd) => {
                 self.stack.pop();
-                self.run_command(&cmd, &active)?;
+                if menu.name == "diff-menu" {
+                    self.transient_diff_args = Some(self.args_from(&active));
+                }
+                let r = self.run_command(&cmd, &active);
+                self.transient_diff_args = None;
+                r?;
             }
         }
         Ok(())
@@ -575,7 +915,7 @@ impl App {
                 self.refresh();
                 self.set_msg("refreshed");
             }
-            "quit" => self.quit = true,
+            "quit" => self.bury_buffer(),
             "toggle-section" => self.toggle_section(),
             "visit" => self.visit_thing()?,
             "jump" => self.jump_section(),
@@ -596,35 +936,11 @@ impl App {
             }
 
             // -------- staging
-            "stage" => {
-                if let Some((_, path)) = self.pick_current_file_or_section() {
-                    g!().stage(&path)?;
-                    self.set_msg("staged");
-                    self.refresh();
-                } else {
-                    self.set_msg("nothing to stage at point");
-                }
-            }
-            "stage-all" => {
-                g!().stage_all()?;
-                self.set_msg("staged all modified");
-                self.refresh();
-            }
-            "unstage" => {
-                if let Some((_, path)) = self.pick_current_file_or_section_staged() {
-                    g!().unstage(&path)?;
-                    self.set_msg("unstaged");
-                    self.refresh();
-                } else {
-                    self.set_msg("nothing staged at point");
-                }
-            }
-            "unstage-all" => {
-                g!().unstage_all()?;
-                self.set_msg("unstaged all");
-                self.refresh();
-            }
-            "discard" => self.discard_flow()?,
+            "stage" => self.stage_cmd()?,
+            "stage-all" => self.stage_modified()?,
+            "unstage" => self.unstage_cmd()?,
+            "unstage-all" => self.unstage_all()?,
+            "discard" => self.discard_cmd()?,
             "untrack" => {
                 if let Some((_, path)) = self.pick_current_file_or_section() {
                     g!().untrack(&path)?;
@@ -632,6 +948,11 @@ impl App {
                     self.refresh();
                 }
             }
+            "diff-show-or-scroll-up" => self.show_or_scroll(true)?,
+            "diff-show-or-scroll-down" => self.show_or_scroll(false)?,
+            "diff-more-context" => self.set_diff_context(|n| Some(n + 1)),
+            "diff-less-context" => self.set_diff_context(|n| Some(n.saturating_sub(1))),
+            "diff-default-context" => self.set_diff_context(|_| None),
 
             // -------- commit menu
             "commit-create" => {
@@ -1116,69 +1437,10 @@ impl App {
                 }
                 self.refresh();
             }
-            // magit-apply: apply the thing at point to the working tree
-            "apply" => {
-                let line = self.current_line().map(|l| l.kind.clone());
-                match line {
-                    Some(LineKind::Stash { name, .. }) => {
-                        g!().stash_apply(&name, true)?;
-                        self.set_msg(&format!("applied {name}"));
-                        self.refresh();
-                    }
-                    Some(LineKind::File { section, .. })
-                    | Some(LineKind::SectionHeader { section, .. })
-                        if section == "staged" || section == "unstaged" =>
-                    {
-                        self.set_msg("Change is already in the working tree");
-                    }
-                    Some(LineKind::File { section, .. })
-                    | Some(LineKind::SectionHeader { section, .. })
-                        if section == "untracked" =>
-                    {
-                        self.set_msg("Cannot apply untracked files (use w w for patch files)");
-                    }
-                    _ => {
-                        // no commit sections in the status buffer: prompt like magit-cherry-apply
-                        let Some(r) = self.pick_recent_commit("Apply changes from commit")? else {
-                            return Ok(());
-                        };
-                        g!().cherry_apply(&[r.clone()], &args)?;
-                        self.set_msg(&format!("applied {r} to the working tree"));
-                        self.refresh();
-                    }
-                }
-            }
-            // magit-reverse: reverse the change at point in the working tree
-            "reverse" => {
-                let line = self.current_line().map(|l| l.kind.clone());
-                match line {
-                    Some(LineKind::File { section, path }) if section == "staged" => {
-                        g!().reverse_staged(&[path.clone()])?;
-                        self.set_msg(&format!("reversed {path} in the working tree"));
-                        self.refresh();
-                    }
-                    Some(LineKind::SectionHeader { section, .. }) if section == "staged" => {
-                        g!().reverse_staged(&[])?;
-                        self.set_msg("reversed staged changes in the working tree");
-                        self.refresh();
-                    }
-                    Some(LineKind::File { section, .. })
-                    | Some(LineKind::SectionHeader { section, .. })
-                        if section == "unstaged" || section == "untracked" =>
-                    {
-                        self.set_msg(&format!("Cannot reverse {section} changes"));
-                    }
-                    _ => {
-                        // magit-revert-no-commit for a commit
-                        let Some(r) = self.pick_recent_commit("Reverse changes from commit")? else {
-                            return Ok(());
-                        };
-                        g!().revert(&[r.clone()], &[], true)?;
-                        self.set_msg(&format!("reversed {r} in the working tree"));
-                        self.refresh();
-                    }
-                }
-            }
+            // magit-apply / magit-stash-apply / magit-cherry-apply
+            "apply" => self.apply_cmd(&args)?,
+            // magit-reverse / magit-revert-no-commit
+            "reverse" => self.reverse_cmd()?,
             "cherry-pick" | "cherry-apply" => {
                 let log = g!().log(None, 30)?;
                 let revs: Vec<String> = log
@@ -1221,7 +1483,8 @@ impl App {
                 self.set_msg("snapshot saved");
                 self.refresh();
             }
-            "stash-apply" | "stash-pop" | "stash-drop" | "stash-show" | "stash-branch" => {
+            "stash-show" => self.diff_view("stash")?,
+            "stash-apply" | "stash-pop" | "stash-drop" | "stash-branch" => {
                 let stashes = g!().stashes();
                 if stashes.is_empty() {
                     self.set_msg("no stashes");
@@ -1238,10 +1501,6 @@ impl App {
                             } else {
                                 return Ok(());
                             }
-                        }
-                        "stash-show" => {
-                            let d = g!().stash_show(s)?;
-                            self.view_text = Some((format!("stash {s}"), d));
                         }
                         "stash-branch" => {
                             if let Some(name) = self.read_line_prompt("Branch name", None)? {
@@ -1353,16 +1612,16 @@ impl App {
             },
             "diff-unstaged" | "diff-staged" | "diff-worktree" | "diff-dwim" | "diff-range"
             | "show-commit" => {
-                self.diff_args = args.clone();
                 let kind = if cmd == "show-commit" { "commit" } else { &cmd[5..] };
                 self.diff_view(kind)?;
             }
+            // magit-diff-refresh (D g): new arguments for the buffer shown
             "diff-refresh" => {
-                self.diff_args = args.clone();
-                match self.last_view.clone() {
-                    Some(v) if v.starts_with("diff:") => self.diff_view(&v[5..])?,
-                    _ => self.set_msg(&format!("diff arguments: {}", self.diff_args.join(" "))),
+                match self.mode {
+                    BufferMode::Status => self.status_args = args.clone(),
+                    _ => self.buf_args = args.clone(),
                 }
+                self.refresh();
             }
             "process-buffer" => {
                 let log = crate::git::exec::process_log();
@@ -1374,6 +1633,7 @@ impl App {
                 self.view_text = Some(("git process log".into(), text));
             }
             "section-up" => self.section_up(),
+            "diff-visit-worktree-file" => self.visit(true)?,
 
             // -------- repo-level
             "init" => {
@@ -1404,66 +1664,149 @@ impl App {
 
     // ------------------------------------------------------------ diff / log views
 
-    /// Show a diff buffer using `self.diff_args` (magit-diff-arguments).
+    /// The diff commands of `d`: magit-diff-unstaged, -staged,
+    /// -working-tree, -range, -dwim, magit-show-commit, magit-stash-show.
     fn diff_view(&mut self, kind: &str) -> Result<()> {
-        let a = self.diff_args.clone();
-        let (title, res, rerun): (String, Result<String>, bool) = match kind {
-            "unstaged" => ("diff unstaged".into(), self.git.diff_with(&a, &[]), true),
-            "staged" => ("diff staged".into(), self.git.diff_with(&a, &["--cached"]), true),
-            "worktree" => ("diff worktree".into(), self.git.diff_with(&a, &["HEAD"]), true),
-            "dwim" => match self.current_line().map(|l| l.kind.clone()) {
-                Some(LineKind::File { section, path }) if section == "untracked" => (
-                    format!("new file {path}"),
-                    Ok(std::fs::read_to_string(self.git.toplevel.join(&path)).unwrap_or_default()),
-                    false,
-                ),
-                Some(LineKind::File { section, path }) => {
-                    let mut rest = vec![];
-                    if section == "staged" {
-                        rest.push("--cached");
-                    }
-                    rest.extend(["--", path.as_str()]);
-                    (format!("diff {path}"), self.git.diff_with(&a, &rest), false)
-                }
-                Some(LineKind::SectionHeader { section, .. }) if section == "staged" => {
-                    ("diff staged".into(), self.git.diff_with(&a, &["--cached"]), false)
-                }
-                Some(LineKind::Stash { name, .. }) => {
-                    (format!("stash {name}"), self.git.stash_show(&name), false)
-                }
-                _ => ("diff unstaged".into(), self.git.diff_with(&a, &[]), false),
-            },
+        match kind {
+            "unstaged" => self.show_diff(None, None, "unstaged"),
+            "staged" => self.show_diff(None, Some("--cached"), "staged"),
+            "worktree" => self.show_diff(Some("HEAD".into()), None, "committed"),
             "range" => {
-                let Some(from) = self.read_line_prompt("Diff from revision", Some("HEAD~1"))? else {
+                let default = self.dwim_range_default();
+                let Some(r) = self.read_line_prompt("Diff for range", default.as_deref())? else {
                     return Ok(());
                 };
-                let Some(to) = self.read_line_prompt("Diff to revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                (format!("{from}..{to}"), self.git.diff_with(&a, &[&from, &to]), false)
+                self.show_diff(Some(r), None, "committed");
             }
+            "dwim" => self.diff_dwim()?,
             "commit" => {
-                let Some(rev) = self.pick_recent_commit("Show commit")? else {
-                    return Ok(());
+                let rev = match self.current_line().map(|l| l.kind.clone()) {
+                    Some(LineKind::Commit { hash, .. }) => Some(hash),
+                    _ => match &self.mode {
+                        BufferMode::Revision { rev, .. } => Some(rev.clone()),
+                        _ => {
+                            let current = self.git.current_branch();
+                            self.read_line_prompt("Show commit", current.as_deref())?
+                        }
+                    },
                 };
-                (format!("commit {rev}"), self.git.show_with(&rev, &a), false)
+                if let Some(rev) = rev {
+                    self.show_commit(&rev);
+                }
             }
             "stash" => {
-                let names: Vec<String> = self.git.stashes().into_iter().map(|(n, _)| n).collect();
-                let Some(name) = self.pick("Show stash", &names, None)?.cloned() else {
-                    return Ok(());
+                let at = match self.current_line().map(|l| l.kind.clone()) {
+                    Some(LineKind::Stash { name, .. }) => Some(name),
+                    _ => match &self.mode {
+                        BufferMode::Stash { stash } => Some(stash.clone()),
+                        _ => None,
+                    },
                 };
-                (format!("stash {name}"), self.git.stash_show(&name), false)
+                let stash = match at {
+                    Some(s) => Some(s),
+                    None => {
+                        let names: Vec<String> = self.git.stashes().into_iter().map(|(n, _)| n).collect();
+                        self.pick("Show stash", &names, None)?.cloned()
+                    }
+                };
+                if let Some(s) = stash {
+                    self.show_stash(&s);
+                }
             }
-            _ => return Ok(()),
-        };
-        match res {
-            Ok(out) if out.trim().is_empty() => self.set_msg("(no differences)"),
-            Ok(out) => {
-                self.view_text = Some((title, out));
-                self.last_view = rerun.then(|| format!("diff:{kind}"));
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The default of magit-diff-read-range-or-commit: the dwim range, or
+    /// the current branch.
+    fn dwim_range_default(&self) -> Option<String> {
+        match self.dwim() {
+            Dwim::Commit(v) => Some(format!("{v}^..{v}")),
+            Dwim::Range(r) => Some(r),
+            _ => self.git.current_branch(),
+        }
+    }
+
+    /// magit-diff--dwim
+    fn dwim(&self) -> Dwim {
+        if let Some(secs) = self.region_sections(true) {
+            let commits: Vec<String> = secs
+                .iter()
+                .filter_map(|&s| match &self.buf.all[self.sec(s).start].kind {
+                    LineKind::Commit { hash, .. } => Some(hash.clone()),
+                    _ => None,
+                })
+                .collect();
+            if commits.len() == secs.len() {
+                return Dwim::Range(format!("{}..{}", commits[commits.len() - 1], commits[0]));
             }
-            Err(e) => self.set_msg(&format!("{e}")),
+        }
+        let p = self.point();
+        let line = self.buf.all.get(p);
+        match &self.mode {
+            BufferMode::Stash { stash } => {
+                let group = match line.map(|l| &l.kind) {
+                    Some(LineKind::Commit { hash, .. }) => return Dwim::Commit(hash.clone()),
+                    Some(
+                        LineKind::File { section, .. }
+                        | LineKind::Hunk { section, .. }
+                        | LineKind::DiffLine { section, .. }
+                        | LineKind::Meta { section, .. },
+                    ) => section.clone(),
+                    _ => String::new(),
+                };
+                Dwim::Commit(match group.as_str() {
+                    "stash-index" => format!("{stash}^2"),
+                    "stash-untracked" => format!("{stash}^3"),
+                    _ => stash.clone(),
+                })
+            }
+            BufferMode::Revision { rev, .. } => Dwim::Commit(rev.clone()),
+            BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
+                ("committed", Some(r)) => Dwim::Range(r.clone()),
+                (t, _) => Dwim::Type(t.to_string()),
+            },
+            BufferMode::Status => {
+                let inside = |id: &str| line.is_some_and(|l| l.ident == id || l.ancestors.iter().any(|a| a == id));
+                if inside("unstaged") {
+                    return Dwim::Type("unstaged".into());
+                }
+                if inside("staged") {
+                    return Dwim::Type("staged".into());
+                }
+                let s = self.cur_sec();
+                let ident = &self.sec(s).ident;
+                if let Some(r) = ident.strip_prefix("unpushed:").or_else(|| ident.strip_prefix("unpulled:")) {
+                    if self.sec(s).start == p || !matches!(line.map(|l| &l.kind), Some(LineKind::Commit { .. })) {
+                        return Dwim::Range(range_to_endpoints(r));
+                    }
+                }
+                match line.map(|l| &l.kind) {
+                    Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
+                    Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
+                    _ => Dwim::None,
+                }
+            }
+        }
+    }
+
+    /// magit-diff-dwim
+    fn diff_dwim(&mut self) -> Result<()> {
+        match self.dwim() {
+            Dwim::Type(t) if t == "unstaged" => self.show_diff(None, None, "unstaged"),
+            Dwim::Type(t) if t == "staged" => self.show_diff(None, Some("--cached"), "staged"),
+            Dwim::Type(_) => self.refresh(),
+            Dwim::Stash(s) => self.show_stash(&s),
+            Dwim::Commit(v) => {
+                self.mark = None;
+                self.show_diff(Some(format!("{v}^..{v}")), None, "committed")
+            }
+            Dwim::Range(r) => {
+                self.mark = None;
+                self.show_diff(Some(r), None, "committed")
+            }
+            Dwim::None => self.diff_view("range")?,
         }
         Ok(())
     }
@@ -1508,13 +1851,1142 @@ impl App {
         Ok(())
     }
 
-    /// magit-section-up: move to the header of the section containing point.
+    // ------------------------------------------------------------ sections (magit-section)
+
+    fn sec(&self, s: usize) -> &Section {
+        &self.buf.sections[s]
+    }
+
+    /// The section at point (magit-current-section); 0 is the root.
+    fn cur_sec(&self) -> usize {
+        self.buf.section_at(self.point())
+    }
+
+    fn hidden(&self, s: usize) -> bool {
+        s != 0 && self.buf.is_hidden(&self.vis, &self.buf.sections[s].ident)
+    }
+
+    fn set_hidden(&mut self, s: usize, hidden: bool) {
+        if s != 0 {
+            let id = self.buf.sections[s].ident.clone();
+            self.vis.insert(id, hidden);
+        }
+    }
+
+    fn children(&self, s: usize) -> Vec<usize> {
+        self.buf.sections[s].children.clone()
+    }
+
+    fn goto_sec(&mut self, s: usize) {
+        let p = self.buf.sections[s].start;
+        self.cursor = self.visible_index_near(p);
+    }
+
+    /// forward-line N (used by movement commands on the root section)
+    fn forward_line(&mut self, n: isize) {
+        let max = self.lines.len().saturating_sub(1) as isize;
+        self.cursor = (self.cursor as isize + n).clamp(0, max.max(0)) as usize;
+    }
+
+    /// magit-section-siblings: the next / previous sibling of S.
+    fn sibling(&self, s: usize, next: bool) -> Option<usize> {
+        let ch = &self.sec(self.sec(s).parent?).children;
+        let i = ch.iter().position(|&c| c == s)?;
+        if next {
+            ch.get(i + 1).copied()
+        } else {
+            i.checked_sub(1).map(|j| ch[j])
+        }
+    }
+
+    /// Point is on the empty last line of S (`(= (oref s end) (1+ (point)))`).
+    fn at_section_end(&self, s: usize, p: usize) -> bool {
+        let sec = self.sec(s);
+        sec.end == p + 1 && p != sec.start && self.buf.all.get(p).is_some_and(|l| l.text.is_empty())
+    }
+
+    /// magit-section-forward (n)
+    fn section_forward(&mut self) {
+        let p = self.point();
+        let s = self.cur_sec();
+        if s == 0 {
+            return self.forward_line(1);
+        }
+        let mut next = if !self.hidden(s) && !self.at_section_end(s, p) {
+            self.sec(s).children.first().copied()
+        } else {
+            None
+        };
+        let mut cur = Some(s);
+        while next.is_none() {
+            let Some(c) = cur else { break };
+            next = self.sibling(c, true);
+            if next.is_none() {
+                cur = self.sec(c).parent;
+            }
+        }
+        match next {
+            Some(n) => self.goto_sec(n),
+            None => self.set_msg("No next section"),
+        }
+    }
+
+    /// magit-section-backward (p)
+    fn section_backward(&mut self) {
+        let p = self.point();
+        if p == 0 {
+            return self.set_msg("No previous section");
+        }
+        let s = self.cur_sec();
+        let sec = self.sec(s).clone();
+        if self.at_section_end(s, p) && !sec.children.is_empty() {
+            let last = *sec.children.last().unwrap_or(&s);
+            return self.goto_sec(last);
+        }
+        if sec.parent.is_some() && p != sec.start {
+            return self.goto_sec(s);
+        }
+        let prev = match self.sibling(s, false) {
+            Some(mut prev) => {
+                while !self.hidden(prev) && !self.sec(prev).children.is_empty() {
+                    prev = *self.sec(prev).children.last().unwrap_or(&prev);
+                }
+                Some(prev)
+            }
+            None => sec.parent,
+        };
+        match prev {
+            Some(x) => self.goto_sec(x),
+            None => self.forward_line(-1),
+        }
+    }
+
+    /// magit-section-forward-sibling (M-n)
+    fn sibling_forward(&mut self) {
+        let s = self.cur_sec();
+        if s == 0 {
+            return self.forward_line(1);
+        }
+        match self.sibling(s, true) {
+            Some(n) => self.goto_sec(n),
+            None => self.section_forward(),
+        }
+    }
+
+    /// magit-section-backward-sibling (M-p)
+    fn sibling_backward(&mut self) {
+        let s = self.cur_sec();
+        if s == 0 {
+            return self.forward_line(-1);
+        }
+        match self.sibling(s, false) {
+            Some(n) => self.goto_sec(n),
+            None => self.section_backward(),
+        }
+    }
+
+    /// magit-section-up (^)
     fn section_up(&mut self) {
-        if let Some(i) = (0..self.cursor)
-            .rev()
-            .find(|&i| matches!(self.lines[i].kind, LineKind::SectionHeader { .. }))
-        {
-            self.cursor = i;
+        match self.sec(self.cur_sec()).parent {
+            Some(par) => self.goto_sec(par),
+            None => self.set_msg("No parent section"),
+        }
+    }
+
+    fn show_sec(&mut self, s: usize) {
+        self.set_hidden(s, false);
+    }
+
+    fn hide_sec(&mut self, s: usize) {
+        self.set_hidden(s, true);
+    }
+
+    fn hide_children(&mut self, s: usize) {
+        for c in self.children(s) {
+            self.hide_sec(c);
+        }
+    }
+
+    /// magit-section-show-headings
+    fn show_headings(&mut self, s: usize) {
+        self.show_headings_1(s);
+        self.show_sec(s);
+    }
+
+    fn show_headings_1(&mut self, s: usize) {
+        for c in self.children(s) {
+            self.set_hidden(c, false);
+            if !self.sec(c).children.is_empty() || !self.sec(c).content {
+                self.show_headings_1(c);
+            }
+        }
+    }
+
+    /// magit-section-show-children
+    fn show_children(&mut self, s: usize, depth: Option<usize>) {
+        self.show_children_1(s, depth);
+        self.show_sec(s);
+    }
+
+    fn show_children_1(&mut self, s: usize, depth: Option<usize>) {
+        for c in self.children(s) {
+            self.set_hidden(c, false);
+            match depth {
+                Some(0) => self.hide_sec(c),
+                Some(d) => self.show_children_1(c, Some(d - 1)),
+                None => self.show_children_1(c, None),
+            }
+        }
+    }
+
+    /// magit-section-hidden-body
+    fn hidden_body(&self, s: usize) -> bool {
+        let ch = &self.sec(s).children;
+        if ch.is_empty() {
+            self.sec(s).content && self.hidden(s)
+        } else {
+            ch.iter().any(|&c| self.hidden_body(c))
+        }
+    }
+
+    /// magit-section-toggle (TAB)
+    fn toggle_section(&mut self) {
+        let p = self.point();
+        let s = self.cur_sec();
+        if s == 0 {
+            return self.set_msg("Cannot hide root section");
+        }
+        if self.hidden(s) {
+            self.show_sec(s);
+        } else {
+            self.hide_sec(s);
+        }
+        self.relayout_at(p);
+    }
+
+    /// The cycle step shared by magit-section-cycle and -cycle-global for
+    /// the children CH of a shown section; returns false when nothing applied.
+    fn cycle_children(&mut self, s: usize, ch: &[usize]) -> bool {
+        if ch.iter().any(|&c| self.hidden(c)) && ch.iter().any(|&c| !self.sec(c).children.is_empty()) {
+            self.show_headings(s);
+        } else if ch.iter().any(|&c| self.hidden_body(c)) {
+            self.show_children(s, None);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// magit-section-cycle (C-TAB)
+    fn cycle_section(&mut self) {
+        let p = self.point();
+        let s = self.cur_sec();
+        if s == 0 {
+            return self.cycle_global();
+        }
+        if self.hidden(s) {
+            self.show_sec(s);
+            self.hide_children(s);
+        } else {
+            let ch = self.children(s);
+            if !self.cycle_children(s, &ch) {
+                self.hide_sec(s);
+            }
+        }
+        self.relayout_at(p);
+    }
+
+    /// magit-section-cycle-global (S-TAB)
+    fn cycle_global(&mut self) {
+        let p = self.point();
+        let ch = self.children(0);
+        if !self.cycle_children(0, &ch) {
+            for c in ch {
+                self.hide_sec(c);
+            }
+        }
+        self.relayout_at(p);
+    }
+
+    /// magit-section-cycle-diffs (M-TAB): the file sections of the staged
+    /// and unstaged changes.
+    fn cycle_diffs(&mut self) {
+        let p = self.point();
+        let mut files = Vec::new();
+        if self.mode == BufferMode::Status {
+            for id in ["staged", "unstaged"] {
+                if let Some(s) = (1..self.buf.sections.len()).find(|&s| self.sec(s).ident == id) {
+                    if self.hidden(s) {
+                        self.show_sec(s);
+                    }
+                    files.extend(self.children(s));
+                }
+            }
+        } else {
+            files = self
+                .children(0)
+                .into_iter()
+                .filter(|&s| matches!(self.buf.all[self.sec(s).start].kind, LineKind::File { .. }))
+                .collect();
+        }
+        if files.is_empty() {
+            return self.relayout_at(p);
+        }
+        if files.iter().any(|&f| self.hidden(f)) {
+            for &f in &files {
+                self.show_sec(f);
+                self.hide_children(f);
+            }
+        } else {
+            let hunks: Vec<usize> = files.iter().flat_map(|&f| self.children(f)).collect();
+            if hunks.iter().any(|&h| self.hidden(h)) && hunks.iter().any(|&h| !self.sec(h).children.is_empty()) {
+                for &f in &files {
+                    self.show_headings(f);
+                }
+            } else if hunks.iter().any(|&h| self.hidden_body(h)) {
+                for &f in &files {
+                    self.show_children(f, None);
+                }
+            } else {
+                for &f in &files {
+                    self.hide_sec(f);
+                }
+            }
+        }
+        self.relayout_at(p);
+    }
+
+    /// magit-section-show-level: LEVEL > 0 for the sections around point
+    /// (1..4), LEVEL < 0 for all sections (M-1..M-4).
+    fn show_level(&mut self, level: i32) {
+        if level < 0 {
+            let lvl = level.unsigned_abs() as usize;
+            let mut s = self.cur_sec();
+            let mut p = self.point();
+            while self.sec(s).level > lvl {
+                s = self.sec(s).parent.unwrap_or(0);
+                p = self.sec(s).start;
+            }
+            self.show_children(0, Some(lvl.saturating_sub(1)));
+            return self.relayout_at(p);
+        }
+        let lvl = level as usize;
+        let sections = self.region_sections(false).unwrap_or_else(|| vec![self.cur_sec()]);
+        let mut p = self.point();
+        for section in sections {
+            let mut s = section;
+            let mut i = self.sec(s).level;
+            loop {
+                if i < lvl {
+                    self.show_children(s, Some(lvl - i - 1));
+                    break;
+                }
+                if i == lvl {
+                    self.hide_sec(s);
+                    break;
+                }
+                s = self.sec(s).parent.unwrap_or(0);
+                i -= 1;
+            }
+            p = self.sec(s).start;
+        }
+        self.relayout_at(p);
+    }
+
+    /// magit-region-sections: sibling sections selected by a region that
+    /// begins and ends in their headings. With MULTIPLE, a single section
+    /// does not count.
+    fn region_sections(&self, multiple: bool) -> Option<Vec<usize>> {
+        let m = self.mark?;
+        let p = self.point();
+        let (rb, re) = (m.min(p), m.max(p));
+        let sb = self.buf.section_at(rb);
+        let se = self.buf.section_at(re);
+        if se == 0 || (sb == se && (multiple || re > rb)) {
+            return None;
+        }
+        if self.sec(sb).start != rb || self.sec(se).start != re {
+            return None;
+        }
+        let ch = &self.sec(self.sec(sb).parent?).children;
+        let i = ch.iter().position(|&c| c == sb)?;
+        let j = ch.iter().position(|&c| c == se)?;
+        (j >= i).then(|| ch[i..=j].to_vec())
+    }
+
+    // ------------------------------------------------------------ diff selection (magit-diff-scope)
+
+    /// magit-apply--get-selection + magit-diff-scope + magit-diff-type.
+    fn diff_selection(&self) -> Option<DiffSel> {
+        if let Some(secs) = self.region_sections(true) {
+            let kinds: Vec<&LineKind> = secs.iter().map(|&s| &self.buf.all[self.sec(s).start].kind).collect();
+            let files: Vec<(String, String)> = kinds
+                .iter()
+                .filter_map(|k| match k {
+                    LineKind::File { section, path } => Some((section.clone(), path.clone())),
+                    _ => None,
+                })
+                .collect();
+            if files.len() == kinds.len() {
+                let typ = files[0].0.clone();
+                return Some(DiffSel::Files { typ, paths: files.into_iter().map(|f| f.1).collect() });
+            }
+            let hunks: Vec<(String, String, usize)> = kinds
+                .iter()
+                .filter_map(|k| match k {
+                    LineKind::Hunk { section, path, hunk } => Some((section.clone(), path.clone(), *hunk)),
+                    _ => None,
+                })
+                .collect();
+            if hunks.len() == kinds.len() {
+                let (typ, path) = (hunks[0].0.clone(), hunks[0].1.clone());
+                return Some(DiffSel::Hunks { typ, path, hunks: hunks.into_iter().map(|h| h.2).collect() });
+            }
+        }
+        let s = self.cur_sec();
+        if s == 0 {
+            return None;
+        }
+        let start = self.sec(s).start;
+        let is_list = |t: &str| matches!(t, "untracked" | "unstaged" | "staged");
+        match &self.buf.all[start].kind {
+            LineKind::Hunk { section, path, hunk } => {
+                if let Some(m) = self.mark {
+                    let p = self.point();
+                    let line = |q: usize| match self.buf.all[q].kind {
+                        LineKind::DiffLine { line, .. } => Some(line),
+                        _ => None,
+                    };
+                    if self.buf.section_at(m) == s && m != start && p != start {
+                        if let (Some(a), Some(b)) = (line(m), line(p)) {
+                            return Some(DiffSel::Region {
+                                typ: section.clone(),
+                                path: path.clone(),
+                                hunk: *hunk,
+                                from: a.min(b),
+                                to: a.max(b),
+                            });
+                        }
+                    }
+                }
+                Some(DiffSel::Hunk { typ: section.clone(), path: path.clone(), hunk: *hunk })
+            }
+            LineKind::File { section, path } => Some(DiffSel::File { typ: section.clone(), path: path.clone() }),
+            LineKind::Meta { section, path, kind } => Some(DiffSel::Meta {
+                typ: section.clone(),
+                path: path.clone(),
+                scope: if kind == "chmod" { Scope::Chmod } else { Scope::Rename },
+            }),
+            LineKind::SectionHeader { section, .. } if is_list(section) => Some(DiffSel::List { typ: section.clone() }),
+            _ => None,
+        }
+    }
+
+    fn context(&self) -> usize {
+        diff_context(&self.buffer_args())
+    }
+
+    fn file_diff(&self, typ: &str, path: &str) -> Result<FileDiff> {
+        self.buf
+            .diff(typ, path)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cannot get required diff headers"))
+    }
+
+    /// Paths of the files a file / files / list selection covers.
+    fn sel_paths(&self, sel: &DiffSel) -> Vec<String> {
+        match sel {
+            DiffSel::File { path, .. } => vec![path.clone()],
+            DiffSel::Files { paths, .. } => paths.clone(),
+            DiffSel::List { typ } if typ == "untracked" => self.git.untracked_files(),
+            DiffSel::List { typ } => self.buf.files(typ).iter().map(|f| f.path.clone()).collect(),
+            DiffSel::Hunk { path, .. }
+            | DiffSel::Hunks { path, .. }
+            | DiffSel::Region { path, .. }
+            | DiffSel::Meta { path, .. } => vec![path.clone()],
+        }
+    }
+
+    /// magit-apply--ignore-whitespace-p: whole files have to be applied as
+    /// patches when the diff ignores whitespace (and no file is binary).
+    fn ignore_whitespace(&self, sel: &DiffSel) -> bool {
+        let group = sel.typ();
+        if !matches!(self.diff_type(group), "unstaged" | "staged") || !sel.is_files() {
+            return false;
+        }
+        let flags = ["--ignore-space-at-eol", "--ignore-space-change", "--ignore-all-space", "--ignore-blank-lines"];
+        self.buffer_args().iter().any(|a| flags.contains(&a.as_str()))
+            && !self.sel_paths(sel).iter().any(|p| self.buf.diff(group, p).is_some_and(|d| d.binary))
+    }
+
+    /// Hunk / hunks / region (or pseudo-hunk) selection as (path, scope).
+    fn hunk_scope(sel: &DiffSel) -> Option<(String, Scope)> {
+        match sel {
+            DiffSel::Hunk { path, hunk, .. } => Some((path.clone(), Scope::Hunk(*hunk))),
+            DiffSel::Hunks { path, hunks, .. } => Some((path.clone(), Scope::Hunks(hunks.clone()))),
+            DiffSel::Region { path, hunk, from, to, .. } => {
+                Some((path.clone(), Scope::Region { hunk: *hunk, from: *from, to: *to }))
+            }
+            DiffSel::Meta { path, scope, .. } => Some((path.clone(), scope.clone())),
+            _ => None,
+        }
+    }
+
+    /// The prompt of magit-discard-* / magit-reverse-* for a hunk selection.
+    fn hunk_prompt(verb: &str, sel: &DiffSel) -> String {
+        match sel {
+            DiffSel::Region { .. } => format!("{verb} region"),
+            DiffSel::Hunks { hunks, path, .. } => format!("{verb} {} hunks from {path}", hunks.len()),
+            _ => format!("{verb} hunk"),
+        }
+    }
+
+    /// magit-confirm: "PROMPT? (y/n)"; a "no" leaves "Abort" in the echo area.
+    fn confirm(&mut self, prompt: &str) -> Result<bool> {
+        let ok = self.yes_no(&format!("{prompt}?"))?;
+        if !ok {
+            self.set_msg("Abort");
+        }
+        Ok(ok)
+    }
+
+    /// magit-confirm-files: `PROMPT "file"` or the file list and `PROMPT N files`.
+    fn confirm_files(&mut self, prompt: &str, files: &[String]) -> Result<bool> {
+        match files {
+            [] => Ok(true),
+            [f] => self.confirm(&format!("{prompt} \"{f}\"")),
+            fs => self.confirm(&format!("{}\n\n{prompt} {} files", fs.join("\n"), fs.len())),
+        }
+    }
+
+    // ------------------------------------------------------------ apply commands (magit-apply.el)
+
+    /// `s`: magit-stage where a section keymap remaps magit-stage-files
+    /// (files, hunks, the untracked and unstaged sections), else
+    /// magit-stage-files.
+    fn stage_cmd(&mut self) -> Result<()> {
+        let sel = self.diff_selection().filter(|d| !matches!(d, DiffSel::List { typ } if typ == "staged"));
+        let Some(sel) = sel else { return self.stage_files() };
+        let ctx = self.context();
+        let ws = self.ignore_whitespace(&sel);
+        match self.diff_type(sel.typ()) {
+            "untracked" => {
+                let files = self.sel_paths(&sel);
+                if files.is_empty() {
+                    return Ok(());
+                }
+                let mut a = vec!["add", "--"];
+                a.extend(files.iter().map(String::as_str));
+                self.git.git_interactive(&a)?;
+            }
+            "unstaged" => {
+                if let Some((path, scope)) = Self::hunk_scope(&sel) {
+                    let fd = self.file_diff("unstaged", &path)?;
+                    self.git.stage_change(&fd, &scope, ctx)?;
+                } else if ws {
+                    for p in self.sel_paths(&sel) {
+                        let fd = self.file_diff("unstaged", &p)?;
+                        self.git.stage_change(&fd, &Scope::File, ctx)?;
+                    }
+                } else if matches!(sel, DiffSel::List { .. }) {
+                    return self.stage_modified();
+                } else {
+                    let files = self.sel_paths(&sel);
+                    let mut a = vec!["add", "-u", "--"];
+                    a.extend(files.iter().map(String::as_str));
+                    self.git.git_interactive(&a)?;
+                }
+            }
+            "staged" => {
+                self.set_msg("Already staged");
+                return Ok(());
+            }
+            "committed" => {
+                self.set_msg("Cannot stage committed changes");
+                return Ok(());
+            }
+            _ => {
+                self.set_msg("Cannot stage this change");
+                return Ok(());
+            }
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// magit-stage-files: read files (unstaged and untracked), default the
+    /// file at point.
+    fn stage_files(&mut self) -> Result<()> {
+        let mut choices = self.git.unstaged_files();
+        choices.extend(self.git.untracked_files());
+        let default = self.current_file().map(|f| f.1).filter(|f| choices.contains(f));
+        let Some(file) = self.pick("Stage file,s", &choices, default.as_deref())?.cloned() else {
+            return Ok(());
+        };
+        self.git.stage(&file)?;
+        self.set_msg("staged");
+        self.refresh();
+        Ok(())
+    }
+
+    /// magit-stage-modified (S): `git add -u .`, confirming when something
+    /// is staged already.
+    fn stage_modified(&mut self) -> Result<()> {
+        if self.git.anything_staged() && !self.confirm("Stage all changes")? {
+            return Ok(());
+        }
+        self.git.stage_all()?;
+        self.set_msg("staged all modified");
+        self.refresh();
+        Ok(())
+    }
+
+    /// `u`: magit-unstage on files, hunks and the staged section, else
+    /// magit-unstage-files.
+    fn unstage_cmd(&mut self) -> Result<()> {
+        let sel = self.diff_selection().filter(|d| !matches!(d, DiffSel::List { typ } if typ != "staged"));
+        let Some(sel) = sel else { return self.unstage_files() };
+        let ctx = self.context();
+        let ws = self.ignore_whitespace(&sel);
+        match (self.diff_type(sel.typ()), &sel) {
+            ("untracked", _) => {
+                self.set_msg("Cannot unstage untracked changes");
+                return Ok(());
+            }
+            ("unstaged", DiffSel::File { .. } | DiffSel::Files { .. }) => {
+                // magit-unstage-intent
+                let staged = self.git.staged_files();
+                let intent: Vec<String> = self.sel_paths(&sel).into_iter().filter(|f| staged.contains(f)).collect();
+                if intent.is_empty() {
+                    self.set_msg("Already unstaged");
+                    return Ok(());
+                }
+                for f in &intent {
+                    self.git.unstage(f)?;
+                }
+            }
+            ("unstaged", _) => {
+                self.set_msg("Already unstaged");
+                return Ok(());
+            }
+            // magit-unstage-committed: magit-reverse-in-index
+            ("committed", _) => return self.reverse_sel(&sel, &["--cached"]),
+            ("undefined", _) => {
+                self.set_msg("Cannot unstage this change");
+                return Ok(());
+            }
+            _ => {
+                if let Some((path, scope)) = Self::hunk_scope(&sel) {
+                    let fd = self.file_diff("staged", &path)?;
+                    self.git.unstage_change(&fd, &scope, ctx)?;
+                } else if ws {
+                    for p in self.sel_paths(&sel) {
+                        let fd = self.file_diff("staged", &p)?;
+                        self.git.unstage_change(&fd, &Scope::File, ctx)?;
+                    }
+                } else if matches!(sel, DiffSel::List { .. }) {
+                    return self.unstage_all();
+                } else {
+                    for p in self.sel_paths(&sel) {
+                        self.git.unstage(&p)?;
+                    }
+                }
+            }
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// magit-unstage-files: read staged files, default the file at point.
+    fn unstage_files(&mut self) -> Result<()> {
+        let choices = self.git.staged_files();
+        let default = self.current_file().map(|f| f.1).filter(|f| choices.contains(f));
+        let Some(file) = self.pick("Unstage file,s", &choices, default.as_deref())?.cloned() else {
+            return Ok(());
+        };
+        self.git.unstage(&file)?;
+        self.set_msg("unstaged");
+        self.refresh();
+        Ok(())
+    }
+
+    /// magit-unstage-all (U)
+    fn unstage_all(&mut self) -> Result<()> {
+        if !self.git.anything_staged() {
+            self.set_msg("Nothing to unstage");
+            return Ok(());
+        }
+        let others = !self.git.unstaged_files().is_empty() || !self.git.untracked_files().is_empty();
+        if others && !self.confirm("Unstage all changes")? {
+            return Ok(());
+        }
+        self.git.unstage_all()?;
+        self.set_msg("unstaged all");
+        self.refresh();
+        Ok(())
+    }
+
+    /// `k`: magit-discard on changes, magit-stash-drop on a stash,
+    /// magit-stash-clear on the stashes section.
+    fn discard_cmd(&mut self) -> Result<()> {
+        match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Stash { name, .. }) => {
+                if self.yes_no(&format!("Drop {name}?"))? {
+                    self.git.stash_drop(&name)?;
+                    self.set_msg("stash dropped");
+                    self.refresh();
+                }
+                return Ok(());
+            }
+            Some(LineKind::SectionHeader { section, .. }) if section == "stashes" => {
+                if self.confirm("Drop all stashes in refs/stash")? {
+                    self.git.stash_clear()?;
+                    self.refresh();
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        let Some(sel) = self.diff_selection() else {
+            self.set_msg("There is no thing at point that could be deleted");
+            return Ok(());
+        };
+        let ctx = self.context();
+        let group = sel.typ().to_string();
+        let typ = self.diff_type(&group).to_string();
+        match typ.as_str() {
+            "committed" => {
+                self.set_msg("Cannot discard committed changes");
+                return Ok(());
+            }
+            "undefined" => {
+                self.set_msg("Cannot discard this change");
+                return Ok(());
+            }
+            _ => {}
+        }
+        if let Some((path, scope)) = Self::hunk_scope(&sel) {
+            if !self.confirm(&Self::hunk_prompt("Discard", &sel))? {
+                return Ok(());
+            }
+            let fd = self.file_diff(&group, &path)?;
+            self.git.discard_change(&fd, &scope, typ == "staged", ctx)?;
+        } else {
+            let files = self.sel_paths(&sel);
+            let prompt = if typ == "untracked" { "Delete".to_string() } else { format!("Discard {typ} changes in") };
+            if !self.confirm_files(&prompt, &files)? {
+                return Ok(());
+            }
+            for f in &files {
+                match typ.as_str() {
+                    "untracked" => self.git.discard_untracked(f)?,
+                    "unstaged" => self.git.discard_unstaged(f)?,
+                    _ => self.git.discard_staged(f)?,
+                }
+            }
+        }
+        self.set_msg("discarded");
+        self.refresh();
+        Ok(())
+    }
+
+    /// `v`: magit-reverse on changes; magit-revert-no-commit elsewhere
+    /// (default: the commit at point).
+    fn reverse_cmd(&mut self) -> Result<()> {
+        let sel = self.diff_selection().filter(|d| !matches!(d, DiffSel::List { typ } if typ != "staged"));
+        let Some(sel) = sel else {
+            let Some(r) = self.read_commit("Revert changes")? else { return Ok(()) };
+            self.git.revert(std::slice::from_ref(&r), &[], true)?;
+            self.set_msg(&format!("reversed {r} in the working tree"));
+            self.refresh();
+            return Ok(());
+        };
+        match self.diff_type(sel.typ()) {
+            "untracked" => {
+                self.set_msg("Cannot reverse untracked changes");
+                Ok(())
+            }
+            "unstaged" => {
+                self.set_msg("Cannot reverse unstaged changes");
+                Ok(())
+            }
+            _ => self.reverse_sel(&sel, &[]),
+        }
+    }
+
+    /// magit-reverse-region / -hunk / -hunks / -files: apply the selection
+    /// with `--reverse ARGS --reject`.
+    fn reverse_sel(&mut self, sel: &DiffSel, args: &[&str]) -> Result<()> {
+        let group = sel.typ().to_string();
+        let ctx = self.context();
+        let mut a = vec!["--reverse"];
+        a.extend(args);
+        a.push("--reject");
+        if let Some((path, scope)) = Self::hunk_scope(sel) {
+            if !self.confirm(&Self::hunk_prompt("Reverse", sel))? {
+                return Ok(());
+            }
+            let fd = self.file_diff(&group, &path)?;
+            self.git.apply_scope(&fd, &scope, &a, ctx)?;
+        } else {
+            let (binaries, files): (Vec<String>, Vec<String>) = self
+                .sel_paths(sel)
+                .into_iter()
+                .partition(|f| self.buf.diff(&group, f).is_some_and(|d| d.binary));
+            if !self.confirm_files("Reverse", &files)? {
+                return Ok(());
+            }
+            let fds = files.iter().map(|f| self.file_diff(&group, f)).collect::<Result<Vec<_>>>()?;
+            self.git.apply_files(&fds.iter().collect::<Vec<_>>(), &a, ctx)?;
+            if !binaries.is_empty() {
+                self.refresh();
+                self.set_msg("Cannot reverse binary files");
+                return Ok(());
+            }
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// `a`: magit-apply on changes, magit-stash-apply on a stash,
+    /// magit-cherry-apply elsewhere (default: the commit at point).
+    fn apply_cmd(&mut self, args: &[String]) -> Result<()> {
+        if let Some(LineKind::Stash { name, .. }) = self.current_line().map(|l| l.kind.clone()) {
+            self.git.stash_apply(&name, true)?;
+            self.set_msg(&format!("applied {name}"));
+            self.refresh();
+            return Ok(());
+        }
+        let Some(sel) = self.diff_selection() else {
+            let Some(r) = self.read_commit("Apply changes from commit")? else { return Ok(()) };
+            self.git.cherry_apply(std::slice::from_ref(&r), args)?;
+            self.set_msg(&format!("applied {r} to the working tree"));
+            self.refresh();
+            return Ok(());
+        };
+        let group = sel.typ().to_string();
+        let three: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a == "--3way").collect();
+        match (self.diff_type(&group), &sel) {
+            ("unstaged" | "staged", _) => self.set_msg("Change is already in the working tree"),
+            ("untracked", DiffSel::File { .. } | DiffSel::Files { .. }) => self.open_menu("patches-menu"),
+            ("untracked", _) => {}
+            _ => {
+                let ctx = self.context();
+                if let Some((path, scope)) = Self::hunk_scope(&sel) {
+                    let fd = self.file_diff(&group, &path)?;
+                    self.git.apply_scope(&fd, &scope, &three, ctx)?;
+                } else {
+                    let fds = self.sel_paths(&sel).iter().map(|f| self.file_diff(&group, f)).collect::<Result<Vec<_>>>()?;
+                    self.git.apply_files(&fds.iter().collect::<Vec<_>>(), &three, ctx)?;
+                }
+                self.refresh();
+            }
+        }
+        Ok(())
+    }
+
+    /// magit-diff-set-context: `+` / `-` / `0` change `-U<n>` of the diffs
+    /// of the buffer shown.
+    fn set_diff_context(&mut self, f: impl Fn(usize) -> Option<usize>) {
+        let def = self
+            .git
+            .git_string(&["config", "diff.context"])
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(3);
+        let args = match self.mode {
+            BufferMode::Status => &mut self.status_args,
+            _ => &mut self.buf_args,
+        };
+        let is_u = |a: &String| a.starts_with("-U") && a[2..].chars().all(|c| c.is_ascii_digit());
+        let pos = args.iter().position(is_u);
+        let num = pos.and_then(|i| args[i][2..].parse().ok()).unwrap_or(def);
+        if let Some(i) = pos {
+            args.remove(i);
+        }
+        if let Some(n) = f(num).filter(|&n| n != def) {
+            args.insert(0, format!("-U{n}"));
+        }
+        self.refresh();
+    }
+
+    // ------------------------------------------------------------ visiting
+
+    /// magit-diff-visit--sides: the (revision, file) of the old and the new
+    /// side of the diff of PATH in GROUP; revisions are "{worktree}",
+    /// "{index}" or a revision.
+    fn visit_sides(&self, group: &str, path: &str) -> ((String, String), (String, String)) {
+        let orig = self.buf.diff(group, path).and_then(|d| d.orig.clone()).unwrap_or_else(|| path.to_string());
+        let wt = || "{worktree}".to_string();
+        let abbrev = |r: &str| self.git.rev_short(r);
+        let (old, new) = match (&self.mode, self.diff_type(group)) {
+            (BufferMode::Revision { rev, .. }, _) => (abbrev(&format!("{rev}^")), abbrev_if_oid(&self.git, rev)),
+            (BufferMode::Stash { stash }, _) => {
+                let rev = match group {
+                    "stash-index" => format!("{stash}^2"),
+                    "stash-untracked" => format!("{stash}^3"),
+                    _ => stash.clone(),
+                };
+                (abbrev(&format!("{rev}^")), rev)
+            }
+            (BufferMode::Diff(spec), "committed") => match &spec.range {
+                Some(r) => self.split_range(r, spec.typearg.as_deref() == Some("--cached")),
+                None => (wt(), wt()),
+            },
+            (_, "staged") => (abbrev("HEAD"), "{index}".to_string()),
+            (_, "unstaged") => {
+                let staged = self.git.git_ok(&["diff", "--cached", "--quiet", "--", &orig]);
+                (if staged { abbrev("HEAD") } else { "{index}".to_string() }, wt())
+            }
+            _ => (wt(), wt()),
+        };
+        ((old, orig), (new, path.to_string()))
+    }
+
+    /// magit-split-range: "A..B" -> (A, B), "A...B" -> (merge base, B); a
+    /// single revision is compared with the worktree (or the index).
+    fn split_range(&self, range: &str, cached: bool) -> (String, String) {
+        let side = |s: &str| if s.is_empty() { "HEAD".to_string() } else { s.to_string() };
+        if let Some((a, b)) = range.split_once("...") {
+            let base = self.git.git_string(&["merge-base", &side(a), &side(b)]).unwrap_or_default();
+            (self.git.rev_short(base.trim()), side(b))
+        } else if let Some((a, b)) = range.split_once("..") {
+            (side(a), side(b))
+        } else {
+            (range.to_string(), if cached { "{index}" } else { "{worktree}" }.to_string())
+        }
+    }
+
+    /// magit-diff-hunk-line: the line in the visited file of body line LINE
+    /// (or the heading) of hunk HUNK, on the old side when GOTO_FROM.
+    fn hunk_line(fd: &FileDiff, hunk: usize, line: Option<usize>, goto_from: bool) -> usize {
+        let Some(h) = fd.hunks.get(hunk) else { return 1 };
+        let start = h.range().map_or(1, |r| if goto_from { r.old_start } else { r.new_start }).max(1);
+        let skip = if goto_from { '+' } else { '-' };
+        start + line.map_or(0, |li| h.lines.iter().take(li).filter(|l| !l.starts_with(skip)).count())
+    }
+
+    /// magit-diff-visit--offset: LINE of FILE at REV moved by the changes
+    /// between REV (or the index) and the worktree.
+    fn visit_offset(&self, line: usize, file: &str, rev: &str) -> usize {
+        let out = if rev == "{index}" {
+            self.git.git_string(&["diff", "--no-ext-diff", "--", file])
+        } else {
+            self.git.git_string(&["diff", "--no-ext-diff", rev, "--", file])
+        };
+        let mut offset: isize = 0;
+        for h in crate::git::diff::parse(&out.unwrap_or_default()).iter().flat_map(|f| f.hunks.iter()) {
+            let Some(r) = h.range() else { continue };
+            if r.old_start > line {
+                break;
+            }
+            if r.old_start + r.old_len < line {
+                offset += r.new_len as isize - r.old_len as isize;
+                continue;
+            }
+            let mut rest = line - r.old_start;
+            for l in &h.lines {
+                if rest == 0 {
+                    break;
+                }
+                match l.chars().next() {
+                    Some(' ') => rest -= 1,
+                    Some('-') => {
+                        offset -= 1;
+                        rest -= 1;
+                    }
+                    Some('+') => offset += 1,
+                    _ => {}
+                }
+            }
+            break;
+        }
+        (line as isize + offset).max(1) as usize
+    }
+
+    /// magit-diff-visit-file (WORKTREE: magit-diff-visit-worktree-file):
+    /// show the version of the file at point, at the line at point. Added
+    /// and context lines visit the new side, removed lines the old side.
+    fn visit_file(&mut self, group: &str, path: &str, hunk: Option<(usize, Option<usize>)>, worktree: bool) {
+        let (old, new) = self.visit_sides(group, path);
+        let fd = self.buf.diff(group, path).cloned();
+        let on_removed = match (hunk, &fd) {
+            (Some((h, Some(l))), Some(fd)) => fd.hunks.get(h).and_then(|x| x.lines.get(l)).is_some_and(|t| t.starts_with('-')),
+            _ => false,
+        };
+        let goto_from = !worktree && on_removed;
+        let (rev, file) = if goto_from { old } else { new };
+        let mut line = match (hunk, &fd) {
+            (Some((h, l)), Some(fd)) => Some(Self::hunk_line(fd, h, l, goto_from)),
+            _ => None,
+        };
+        let (title, content) = if worktree || rev == "{worktree}" {
+            if worktree && rev != "{worktree}" {
+                line = line.map(|l| self.visit_offset(l, &file, &rev));
+            }
+            let full = self.git.toplevel.join(&file);
+            match std::fs::read(&full) {
+                Ok(bytes) => (file.clone(), String::from_utf8_lossy(&bytes).into_owned()),
+                Err(_) => {
+                    self.set_msg(&format!("Cannot visit {file}: file does not exist"));
+                    return;
+                }
+            }
+        } else {
+            let spec = if rev == "{index}" { format!(":{file}") } else { format!("{rev}:{file}") };
+            match self.git.git_string(&["cat-file", "-p", &spec]) {
+                Ok(c) => (format!("{file}.~{rev}~"), c),
+                Err(e) => {
+                    self.set_msg(&format!("{e}"));
+                    return;
+                }
+            }
+        };
+        self.view_text = Some((title, content));
+        self.view_scroll = line.map_or(0, |l| l.saturating_sub(1));
+    }
+
+    /// RET (magit-visit-thing as remapped by the section at point)
+    fn visit_thing(&mut self) -> Result<()> {
+        self.visit(false)
+    }
+
+    /// RET, or C-RET / C-j (magit-diff-visit-worktree-file) when WORKTREE.
+    fn visit(&mut self, worktree: bool) -> Result<()> {
+        let Some(kind) = self.current_line().map(|l| l.kind.clone()) else { return Ok(()) };
+        self.view_scroll = 0;
+        match kind {
+            LineKind::File { section, path } | LineKind::Meta { section, path, .. } => {
+                self.visit_file(&section, &path, None, worktree)
+            }
+            LineKind::Hunk { section, path, hunk } => self.visit_file(&section, &path, Some((hunk, None)), worktree),
+            LineKind::DiffLine { section, path, hunk, line } => {
+                self.visit_file(&section, &path, Some((hunk, Some(line))), worktree)
+            }
+            _ if worktree => self.set_msg("C-<return> is undefined"),
+            LineKind::SectionHeader { section, .. } if section == "unstaged" || section == "staged" => {
+                self.diff_view(&section)?
+            }
+            LineKind::SectionHeader { section, .. } if section == "stashes" => {
+                let l = self.git.stash_list();
+                self.view_text = Some(("stash list".into(), l.join("\n")));
+            }
+            LineKind::Stash { name, .. } => self.show_stash(&name),
+            LineKind::Commit { hash, .. } => self.show_commit(&hash),
+            _ => self.set_msg("There is no thing at point that could be visited"),
+        }
+        Ok(())
+    }
+
+    /// magit-show-commit: the revision buffer of REV, with the arguments of
+    /// the revision buffer shown, else the current diff arguments.
+    fn show_commit(&mut self, rev: &str) {
+        let args = match (&self.transient_diff_args, &self.mode) {
+            (Some(a), _) => a.clone(),
+            (None, BufferMode::Revision { .. }) => self.buf_args.clone(),
+            (None, _) => self.diff_args.clone(),
+        };
+        self.setup_buffer(BufferMode::Revision { rev: rev.to_string(), files: Vec::new() }, args);
+    }
+
+    /// magit-stash-show: the stash buffer of STASH (without "--stat").
+    fn show_stash(&mut self, stash: &str) {
+        let args = match (&self.transient_diff_args, &self.mode) {
+            (Some(a), _) => a,
+            (None, BufferMode::Stash { .. }) => &self.buf_args,
+            (None, _) => &self.diff_args,
+        };
+        let args: Vec<String> = args.iter().filter(|a| *a != "--stat").cloned().collect();
+        self.setup_buffer(BufferMode::Stash { stash: stash.to_string() }, args);
+    }
+
+    /// Show a diff buffer (magit-diff-setup-buffer).
+    fn show_diff(&mut self, range: Option<String>, typearg: Option<&str>, typ: &str) {
+        let spec = DiffSpec { range, typearg: typearg.map(str::to_string), typ: typ.into(), files: Vec::new() };
+        let args = match (&self.transient_diff_args, &self.mode) {
+            (Some(a), _) => a.clone(),
+            (None, BufferMode::Diff(_)) => self.buf_args.clone(),
+            (None, _) => self.diff_args.clone(),
+        };
+        self.setup_buffer(BufferMode::Diff(spec), args);
+    }
+
+    /// SPC / DEL: scroll the text view; in diff / revision / stash buffers
+    /// scroll-up / scroll-down; in the status buffer
+    /// magit-diff-show-or-scroll-up / -down (show the thing at point).
+    fn show_or_scroll(&mut self, up: bool) -> Result<()> {
+        let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        let page = (h as usize).saturating_sub(5).max(1);
+        if self.view_text.is_some() {
+            self.view_scroll = if up { self.view_scroll + page } else { self.view_scroll.saturating_sub(page) };
+            return Ok(());
+        }
+        if self.mode != BufferMode::Status {
+            if up {
+                if self.scroll + page >= self.lines.len() {
+                    self.set_msg("End of buffer");
+                    return Ok(());
+                }
+                self.scroll += page;
+                self.cursor = self.cursor.max(self.scroll);
+            } else {
+                if self.scroll == 0 {
+                    self.set_msg("Beginning of buffer");
+                    return Ok(());
+                }
+                self.scroll = self.scroll.saturating_sub(page);
+                self.cursor = self.cursor.min(self.scroll + page - 1);
+            }
+            return Ok(());
+        }
+        match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Commit { hash, .. }) => self.show_commit(&hash),
+            Some(LineKind::Stash { name, .. }) => self.show_stash(&name),
+            Some(_) if self.diff_selection().is_some() => self.diff_dwim()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// `j`: magit-status-jump in the status buffer (the next top-level
+    /// section), magit-jump-to-diffstat-or-diff elsewhere.
+    fn jump_section(&mut self) {
+        if self.mode != BufferMode::Status {
+            return self.jump_to_diffstat_or_diff();
+        }
+        let headers: Vec<usize> = self
+            .children(0)
+            .into_iter()
+            .filter(|&s| !matches!(self.buf.all[self.sec(s).start].kind, LineKind::Head))
+            .map(|s| self.sec(s).start)
+            .collect();
+        let p = self.point();
+        if let Some(&next) = headers.iter().find(|&&h| h > p).or(headers.first()) {
+            self.cursor = self.visible_index_near(next);
+        }
+    }
+
+    /// magit-jump-to-diffstat-or-diff: from a file in the diffstat to its
+    /// diff, from a file or hunk to its diffstat line, else to the diffstat.
+    fn jump_to_diffstat_or_diff(&mut self) {
+        let s = self.cur_sec();
+        let ident = self.sec(s).ident.clone();
+        let target = match &self.buf.all[self.sec(s).start].kind {
+            LineKind::File { section, path } if ident.contains("/diffstat/") => format!("{section}/{path}"),
+            LineKind::File { section, path } | LineKind::Hunk { section, path, .. } | LineKind::Meta { section, path, .. } => {
+                format!("{section}/diffstat/{path}")
+            }
+            _ => self
+                .buf
+                .sections
+                .iter()
+                .find(|x| x.ident.ends_with("/diffstat"))
+                .map(|x| x.ident.clone())
+                .unwrap_or_default(),
+        };
+        match (1..self.buf.sections.len()).find(|&i| !target.is_empty() && self.sec(i).ident == target) {
+            Some(t) => self.goto_sec(t),
+            None => self.set_msg("No diffstat in this buffer"),
         }
     }
 
@@ -1527,145 +2999,71 @@ impl App {
         let files = self.files_in_current_section();
         files.first().map(|f| (String::new(), f.clone()))
     }
+}
 
-    fn pick_current_file_or_section_staged(&self) -> Option<(String, String)> {
-        if let Some((_, path)) = self.current_file() {
-            return Some((String::new(), path));
+/// What magit-diff--dwim finds at point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Dwim {
+    None,
+    /// "unstaged", "staged" or "undefined"
+    Type(String),
+    Commit(String),
+    Stash(String),
+    Range(String),
+}
+
+/// magit-diff--range-to-endpoints: "A...B" -> "A..B", "A..B" -> "A...B".
+fn range_to_endpoints(range: &str) -> String {
+    if range.contains("...") {
+        range.replacen("...", "..", 1)
+    } else if range.contains("..") {
+        range.replacen("..", "...", 1)
+    } else {
+        range.to_string()
+    }
+}
+
+/// magit--abbrev-if-oid: abbreviate REV when it is a full object id.
+fn abbrev_if_oid(g: &Git, rev: &str) -> String {
+    if rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        g.rev_short(rev)
+    } else {
+        rev.to_string()
+    }
+}
+
+/// What a diff command acts on (magit-diff-type and magit-diff-scope).
+#[derive(Debug, Clone, PartialEq)]
+enum DiffSel {
+    /// the untracked / unstaged / staged section
+    List { typ: String },
+    File { typ: String, path: String },
+    Files { typ: String, paths: Vec<String> },
+    Hunk { typ: String, path: String, hunk: usize },
+    Hunks { typ: String, path: String, hunks: Vec<usize> },
+    Region { typ: String, path: String, hunk: usize, from: usize, to: usize },
+    /// the `chmod` / `rename` pseudo-hunk of a file
+    Meta { typ: String, path: String, scope: Scope },
+}
+
+impl DiffSel {
+    /// The diff group (`section` of the file lines); its diff type is
+    /// `App::diff_type`.
+    fn typ(&self) -> &str {
+        match self {
+            DiffSel::List { typ }
+            | DiffSel::File { typ, .. }
+            | DiffSel::Files { typ, .. }
+            | DiffSel::Hunk { typ, .. }
+            | DiffSel::Hunks { typ, .. }
+            | DiffSel::Region { typ, .. }
+            | DiffSel::Meta { typ, .. } => typ,
         }
-        let files = self.files_in_current_section();
-        files.first().cloned().map(|f| (String::new(), f))
     }
 
-    fn toggle_section(&mut self) {
-        // collapse/expand: toggle between showing files and hiding them
-        let Some(cur) = self.current_line() else { return };
-        let section = match &cur.kind {
-            LineKind::SectionHeader { section, .. } => section.clone(),
-            LineKind::File { section, .. } => section.clone(),
-            _ => return,
-        };
-        let files_visible = self
-            .lines
-            .iter()
-            .any(|l| matches!(&l.kind, LineKind::File { section: s, .. } if *s == section));
-        if files_visible {
-            self.lines.retain(|l| {
-                !matches!(&l.kind, LineKind::File { section: s, .. } if *s == section)
-            });
-        } else {
-            self.refresh();
-        }
-        if self.cursor >= self.lines.len() {
-            self.cursor = self.lines.len().saturating_sub(1);
-        }
-    }
-
-    fn visit_thing(&mut self) -> Result<()> {
-        let Some(cur) = self.current_line() else { return Ok(()) };
-        match &cur.kind {
-            LineKind::File { section, path } => match section.as_str() {
-                "untracked" => {
-                    let content = std::fs::read_to_string(self.git.toplevel.join(path))
-                        .unwrap_or_else(|_| "(binary or unreadable)".into());
-                    self.view_text = Some((path.clone(), content));
-                }
-                "unstaged" => {
-                    let d = self.git.git_string(&["diff", "--no-color", "--", path])?;
-                    self.view_text = Some((format!("diff {path}"), d));
-                }
-                "staged" => {
-                    let d = self
-                        .git
-                        .git_string(&["diff", "--cached", "--no-color", "--", path])?;
-                    self.view_text = Some((format!("diff --cached {path}"), d));
-                }
-                _ => {}
-            },
-            LineKind::SectionHeader { section, .. } => match section.as_str() {
-                "unstaged" => {
-                    let d = self.git.diff_unstaged()?;
-                    self.view_text = Some(("diff unstaged".into(), d));
-                }
-                "staged" => {
-                    let d = self.git.diff_staged()?;
-                    self.view_text = Some(("diff staged".into(), d));
-                }
-                "untracked" => {}
-                _ => {}
-            },
-            LineKind::Stash { name, .. } => {
-                let d = self.git.stash_show(name)?;
-                self.view_text = Some((format!("stash {name}"), d));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn jump_section(&mut self) {
-        // cycle through section headers
-        let headers: Vec<usize> = self
-            .lines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, l)| match &l.kind {
-                LineKind::SectionHeader { .. } | LineKind::Stash { .. } => Some(i),
-                _ => None,
-            })
-            .collect();
-        if headers.is_empty() {
-            return;
-        }
-        let next = headers.iter().find(|&&i| i > self.cursor).unwrap_or(&headers[0]);
-        self.cursor = *next;
-    }
-
-    fn discard_flow(&mut self) -> Result<()> {
-        let Some(cur_kind) = self.current_line().map(|l| l.kind.clone()) else {
-            return Ok(());
-        };
-        match cur_kind {
-            LineKind::File { section, path } => {
-                if !self.yes_no(&format!("Discard changes in {path}?"))? {
-                    self.set_msg("aborted");
-                    return Ok(());
-                }
-                match section.as_str() {
-                    "untracked" => self.git.discard_untracked(&path)?,
-                    "unstaged" => self.git.discard_unstaged(&path)?,
-                    "staged" => self.git.discard_staged(&path)?,
-                    _ => {}
-                }
-                self.set_msg("discarded");
-                self.refresh();
-            }
-            LineKind::SectionHeader { section, n } => {
-                if !self.yes_no(&format!("Discard all {n} changes ({section})?"))? {
-                    self.set_msg("aborted");
-                    return Ok(());
-                }
-                let files = self.files_in_current_section();
-                for f in files {
-                    match section.as_str() {
-                        "untracked" => self.git.discard_untracked(&f)?,
-                        "unstaged" => self.git.discard_unstaged(&f)?,
-                        "staged" => self.git.discard_staged(&f)?,
-                        _ => {}
-                    }
-                }
-                self.set_msg("discarded all");
-                self.refresh();
-            }
-            LineKind::Stash { name, .. } => {
-                if self.yes_no(&format!("Drop {name}?"))? {
-                    self.git.stash_drop(&name)?;
-                    self.set_msg("stash dropped");
-                    self.refresh();
-                }
-            }
-            _ => self.set_msg("nothing to discard at point"),
-        }
-        Ok(())
+    /// file, files or list scope
+    fn is_files(&self) -> bool {
+        matches!(self, DiffSel::List { .. } | DiffSel::File { .. } | DiffSel::Files { .. })
     }
 }
 
@@ -1901,20 +3299,29 @@ impl App {
             }
 
             // ---- section info / buffer display
+            // magit-describe-section
             "section-info" => {
                 let line = self.current_line().cloned();
                 let text = match line {
                     Some(l) => {
-                        let section = match &l.kind {
-                            LineKind::SectionHeader { section, .. }
-                            | LineKind::File { section, .. } => section.clone(),
-                            _ => "-".into(),
-                        };
+                        let s = self.cur_sec();
+                        let sec = self.sec(s).clone();
+                        let mut chain = Vec::new();
+                        let mut cur = Some(s);
+                        while let Some(c) = cur {
+                            let id = &self.sec(c).ident;
+                            chain.push(if id.is_empty() { "status".to_string() } else { id.clone() });
+                            cur = self.sec(c).parent;
+                        }
                         format!(
-                            "Line: {}\nKind: {:?}\nSection: {}\nPosition: {}/{}",
+                            "Section: {}\nLines: {}-{}\nHidden: {}\nChildren: {}\nLine: {}\nKind: {:?}\nPosition: {}/{}",
+                            chain.join(" < "),
+                            sec.start + 1,
+                            sec.end,
+                            self.hidden(s),
+                            sec.children.len(),
                             l.text,
                             l.kind,
-                            section,
                             self.cursor + 1,
                             self.lines.len(),
                         )
@@ -2030,26 +3437,33 @@ impl App {
                     self.done("git am", res);
                 }
             }
-            // magit-patch-save: write the diff being viewed (or all changes) to a file
+            // magit-patch-save: write the diff of the diff / revision / stash
+            // buffer shown to a file (magit-patch-save-arguments '(exclude "--stat"))
             "patch-save" => {
-                let diff = match &self.view_text {
-                    Some((title, body))
-                        if title.starts_with("diff") || title.starts_with("commit") || title.starts_with("stash") =>
-                    {
-                        body.clone()
+                let (range, typearg, files) = match &self.mode {
+                    BufferMode::Diff(s) => (s.range.clone(), s.typearg.clone(), s.files.clone()),
+                    BufferMode::Revision { rev, files } => (Some(format!("{rev}^..{rev}")), None, files.clone()),
+                    BufferMode::Stash { stash } => (Some(format!("{stash}^..{stash}")), None, Vec::new()),
+                    BufferMode::Status => {
+                        self.set_msg("Only diff buffers can be saved as patches");
+                        return Ok(());
                     }
-                    _ => self.git.diff_with(&self.diff_args, &["HEAD"])?,
                 };
-                if diff.trim().is_empty() {
-                    self.set_msg("no changes to save");
-                    return Ok(());
-                }
-                let Some(file) = self.read_line_prompt("Save patch as", Some("changes.patch"))? else {
+                let Some(file) = self.read_line_prompt("Write patch file", None)? else {
                     return Ok(());
                 };
+                let mut a: Vec<String> = vec!["diff".into()];
+                a.extend(range);
+                a.push("-p".into());
+                a.extend(typearg);
+                a.extend(self.buf_args.iter().filter(|x| *x != "--stat").cloned());
+                a.push("--".into());
+                a.extend(files);
+                let a: Vec<&str> = a.iter().map(String::as_str).collect();
+                let out = self.git.git_output(&a)?;
                 let path = self.git.toplevel.join(&file);
-                std::fs::write(&path, format!("{}\n", diff.trim_end_matches('\n')))?;
-                self.set_msg(&format!("saved {}", path.display()));
+                std::fs::write(&path, out.stdout)?;
+                self.refresh();
             }
             "request-pull" => {
                 let default_start = self.git.upstream_shortname();

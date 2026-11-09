@@ -765,8 +765,26 @@ fn status_buffer_direct_keys() {
     assert_eq!(b("K"), Some(Binding::Command("untrack")));
     assert_eq!(b("s"), Some(Binding::Command("stage")));
     assert_eq!(b("u"), Some(Binding::Command("unstage")));
-    assert_eq!(b("n"), Some(Binding::Down));
-    assert_eq!(b("p"), Some(Binding::Up));
+    // magit-section-mode-map
+    assert_eq!(b("n"), Some(Binding::SectionForward));
+    assert_eq!(b("p"), Some(Binding::SectionBackward));
+    assert_eq!(b("M-n"), Some(Binding::SiblingForward));
+    assert_eq!(b("M-p"), Some(Binding::SiblingBackward));
+    assert_eq!(b("C-<tab>"), Some(Binding::Cycle));
+    assert_eq!(b("<backtab>"), Some(Binding::CycleGlobal));
+    assert_eq!(b("1"), Some(Binding::ShowLevel(1)));
+    assert_eq!(b("4"), Some(Binding::ShowLevel(4)));
+    assert_eq!(b("M-2"), Some(Binding::ShowLevelAll(2)));
+    assert_eq!(b("C-SPC"), Some(Binding::SetMark));
+    assert_eq!(b("C-@"), Some(Binding::SetMark));
+    assert_eq!(b("C-g"), Some(Binding::KeyboardQuit));
+    // magit-mode-map
+    assert_eq!(b("M-<tab>"), Some(Binding::CycleDiffs));
+    assert_eq!(b("SPC"), Some(Binding::Command("diff-show-or-scroll-up")));
+    assert_eq!(b("DEL"), Some(Binding::Command("diff-show-or-scroll-down")));
+    assert_eq!(b("+"), Some(Binding::Command("diff-more-context")));
+    assert_eq!(b("-"), Some(Binding::Command("diff-less-context")));
+    assert_eq!(b("0"), Some(Binding::Command("diff-default-context")));
     assert_eq!(b("<up>"), Some(Binding::Up));
     assert_eq!(b("<down>"), Some(Binding::Down));
     assert_eq!(b("C-p"), Some(Binding::Up));

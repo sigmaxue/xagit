@@ -3,18 +3,24 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// A parsed key event, normalized for comparison (case-sensitive letters,
-/// Ctrl combos recorded separately).
+/// Ctrl combos recorded separately, Meta as an "M-" prefix of the code).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Key {
-    pub code: String, // "a", "A", "tab", "enter", "esc", "g" ...
+    pub code: String, // "a", "A", "tab", "enter", "esc", "g", "M-n" ...
     pub ctrl: bool,
 }
 
 impl Key {
     pub fn from_event(ev: &KeyEvent) -> Key {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+        let meta = ev.modifiers.contains(KeyModifiers::ALT);
+        let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
         let code = match ev.code {
+            // C-@ arrives as NUL, i.e. C-SPC
+            KeyCode::Char('@') if ctrl => " ".into(),
             KeyCode::Char(c) => c.to_string(),
+            KeyCode::Tab if shift => "backtab".into(),
+            KeyCode::BackTab => "backtab".into(),
             KeyCode::Tab => "tab".into(),
             KeyCode::Enter => "enter".into(),
             KeyCode::Esc => "esc".into(),
@@ -30,32 +36,49 @@ impl Key {
             KeyCode::F(n) => format!("f{n}"),
             _ => String::new(),
         };
+        let code = if meta && !code.is_empty() { format!("M-{code}") } else { code };
         Key { code, ctrl }
     }
 
     /// Display like Emacs: "C-c", "RET", "TAB", "a".
     pub fn label(&self) -> String {
         if self.ctrl {
-            format!("C-{}", self.code)
+            match self.code.as_str() {
+                " " => "C-SPC".into(),
+                c => format!("C-{c}"),
+            }
         } else {
             match self.code.as_str() {
                 "enter" => "RET".into(),
                 "tab" => "TAB".into(),
                 "esc" => "ESC".into(),
+                " " => "SPC".into(),
+                "backtab" => "<backtab>".into(),
                 other => other.to_string(),
             }
         }
     }
 }
 
-/// Translate an Emacs-style key chord string ("C-c", "RET", "a") into Key.
+/// Translate an Emacs-style key chord string ("C-c", "RET", "a", "M-n",
+/// "C-SPC", "<backtab>") into Key.
 pub fn key_from_label(label: &str) -> Key {
     match label {
         "RET" | "<return>" | "return" => Key { code: "enter".into(), ctrl: false },
         "TAB" | "<tab>" | "tab" => Key { code: "tab".into(), ctrl: false },
         "ESC" | "esc" | "C-[" => Key { code: "esc".into(), ctrl: false },
         "SPC" | " " => Key { code: " ".into(), ctrl: false },
-        l if l.starts_with("C-") => Key { code: l[2..].to_lowercase(), ctrl: true },
+        "DEL" => Key { code: "backspace".into(), ctrl: false },
+        "C-@" => Key { code: " ".into(), ctrl: true },
+        l if l.len() > 2 && l.starts_with("M-") => {
+            let k = key_from_label(&l[2..]);
+            Key { code: format!("M-{}", k.code), ctrl: k.ctrl }
+        }
+        l if l.len() > 2 && l.starts_with("C-") => {
+            let k = key_from_label(&l[2..]);
+            let code = if k.code.chars().count() == 1 { k.code.to_lowercase() } else { k.code };
+            Key { code, ctrl: true }
+        }
         // Emacs function-key notation: <up> <down> <left> <right> ...
         l if l.len() > 2 && l.starts_with('<') && l.ends_with('>') => Key {
             code: l[1..l.len() - 1].to_string(),

@@ -146,12 +146,29 @@ fn sub(key: &str, desc: &str, menu: &str) -> MenuEntry {
 }
 
 /// magit-diff argument switches shared by `d` and `D` (default level).
-fn diff_switches() -> Vec<MenuEntry> {
-    vec![
+/// "--stat" has `:if magit-diff-argument-predicate`: it is offered by `d`
+/// and by `D` in diff, revision and stash buffers, but not in the status
+/// buffer.
+fn diff_switches(stat: bool) -> Vec<MenuEntry> {
+    let mut v = vec![
         sw("-b", "Ignore whitespace changes", "--ignore-space-change"),
         sw("-w", "Ignore all whitespace", "--ignore-all-space"),
         sw("-W", "Show surrounding functions", "--function-context"),
-    ]
+        sw("-x", "Disallow external diff drivers", "--no-ext-diff"),
+    ];
+    if stat {
+        v.push(sw("-s", "Show stats", "--stat"));
+    }
+    v
+}
+
+/// magit-diff-refresh (D); STAT when the buffer is a diff buffer.
+pub fn diff_refresh_menu(stat: bool) -> Menu {
+    Menu {
+        name: "diff-refresh-menu".into(),
+        title: "Change arguments of diff buffers".into(),
+        groups: vec![diff_switches(stat), vec![cmd("g", "Refresh", "diff-refresh")]],
+    }
 }
 
 /// magit-log argument switches shared by `l` and `L` (default level).
@@ -608,7 +625,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "diff-menu".into(),
             title: "Show changes between different versions".into(),
             groups: vec![
-                diff_switches(),
+                diff_switches(true),
                 vec![
                     cmd("d", "Dwim", "diff-dwim"),
                     cmd("r", "Diff range", "diff-range"),
@@ -625,14 +642,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
     );
 
     // ------------------------------------------------ magit-diff-refresh (D)
-    m.insert(
-        "diff-refresh-menu".into(),
-        Menu {
-            name: "diff-refresh-menu".into(),
-            title: "Change arguments of diff buffers".into(),
-            groups: vec![diff_switches(), vec![cmd("g", "Refresh", "diff-refresh")]],
-        },
-    );
+    m.insert("diff-refresh-menu".into(), diff_refresh_menu(true));
 
     // ------------------------------------------------ magit-log (l)
     m.insert(
