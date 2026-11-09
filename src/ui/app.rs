@@ -15,6 +15,7 @@ use super::logbuf::{
 use super::minibuf::{add_to_history, Completion, LineEditor, Step};
 use super::options::Options;
 use super::refs::{build_refs, deferred_ref, CommitCount, RefKind};
+use super::smerge::{self, Keep};
 use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
@@ -72,6 +73,8 @@ pub struct App {
     transient_log_args: Option<Vec<String>>,
     /// C-c was typed (the prefix of C-c C-n)
     cc_prefix: bool,
+    /// C-c ^ was typed on a hunk (magit-hunk-section-smerge-map)
+    smerge_prefix: bool,
     /// the prefix argument of the next command (current-prefix-arg)
     prefix_arg: Option<PrefixArg>,
     /// C-u / M-- was typed and digits are read (universal-argument-map)
@@ -515,6 +518,7 @@ impl App {
             transient_diff_args: None,
             transient_log_args: None,
             cc_prefix: false,
+            smerge_prefix: false,
             prefix_arg: None,
             reading_arg: false,
             transient_helpp: false,
@@ -1405,7 +1409,7 @@ impl App {
         self.blame_post_command();
         // the prefix argument is for one command; prefix keys (C-c, the
         // first keys of a transient's key sequence) pass it on
-        if !self.cc_prefix && self.pending.is_empty() {
+        if !self.cc_prefix && !self.smerge_prefix && self.pending.is_empty() {
             self.prefix_arg = None;
         }
         r
@@ -1515,15 +1519,37 @@ impl App {
 
     /// A key outside transients.
     fn dispatch_buffer_key(&mut self, key: Key) -> Result<()> {
+        if std::mem::take(&mut self.smerge_prefix) {
+            // magit-hunk-section-smerge-map
+            let how = match (key.ctrl, key.code.as_str()) {
+                (false, "enter") => Keep::Current,
+                (false, "a") => Keep::All,
+                (false, "u") => Keep::Upper,
+                (false, "b") => Keep::Base,
+                (false, "l") => Keep::Lower,
+                _ => {
+                    self.set_msg(&format!("C-c ^ {} is undefined", key.label()));
+                    return Ok(());
+                }
+            };
+            return self.call_smerge(how, false);
+        }
         if std::mem::take(&mut self.cc_prefix) {
             let select = matches!(self.mode, BufferMode::LogSelect { .. });
             let blaming = matches!(self.mode, BufferMode::File { blame: Some(_), .. });
+            let in_hunk = self.view_text.is_none()
+                && matches!(self.current_line().map(|l| &l.kind), Some(LineKind::Hunk { .. } | LineKind::DiffLine { .. }));
             match (key.ctrl, key.code.as_str()) {
                 (true, "n") if self.mode.is_log() => self.log_move_to_parent(),
                 (true, "c") if select => return self.log_select_pick(),
                 (true, "k") if select => self.kill_buffer(),
                 // magit-blame-mode-map
                 (true, "q") if blaming => self.blame_quit(),
+                // smerge-command-prefix in magit-hunk-section-map
+                (false, "^") if in_hunk => {
+                    self.smerge_prefix = true;
+                    self.set_msg("C-c ^-");
+                }
                 // the global binding of magit-file-dispatch
                 (false, "M-g") => self.open_menu("file-dispatch"),
                 _ => self.set_msg(&format!("C-c {} is undefined", key.label())),
@@ -4891,6 +4917,12 @@ impl App {
             if !self.confirm("discard", &Self::hunk_prompt("Discard", &sel))? {
                 return Ok(());
             }
+            // magit-discard-hunk: conflicts are resolved with smerge
+            if matches!(sel, DiffSel::Hunk { .. })
+                && file_status(&self.git, &["--", path.as_str()]).first().is_some_and(|s| (s.x, s.y) == ('U', 'U'))
+            {
+                return self.call_smerge(Keep::Current, true);
+            }
             let fd = self.file_diff(&group, &path)?;
             self.git.discard_change(&fd, &scope, typ == "staged", ctx)?;
         } else {
@@ -4908,6 +4940,62 @@ impl App {
         }
         self.set_msg("discarded");
         self.refresh();
+        Ok(())
+    }
+
+    /// magit-call-smerge: smerge-keep-* (HOW) on the conflict at the line
+    /// the hunk line at point visits (magit-diff-visit-file--noselect),
+    /// then the file is saved and the buffer refreshed. Outside a
+    /// conflict the next one is used; for smerge-keep-current there only
+    /// magit-discard (DISCARD) does so, asking which side to keep.
+    fn call_smerge(&mut self, how: Keep, discard: bool) -> Result<()> {
+        let (group, path, hunk, line) = match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Hunk { section, path, hunk }) => (section, path, hunk, None),
+            Some(LineKind::DiffLine { section, path, hunk, line }) => (section, path, hunk, Some(line)),
+            _ => return Ok(()),
+        };
+        let fd = self.file_diff(&group, &path)?;
+        let (old, new) = self.visit_sides(&group, &path);
+        let goto_from = line.is_some_and(|l| {
+            !fd.combined && fd.hunks.get(hunk).and_then(|h| h.lines.get(l)).is_some_and(|t| t.starts_with('-'))
+        });
+        let (rev, file) = if goto_from { old } else { new };
+        let n = Self::hunk_line(&fd, hunk, line, goto_from);
+        let worktree = rev == "{worktree}";
+        let abs = self.git.toplevel.join(&file);
+        let text = if worktree {
+            std::fs::read(&abs).map_err(|_| anyhow::anyhow!("Cannot visit {file}: file does not exist"))?
+        } else {
+            super::blame::file_contents(&self.git, &rev, &file)?.into_bytes()
+        };
+        let name = std::path::Path::new(&file).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        let mut pos = smerge::line_position(&text, n);
+        let mut how = how;
+        if smerge::match_conflict(&text, pos, &name).is_err() && (how != Keep::Current || discard) {
+            pos = smerge::next_conflict(&text, pos);
+            if how == Keep::Current {
+                let prompt = "Keep side: [o]urs/upper, [b]ase, [t]heirs/lower, or [C-g] to abort";
+                how = match self.read_char_choice(prompt, &['o', 'b', 't'])? {
+                    Some('o') => Keep::Upper,
+                    Some('b') => Keep::Base,
+                    Some(_) => Keep::Lower,
+                    None => {
+                        self.set_msg("Quit");
+                        return Ok(());
+                    }
+                };
+                self.set_msg("");
+            }
+        }
+        match smerge::keep(&text, pos, how, &name) {
+            Err(e) => self.set_msg(&e),
+            Ok(_) if !worktree => self.set_msg(&format!("Buffer is read-only: #<buffer {name}.~{rev}~>")),
+            Ok(out) => {
+                std::fs::write(&abs, out)?;
+                self.refresh();
+                self.set_msg(&format!("Wrote {}", abs.display()));
+            }
+        }
         Ok(())
     }
 
@@ -5417,12 +5505,21 @@ impl App {
     }
 
     /// magit-diff-hunk-line: the line in the visited file of body line LINE
-    /// (or the heading) of hunk HUNK, on the old side when GOTO_FROM.
+    /// (or the heading) of hunk HUNK, on the old side when GOTO_FROM. The
+    /// lines before it are counted unless their prefix (a column per
+    /// parent in combined diffs) has a `-` (`+` for GOTO_FROM). On the
+    /// heading Magit moves past the first `-` or `+` of the body, so that
+    /// line is counted too.
     fn hunk_line(fd: &FileDiff, hunk: usize, line: Option<usize>, goto_from: bool) -> usize {
         let Some(h) = fd.hunks.get(hunk) else { return 1 };
         let start = h.range().map_or(1, |r| if goto_from { r.old_start } else { r.new_start }).max(1);
+        let prefix = h.header.chars().take_while(|c| *c == '@').count().saturating_sub(1).max(1);
         let skip = if goto_from { '+' } else { '-' };
-        start + line.map_or(0, |li| h.lines.iter().take(li).filter(|l| !l.starts_with(skip)).count())
+        let target = match line {
+            Some(li) => li,
+            None => h.lines.iter().position(|l| l.starts_with(['-', '+'])).map_or(0, |i| i + 1),
+        };
+        start + h.lines.iter().take(target).filter(|l| !l.chars().take(prefix).any(|c| c == skip)).count()
     }
 
     /// magit-diff-visit--offset: LINE of FILE at REV moved by the changes
@@ -5470,7 +5567,9 @@ impl App {
         let (old, new) = self.visit_sides(group, path);
         let fd = self.buf.diff(group, path).cloned();
         let on_removed = match (hunk, &fd) {
-            (Some((h, Some(l))), Some(fd)) => fd.hunks.get(h).and_then(|x| x.lines.get(l)).is_some_and(|t| t.starts_with('-')),
+            (Some((h, Some(l))), Some(fd)) => {
+                !fd.combined && fd.hunks.get(h).and_then(|x| x.lines.get(l)).is_some_and(|t| t.starts_with('-'))
+            }
             _ => false,
         };
         let goto_from = !worktree && on_removed;

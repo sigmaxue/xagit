@@ -8,6 +8,7 @@ pub mod minibuf;
 pub mod options;
 pub mod refs;
 pub mod regexp;
+pub mod smerge;
 pub mod transient;
 pub mod trash;
 pub mod view;
