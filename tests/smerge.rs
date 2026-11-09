@@ -68,7 +68,7 @@ fn discard_keeps_the_side_at_point() {
     goto(&mut app, |t| t.trim_start() == "+ theirs");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Discard hunk? (y/n)"]);
+    assert_eq!(app.prompts(), ["Discard hunk? (y or n) "]);
     assert_eq!(read(&g, "f.txt"), THEIRS);
     assert_eq!(app.message(), format!("Wrote {}", g.toplevel.join("f.txt").display()));
     assert_eq!(status(&g), "UU f.txt", "still to be staged");
@@ -109,7 +109,7 @@ fn discard_outside_a_version() {
     goto(&mut app, |t| t.trim() == "a");
     app.script_answers(&["y", "x", "t"]);
     app.press("k").unwrap();
-    let p = "Keep side: [o]urs/upper, [b]ase, [t]heirs/lower, or [C-g] to abort";
+    let p = "Keep side: [o]urs/upper, [b]ase, [t]heirs/lower, or [C-g] to abort ";
     assert_eq!(app.prompts()[app.prompts().len() - 2..], [p, p]);
     assert_eq!(read(&g, "f.txt"), THEIRS);
     // no base

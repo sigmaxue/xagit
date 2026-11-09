@@ -115,6 +115,9 @@ pub struct App {
     /// answers typed as keys into the minibuffer (tests), used when there
     /// are no scripted answers
     scripted_keys: std::cell::RefCell<std::collections::VecDeque<Vec<Key>>>,
+    /// keys answering the question being read at once (y-or-n-p,
+    /// read-char-choice): key code -> answer
+    instant_keys: std::cell::RefCell<Vec<(String, String)>>,
     /// minibuffer-history: the inputs of prompts without a history of
     /// their own, newest first (not saved)
     minibuffer_history: std::cell::RefCell<Vec<String>>,
@@ -537,6 +540,7 @@ impl App {
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            instant_keys: std::cell::RefCell::new(Vec::new()),
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
             revision_history: std::cell::RefCell::new(Vec::new()),
             screen: std::cell::RefCell::new(Vec::new()),
@@ -1097,6 +1101,9 @@ impl App {
         }
         if let Some(keys) = self.scripted_keys.borrow_mut().pop_front() {
             for k in &keys {
+                if let Some(a) = self.instant_answer(k) {
+                    return Ok(Some(a));
+                }
                 match ed.key(k) {
                     Step::Done(s) => return Ok(Some(s)),
                     Step::Abort => return Ok(None),
@@ -1118,11 +1125,11 @@ impl App {
                 crossterm::cursor::MoveTo(0, h.saturating_sub(1)),
                 Clear(ClearType::CurrentLine),
                 crossterm::style::Print(prompt),
-                crossterm::style::Print(
-                    default
-                        .map(|d| format!(" (default: {d}): "))
-                        .unwrap_or_else(|| ": ".into())
-                )
+                crossterm::style::Print(match default {
+                    _ if prompt.ends_with(' ') => String::new(),
+                    Some(d) => format!(" (default: {d}): "),
+                    None => ": ".into(),
+                })
             );
             let _ = out.flush();
             let mut buf = String::new();
@@ -1140,6 +1147,9 @@ impl App {
     /// possible completions (if shown) in the rows above it.
     fn minibuffer(&self, prompt: &str, default: Option<&str>, mut ed: LineEditor) -> Result<Option<String>> {
         let prompt = match default {
+            // a prompt ending with a space is shown as is (y-or-n-p,
+            // read-char-choice); others get Magit's ": "
+            _ if prompt.ends_with(' ') => prompt.to_string(),
             Some(d) => format!("{prompt} (default: {d}): "),
             None => format!("{prompt}: "),
         };
@@ -1197,7 +1207,11 @@ impl App {
                 continue;
             }
             msg.clear();
-            match ed.key(&Key::from_event(&ev)) {
+            let key = Key::from_event(&ev);
+            if let Some(a) = self.instant_answer(&key) {
+                break Some(a);
+            }
+            match ed.key(&key) {
                 Step::Done(s) => break Some(s),
                 Step::Abort => break None,
                 Step::Message(m) if m.starts_with('[') => msg = m,
@@ -1223,17 +1237,43 @@ impl App {
         Ok(result)
     }
 
-    /// y-or-n-p (no history)
-    fn yes_no(&self, prompt: &str) -> Result<bool> {
+    /// The answer KEY gives at once to the question being read.
+    fn instant_answer(&self, key: &Key) -> Option<String> {
+        if key.ctrl {
+            return None;
+        }
+        self.instant_keys.borrow().iter().find(|(k, _)| *k == key.code).map(|(_, a)| a.clone())
+    }
+
+    /// read_line_hist with the KEYS answering at once.
+    fn read_instant(&self, prompt: &str, keys: Vec<(String, String)>) -> Result<Option<String>> {
+        *self.instant_keys.borrow_mut() = keys;
+        let r = self.read_line_hist(prompt, None, Hist::None, None);
+        self.instant_keys.borrow_mut().clear();
+        r
+    }
+
+    /// y-or-n-p: PROMPT and "(y or n) " (after a space unless it ends
+    /// with one); `y`/`Y`/SPC answer yes, `n`/`N`/DEL no, anything else
+    /// (RET too) asks again. The answer is echoed after the prompt.
+    fn yes_no(&mut self, prompt: &str) -> Result<bool> {
+        let prompt = format!("{}(y or n) ", padded(prompt));
         loop {
-            let Some(ans) = self.read_line_hist(&format!("{prompt} (y/n)"), Some("n"), Hist::None, None)? else {
+            let keys = ["y", "Y", " ", "n", "N"].iter().map(|k| (k.to_string(), k.to_string()));
+            let keys = keys.chain([("backspace".to_string(), "\u{7f}".to_string())]).collect();
+            let Some(ans) = self.read_instant(&prompt, keys)? else {
                 return Ok(false);
             };
-            match ans.trim().to_lowercase().as_str() {
-                "y" | "yes" => return Ok(true),
-                "n" | "no" | "" => return Ok(false),
-                _ => continue,
-            }
+            let yes = match ans.as_str() {
+                "y" | "Y" | " " => true,
+                "n" | "N" | "\u{7f}" => false,
+                _ => {
+                    self.set_msg("Please answer y or n");
+                    continue;
+                }
+            };
+            self.set_msg(&format!("{prompt}{}", if yes { 'y' } else { 'n' }));
+            return Ok(yes);
         }
     }
 
@@ -1241,7 +1281,7 @@ impl App {
     /// ask again).
     fn yes_or_no_p(&mut self, prompt: &str) -> Result<bool> {
         loop {
-            let Some(ans) = self.read_line_hist(&format!("{prompt} (yes or no)"), None, Hist::None, None)? else {
+            let Some(ans) = self.read_line_hist(&format!("{}(yes or no) ", padded(prompt)), None, Hist::None, None)? else {
                 return Ok(false);
             };
             match ans.trim_end_matches(['\n', '\r']).to_lowercase().as_str() {
@@ -5085,7 +5125,7 @@ impl App {
         if smerge::match_conflict(&text, pos, &name).is_err() && (how != Keep::Current || discard) {
             pos = smerge::next_conflict(&text, pos);
             if how == Keep::Current {
-                let prompt = "Keep side: [o]urs/upper, [b]ase, [t]heirs/lower, or [C-g] to abort";
+                let prompt = "Keep side: [o]urs/upper, [b]ase, [t]heirs/lower, or [C-g] to abort ";
                 how = match self.read_char_choice(prompt, &['o', 'b', 't'])? {
                     Some('o') => Keep::Upper,
                     Some('b') => Keep::Base,
@@ -5283,7 +5323,7 @@ impl App {
         if files.len() > 1 {
             let list: Vec<String> = files.iter().map(|f| format!("  {f}")).collect();
             let prompt = format!(
-                "For these {} files\n{}\ncheckout:\n[o]ur stage, [t]heir stage, [c]onflict, decide [i]ndividually, or [C-g] to abort",
+                "For these {} files\n{}\ncheckout:\n[o]ur stage, [t]heir stage, [c]onflict, decide [i]ndividually, or [C-g] to abort ",
                 files.len(),
                 list.join("\n")
             );
@@ -5297,7 +5337,7 @@ impl App {
             let a = match arg {
                 Some(a) => a,
                 None => {
-                    let prompt = format!("For {file} checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort");
+                    let prompt = format!("For {file} checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort ");
                     match self.read_char_choice(&prompt, &['o', 't', 'c'])?.and_then(stage) {
                         Some(a) => a,
                         None => {
@@ -6851,7 +6891,8 @@ impl App {
     /// read-char-choice: one of CHOICES (none: C-g).
     fn read_char_choice(&mut self, prompt: &str, choices: &[char]) -> Result<Option<char>> {
         loop {
-            let Some(ans) = self.read_line_hist(prompt, None, Hist::None, None)? else {
+            let keys = choices.iter().map(|c| (c.to_string(), c.to_string())).collect();
+            let Some(ans) = self.read_instant(prompt, keys)? else {
                 return Ok(None);
             };
             let mut it = ans.trim().chars();
@@ -8242,4 +8283,14 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
         app.load_history(f);
     }
     app.run()
+}
+
+/// PROMPT followed by a space unless empty or ending with one (the
+/// `padded` of y-or-n-p and yes-or-no-p).
+fn padded(prompt: &str) -> String {
+    if prompt.is_empty() || prompt.ends_with(' ') {
+        prompt.to_string()
+    } else {
+        format!("{prompt} ")
+    }
 }

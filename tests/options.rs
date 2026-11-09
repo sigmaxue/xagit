@@ -80,7 +80,7 @@ fn no_confirm() {
     app.refresh();
     app.script_answers(&["n"]);
     press(&mut app, &["S"]);
-    assert_eq!(app.prompts().last().unwrap(), "Stage all changes? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Stage all changes? (y or n) ");
     // t: nothing is confirmed
     app.set_options(options("magit-no-confirm t"));
     let n = app.prompts().len();
@@ -96,7 +96,7 @@ fn abort_merge() {
     let mut app = App::new(g.clone());
     app.script_answers(&["n"]);
     press(&mut app, &["m", "a"]);
-    assert_eq!(app.prompts().last().unwrap(), "Abort merge? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Abort merge? (y or n) ");
     assert_eq!(app.message(), "Abort");
     assert!(g.merge_in_progress());
     app.script_answers(&["y"]);
@@ -132,7 +132,7 @@ fn abort_cherry_pick_and_revert() {
     let mut app = App::new(g.clone());
     app.script_answers(&["y"]);
     press(&mut app, &["A", "a"]);
-    assert_eq!(app.prompts().last().unwrap(), "Really abort cherry-pick? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Really abort cherry-pick? (y or n) ");
     assert!(!g.cherry_in_progress(), "{}", app.message());
     commit(&g, "file.txt", "ours 2\n", "ours 2");
     let _ = g.git_interactive(&["revert", "--no-edit", "HEAD~1"]);
@@ -140,7 +140,7 @@ fn abort_cherry_pick_and_revert() {
     app.refresh();
     app.script_answers(&["y"]);
     press(&mut app, &["V", "a"]);
-    assert_eq!(app.prompts().last().unwrap(), "Really abort revert? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Really abort revert? (y or n) ");
     assert!(!g.revert_in_progress(), "{}", app.message());
 }
 
@@ -154,7 +154,7 @@ fn bisect_reset() {
     let mut app = App::new(g.clone());
     app.script_answers(&["n"]);
     press(&mut app, &["B", "r"]);
-    assert_eq!(app.prompts(), ["Reset bisect? (y/n)"]);
+    assert_eq!(app.prompts(), ["Reset bisect? (y or n) "]);
     assert!(g.bisect_in_progress());
     app.set_options(options("magit-no-confirm reset-bisect"));
     press(&mut app, &["B", "r"]);
@@ -229,13 +229,40 @@ fn read_and_drop_stashes() {
     let n = app.prompts().len();
     app.script_answers(&["y", "yes"]);
     app.press("k").unwrap();
-    let p = "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (yes or no)";
+    let p = "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (yes or no) ";
     assert_eq!(app.prompts()[n..], [p, p], "y isn't an answer");
     assert!(stash_list(&g).is_empty());
     assert!(app.message().starts_with("Deleted refs/stash@{0} (was "), "{}", app.message());
     // no stashes
     press(&mut app, &["z", "k"]);
     assert_eq!(app.message(), "No stashes");
+}
+
+#[test]
+fn y_or_n_p() {
+    let (_td, g, _) = repo_with_commit();
+    write(&g, "file.txt", "changed\n");
+    let mut app = App::new(g.clone());
+    goto(&mut app, |t| t.starts_with("modified"));
+    // only y/Y/SPC and n/N/DEL answer: "yes", RET (empty) ask again
+    app.script_answers(&["yes", "", "N"]);
+    app.press("k").unwrap();
+    let p = "Discard unstaged changes in \"file.txt\"? (y or n) ";
+    assert_eq!(app.prompts(), [p; 3]);
+    assert_eq!(app.message(), "Abort");
+    assert_eq!(read(&g, "file.txt"), "changed\n");
+    // the key answers at once, the answer echoed
+    app.script_keys(&["Y"]);
+    app.press("k").unwrap();
+    assert_eq!(read(&g, "file.txt"), "hello\n");
+    assert_eq!(app.message(), format!("{p}y"));
+    write(&g, "file.txt", "changed\n");
+    app.refresh();
+    goto(&mut app, |t| t.starts_with("modified"));
+    app.script_keys(&["x", "backspace"]);
+    app.press("k").unwrap();
+    assert_eq!(app.message(), "Abort");
+    assert_eq!(read(&g, "file.txt"), "changed\n");
 }
 
 #[test]
@@ -248,7 +275,7 @@ fn slow_confirm() {
     goto(&mut app, |t| t.starts_with("modified"));
     app.script_answers(&["n", "no"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Discard unstaged changes in \"file.txt\"? (yes or no)"; 2]);
+    assert_eq!(app.prompts(), ["Discard unstaged changes in \"file.txt\"? (yes or no) "; 2]);
     assert_eq!(app.message(), "Abort");
     assert_eq!(read(&g, "file.txt"), "changed\n");
     app.script_answers(&["YES"]);
@@ -260,14 +287,14 @@ fn slow_confirm() {
     goto(&mut app, |t| t.starts_with("modified"));
     app.script_answers(&["n"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "Discard unstaged changes in \"file.txt\"? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Discard unstaged changes in \"file.txt\"? (y or n) ");
     // (confirmed when something is staged already)
     write(&g, "b.txt", "b\n");
     git(&g, &["add", "b.txt"]);
     app.refresh();
     app.script_answers(&["yes"]);
     app.press("S").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "Stage all changes? (yes or no)");
+    assert_eq!(app.prompts().last().unwrap(), "Stage all changes? (yes or no) ");
     assert_eq!(g.staged_files(), ["b.txt", "file.txt"]);
     git(&g, &["reset", "-q", "--", "b.txt"]);
     std::fs::remove_file(g.toplevel.join("b.txt")).unwrap();
@@ -283,7 +310,7 @@ fn slow_confirm() {
     press(&mut app, &["C-SPC", "C-n"]);
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (y or n) ");
     assert!(stash_list(&g).is_empty());
 }
 
@@ -302,7 +329,7 @@ fn published_branches() {
     press(&mut app, &["c", "e"]);
     assert_eq!(
         app.prompts().last().unwrap(),
-        "This commit has already been published to origin/master.\nDo you really want to modify it? (y/n)"
+        "This commit has already been published to origin/master.\nDo you really want to modify it? (y or n) "
     );
     assert_eq!(app.message(), "Abort");
     assert_eq!(g.rev_parse("HEAD").unwrap(), head);
@@ -313,7 +340,7 @@ fn published_branches() {
     assert_eq!(
         app.prompts().last().unwrap(),
         "origin/master\norigin/main\n\nThis commit has already been published to 2 public branches.\n\
-         Do you really want to modify it? (y/n)"
+         Do you really want to modify it? (y or n) "
     );
     // rebasing them
     app.script_answers(&["n"]);
@@ -323,7 +350,7 @@ fn published_branches() {
     assert_eq!(
         app.prompts().last().unwrap(),
         "origin/master\norigin/main\n\nSome of these commits have already been published to 2 public branches.\n\
-         Do you really want to modify them? (y/n)"
+         Do you really want to modify them? (y or n) "
     );
     assert_eq!(g.rev_parse("HEAD").unwrap(), head);
     // none: not asked
@@ -353,7 +380,7 @@ fn branch_reset() {
     write(&g, "file.txt", "changed\n");
     app.script_answers(&["master", "other", "n", "no"]);
     press(&mut app, &["b", "x"]);
-    assert_eq!(app.prompts()[3..], ["Reset master to", "Uncommitted changes will be lost.  Proceed? (yes or no)", "Uncommitted changes will be lost.  Proceed? (yes or no)"]);
+    assert_eq!(app.prompts()[3..], ["Reset master to", "Uncommitted changes will be lost.  Proceed? (yes or no) ", "Uncommitted changes will be lost.  Proceed? (yes or no) "]);
     assert_eq!(app.message(), "Abort");
     assert_eq!(g.rev_parse("HEAD").unwrap(), two);
     app.script_answers(&["master", "other", "yes"]);
@@ -393,7 +420,7 @@ fn discard_untracked_to_trash() {
     goto(&mut app, |t| t.trim() == "junk.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Trash \"junk.txt\"? (y/n)"]);
+    assert_eq!(app.prompts(), ["Trash \"junk.txt\"? (y or n) "]);
     assert!(!exists(&g, "junk.txt"));
     assert_eq!(names(&trash), ["junk.txt"]);
     // magit-no-confirm discard doesn't cover trash
@@ -444,7 +471,7 @@ fn discard_untracked_delete() {
     press(&mut app, &["C-SPC", "C-n"]);
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["a.txt\nb.txt\n\nDelete 2 files? (y/n)"]);
+    assert_eq!(app.prompts(), ["a.txt\nb.txt\n\nDelete 2 files? (y or n) "]);
     assert!(!exists(&g, "a.txt") && !exists(&g, "b.txt"));
     assert!(names(&trash).is_empty(), "deleted, not trashed");
     // the untracked section: magit-list-untracked-files, directories
@@ -459,7 +486,7 @@ fn discard_untracked_delete() {
     let n = app.prompts().len();
     assert_eq!(
         app.prompts()[n - 2..],
-        ["d.txt\ndir/\n\nDelete 2 files? (y/n)", "Recursively delete dir/? (yes, no, all, quit, help)"]
+        ["d.txt\ndir/\n\nDelete 2 files? (y or n) ", "Recursively delete dir/? (yes, no, all, quit, help)"]
     );
     assert_eq!(app.message(), "Quit");
     assert!(!exists(&g, "d.txt") && exists(&g, "dir/c.txt"));
@@ -491,7 +518,7 @@ fn worktree_delete() {
     let wt_path = path(&wt);
     app.script_answers(&[&wt_path, "y"]);
     press(&mut app, &["%", "k"]);
-    assert_eq!(app.prompts().last().unwrap(), "Trash worktree \"wt\"? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Trash worktree \"wt\"? (y or n) ");
     assert!(!wt.exists() && trash.join("wt").is_dir(), "{}", app.message());
     let list = g.git_string(&["worktree", "list", "--porcelain"]).unwrap();
     assert!(!list.contains(&format!("worktree {wt_path}\n")), "pruned: {list}");
@@ -500,7 +527,7 @@ fn worktree_delete() {
     app.set_options(options(&format!("trash-directory {}\nmagit-no-confirm trash", trash.display())));
     app.script_answers(&[&path(&wt2), "n"]);
     press(&mut app, &["%", "k"]);
-    assert_eq!(app.prompts().last().unwrap(), "Trash worktree \"wt2\" despite uncommitted changes? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Trash worktree \"wt2\" despite uncommitted changes? (y or n) ");
     assert_eq!(app.message(), "Abort");
     assert!(wt2.exists());
     // locked
@@ -512,7 +539,7 @@ fn worktree_delete() {
     app.set_options(options(&format!("trash-directory {}\nmagit-delete-by-moving-to-trash nil", trash.display())));
     app.script_answers(&[&path(&wt2), "y"]);
     press(&mut app, &["%", "k"]);
-    assert_eq!(app.prompts().last().unwrap(), "Delete worktree \"wt2\" despite uncommitted changes? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Delete worktree \"wt2\" despite uncommitted changes? (y or n) ");
     assert!(!wt2.exists(), "{}", app.message());
     assert!(!trash.join("wt2").exists());
     assert!(!g.git_string(&["worktree", "list"]).unwrap().contains("wt2"));

@@ -78,7 +78,7 @@ fn staged_new_files() {
     goto_file(&mut app, "Staged changes", "new file   new.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Trash \"new.txt\"? (y/n)"]);
+    assert_eq!(app.prompts(), ["Trash \"new.txt\"? (y or n) "]);
     assert!(!exists(&g, "new.txt"));
     assert!(ttd.path().join("trash/new.txt").is_file());
     assert_eq!(status(&g), "");
@@ -89,7 +89,7 @@ fn staged_new_files() {
     goto_file(&mut app, "Staged changes", "new file   new.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "Discard staged changes in \"new.txt\"? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Discard staged changes in \"new.txt\"? (y or n) ");
     assert_eq!(status(&g), "?? new.txt");
     assert_eq!(read(&g, "new.txt"), "changed\n");
 }
@@ -105,7 +105,7 @@ fn staged_changes_keep_unstaged_ones() {
     goto_file(&mut app, "Staged changes", "modified   f.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Discard staged changes in \"f.txt\"? (y/n)"]);
+    assert_eq!(app.prompts(), ["Discard staged changes in \"f.txt\"? (y or n) "]);
     assert_eq!(read(&g, "f.txt"), "a\nb\nc\nd\ne\nf\nG\n", "the unstaged change stays");
     assert_eq!(status(&g), " M f.txt");
     // declined: nothing changes
@@ -125,13 +125,13 @@ fn resurrect_deleted_files() {
     goto_file(&mut app, "Staged changes", "deleted    file.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Resurrect \"file.txt\"? (y/n)"]);
+    assert_eq!(app.prompts(), ["Resurrect \"file.txt\"? (y or n) "]);
     assert_eq!(status(&g), " D file.txt");
     // unstaged: checked out
     goto_file(&mut app, "Unstaged changes", "deleted    file.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "Resurrect \"file.txt\"? (y/n)");
+    assert_eq!(app.prompts().last().unwrap(), "Resurrect \"file.txt\"? (y or n) ");
     assert_eq!(read(&g, "file.txt"), "hello\n");
     assert_eq!(status(&g), "");
 }
@@ -145,7 +145,7 @@ fn undo_renames() {
     goto_file(&mut app, "Staged changes", "renamed    file.txt -> sub/moved.txt");
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Undo rename file.txt -> sub/moved.txt? (y/n)"]);
+    assert_eq!(app.prompts(), ["Undo rename file.txt -> sub/moved.txt? (y or n) "]);
     assert_eq!(status(&g), "");
     assert_eq!(read(&g, "file.txt"), "hello\n");
     // the renamed file is gone: the source is unstaged again
@@ -173,7 +173,7 @@ fn several_kinds() {
     app.press("k").unwrap();
     assert_eq!(
         app.prompts(),
-        ["Resurrect \"file.txt\"? (y/n)", "Trash \"n.txt\"? (y/n)", "Discard staged changes in \"a.txt\"? (y/n)"]
+        ["Resurrect \"file.txt\"? (y or n) ", "Trash \"n.txt\"? (y or n) ", "Discard staged changes in \"a.txt\"? (y or n) "]
     );
     assert_eq!(status(&g), " D file.txt");
     assert_eq!(read(&g, "a.txt"), "a\n");
@@ -212,7 +212,7 @@ fn resolve_conflicts() {
     goto_file(&mut app, "Unstaged changes", "unmerged   c1.txt (both added)");
     app.script_answers(&["x", "t"]);
     app.press("k").unwrap();
-    let p = "For c1.txt checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort";
+    let p = "For c1.txt checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort ";
     assert_eq!(app.prompts(), [p, p]);
     assert_eq!(read(&g, "c1.txt"), "theirs\n");
     assert!(status(&g).contains("M  c1.txt"), "staged: {}", status(&g));
@@ -225,9 +225,9 @@ fn resolve_conflicts() {
     assert_eq!(
         app.prompts()[n - 3..],
         [
-            "For these 2 files\n  c2.txt\n  c3.txt\ncheckout:\n[o]ur stage, [t]heir stage, [c]onflict, decide [i]ndividually, or [C-g] to abort",
-            "For c2.txt checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort",
-            "For c3.txt checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort",
+            "For these 2 files\n  c2.txt\n  c3.txt\ncheckout:\n[o]ur stage, [t]heir stage, [c]onflict, decide [i]ndividually, or [C-g] to abort ",
+            "For c2.txt checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort ",
+            "For c3.txt checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort ",
         ]
     );
     assert_eq!(read(&g, "c2.txt"), "ours\n");

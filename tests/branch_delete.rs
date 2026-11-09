@@ -48,7 +48,7 @@ fn current_branch() {
     // check out the main branch first: feature is not merged into it
     let n = app.prompts().len();
     delete(&mut app, &["feature", "c", "y"]);
-    assert_eq!(prompts_since(&app, n)[2], "Delete unmerged branch feature? (y/n)");
+    assert_eq!(prompts_since(&app, n)[2], "Delete unmerged branch feature? (y or n) ");
     assert_eq!(g.current_branch().as_deref(), Some("master"));
     assert!(!has_ref(&g, "refs/heads/feature"));
 }
@@ -107,7 +107,7 @@ fn remote_tracking_branches() {
     let mut app = App::new(g.clone());
     // just the local ref
     delete(&mut app, &["origin/x", "n"]);
-    assert_eq!(app.prompts(), ["Delete branch", "Deleting local refs/remotes/origin/x.  Also delete on origin? (y/n)"]);
+    assert_eq!(app.prompts(), ["Delete branch", "Deleting local refs/remotes/origin/x.  Also delete on origin? (y or n) "]);
     assert!(!has_ref(&g, "refs/remotes/origin/x"));
     assert!(on_origin("x"));
     assert!(app.message().starts_with("Delete refs/remotes/origin/x (was "), "{}", app.message());
@@ -183,7 +183,7 @@ fn pull_request_remote() {
     // removed if confirmed
     let n = app.prompts().len();
     delete(&mut app, &["pr-b", "y"]);
-    assert_eq!(prompts_since(&app, n)[1], "Also delete remote fork (no pull-request branch remains)? (y/n)");
+    assert_eq!(prompts_since(&app, n)[1], "Also delete remote fork (no pull-request branch remains)? (y or n) ");
     assert!(!has_ref(&g, "refs/heads/pr-b"), "{}", app.message());
     assert!(!g.remotes().contains(&"fork".to_string()));
     // else only the refspec goes; the pushRemote is unset with the branch

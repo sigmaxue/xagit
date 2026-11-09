@@ -311,7 +311,7 @@ fn branch_delete_rename_and_reset() {
     // an unmerged branch is only deleted when confirmed
     app.script_answers(&["side", "n"]);
     press(&mut app, &["b", "k"]);
-    assert_eq!(app.prompts(), ["Delete branch", "Delete unmerged branch side? (y/n)"]);
+    assert_eq!(app.prompts(), ["Delete branch", "Delete unmerged branch side? (y or n) "]);
     assert!(branches(&g).contains(&"side".to_string()));
     // or forced
     app.script_answers(&["side"]);

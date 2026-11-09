@@ -213,14 +213,14 @@ fn delete_things() {
     goto(&mut app, "topic           topic work");
     app.script_answers(&["", "y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["Delete branch", "Delete unmerged branch topic? (y/n)"]);
+    assert_eq!(app.prompts(), ["Delete branch", "Delete unmerged branch topic? (y or n) "]);
     assert!(!has_ref(&g, "refs/heads/topic"));
     // the selected branches
     goto(&mut app, "a               initial");
     press(&mut app, &["C-SPC", "C-n"]);
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(last_prompt(&app), "Delete 2 branches? (y/n)");
+    assert_eq!(last_prompt(&app), "Delete 2 branches? (y or n) ");
     assert!(!has_ref(&g, "refs/heads/a") && !has_ref(&g, "refs/heads/b"), "{}", app.message());
     // a tag: magit-tag-delete
     goto(&mut app, "v1.0            release one");
@@ -271,7 +271,7 @@ fn rename_things() {
     // the push-remote setup moves along; the push-target is renamed on
     // the remote if confirmed
     assert_eq!(g.git_string(&["config", "branch.main.pushRemote"]).unwrap(), "upstream");
-    assert_eq!(app.prompts()[6], "Also rename \"master\" to \"main\" on \"upstream\"? (y/n)");
+    assert_eq!(app.prompts()[6], "Also rename \"master\" to \"main\" on \"upstream\"? (y or n) ");
 }
 
 #[test]
