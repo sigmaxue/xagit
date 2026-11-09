@@ -1233,6 +1233,31 @@ impl App {
         }
     }
 
+    /// yes-or-no-p: PROMPT answered with "yes" or "no" (other answers
+    /// ask again).
+    fn yes_or_no_p(&mut self, prompt: &str) -> Result<bool> {
+        loop {
+            let Some(ans) = self.read_line_hist(&format!("{prompt} (yes or no)"), None, Hist::None, None)? else {
+                return Ok(false);
+            };
+            match ans.trim_end_matches(['\n', '\r']).to_lowercase().as_str() {
+                "yes" => return Ok(true),
+                "no" => return Ok(false),
+                _ => self.set_msg("Please answer yes or no."),
+            }
+        }
+    }
+
+    /// magit-y-or-n-p: yes-or-no-p if ACTION is in magit-slow-confirm
+    /// (or that is t), else y-or-n-p.
+    fn magit_y_or_n_p(&mut self, prompt: &str, action: Option<&str>) -> Result<bool> {
+        if self.options.slow_confirm(action) {
+            self.yes_or_no_p(prompt)
+        } else {
+            self.yes_no(prompt)
+        }
+    }
+
     /// magit-completing-read of one of CHOICES (the first being the
     /// default without DEFAULT) with minibuffer-history; an input that
     /// is not a choice selects the first choice containing it.
@@ -2662,26 +2687,7 @@ impl App {
                 };
                 self.branch_rename(&old, &new)?;
             }
-            "branch-reset" => {
-                let bs = g!().branches();
-                if let Some(b) = self.pick_rev("Reset branch", &bs, None)? {
-                    if let Some(rev) = self.read_rev("Reset to", Some("HEAD"))? {
-                        g!().git_interactive(&["branch", "-f", b, &rev])?;
-                        if g!().current_branch().as_deref() == Some(b.as_str()) {
-                            let _ = g!().git_interactive(&["reset", "--keep", &rev]);
-                        }
-                        // with a prefix argument the branch reset to
-                        // becomes the upstream
-                        let is_branch = g!().git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{rev}")])
-                            || g!().git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/remotes/{rev}")]);
-                        if self.prefix_arg.is_some() && is_branch {
-                            g!().git_interactive(&["branch", &format!("--set-upstream-to={rev}"), b])?;
-                        }
-                        self.set_msg("branch reset");
-                        self.refresh();
-                    }
-                }
-            }
+            "branch-reset" => self.branch_reset()?,
             "branch-delete" => self.branch_delete()?,
 
             // -------- remote menu
@@ -4539,7 +4545,7 @@ impl App {
         if self.options.no_confirm(action) {
             return Ok(true);
         }
-        self.yes_no(&format!("{prompt}?"))
+        self.magit_y_or_n_p(&format!("{prompt}?"), Some(action))
     }
 
     /// magit-read-stash: one of the stashes ("stash@{N} subject",
@@ -5586,7 +5592,7 @@ impl App {
                 if !dirs.is_empty() {
                     let what = if dirs.len() == 1 { "directory" } else { "directories" };
                     let names = dirs.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(",");
-                    if !self.yes_no(&format!("Recursively delete {what} \"{names}\":"))? {
+                    if !self.yes_or_no_p(&format!("Recursively delete {what} \"{names}\":"))? {
                         self.set_msg("Abort");
                         return Ok(());
                     }
@@ -5765,7 +5771,7 @@ impl App {
             let (o, n) = (format!("{remote}/{old}"), format!("{remote}/{new}"));
             if self.git.rev_verify(&o)
                 && !self.git.rev_verify(&n)
-                && self.yes_no(&format!("Also rename \"{old}\" to \"{new}\" on \"{remote}\"?"))?
+                && self.magit_y_or_n_p(&format!("Also rename \"{old}\" to \"{new}\" on \"{remote}\"?"), None)?
             {
                 let src = format!("refs/remotes/{o}:refs/heads/{new}");
                 let del = format!(":refs/heads/{old}");
@@ -5949,6 +5955,58 @@ impl App {
             .or_else(|| atrev.iter().find(|b| Some(*b) != current.as_ref()).cloned())
             .or(previous)
             .or_else(|| atrev.first().cloned())
+    }
+
+    /// magit-branch-reset: reset BRANCH (read, the local branch at point
+    /// or the current one the default) to a revision (the branch or
+    /// commit at point, else its upstream, the default). The current
+    /// branch is reset hard, uncommitted changes have to be confirmed
+    /// (yes-or-no-p); another one with update-ref. With a prefix
+    /// argument a branch reset to becomes the upstream.
+    fn branch_reset(&mut self) -> Result<()> {
+        let current = self.git.current_branch();
+        let default = self.local_branch_at_point().or_else(|| current.clone());
+        let branches = self.git.branches();
+        let Some(branch) = self.pick_rev("Reset branch", &branches, default.as_deref())?.cloned() else {
+            return Ok(());
+        };
+        // magit-read-branch-or-commit with BRANCH excluded
+        let at_point = self.branch_at_point().filter(|b| *b != branch);
+        let commit = self.commit_at_point().map(|c| self.git.rev_short(&c));
+        let to_default = at_point
+            .or(commit)
+            .or_else(|| self.upstream_branch(&branch))
+            .or_else(|| current.clone().filter(|c| *c != branch));
+        let Some(to) = self.read_rev(&format!("Reset {branch} to"), to_default.as_deref())? else {
+            return Ok(());
+        };
+        if current.as_deref() == Some(branch.as_str()) {
+            let modified = !self.git.staged_files().is_empty() || !self.git.unstaged_files().is_empty();
+            if modified && !self.yes_or_no_p("Uncommitted changes will be lost.  Proceed?")? {
+                self.set_msg("Abort");
+                return Ok(());
+            }
+            if let Err(e) = self.git.reset_hard(&to) {
+                self.refresh();
+                self.set_msg(&format!("{e}"));
+                return Ok(());
+            }
+        } else {
+            let msg = format!("reset: moving to {to}");
+            if let Err(e) = self.git.git_interactive(&["update-ref", "-m", &msg, &format!("refs/heads/{branch}"), &to]) {
+                self.set_msg(&format!("{e}"));
+                return Ok(());
+            }
+        }
+        // magit-branch-p
+        let is_branch = ["refs/heads/", "refs/remotes/"]
+            .iter()
+            .any(|p| self.git.git_ok(&["show-ref", "--verify", "--quiet", &format!("{p}{to}")]));
+        if self.prefix_arg.is_some() && is_branch {
+            self.git.git_interactive(&["branch", &format!("--set-upstream-to={to}"), &branch])?;
+        }
+        self.refresh();
+        Ok(())
     }
 
     /// magit-branch-delete: delete the branches selected in the refs
@@ -7361,7 +7419,7 @@ impl App {
     /// magit--merge-absorb asks before merging the main branch into another one.
     fn confirm_absorb(&mut self, branch: &str) -> Result<bool> {
         if self.git.main_branch().as_deref() == Some(branch)
-            && !self.yes_no(&format!("Do you really want to merge `{branch}' into another branch?"))?
+            && !self.yes_or_no_p(&format!("Do you really want to merge `{branch}' into another branch?"))?
         {
             self.set_msg("Abort");
             return Ok(false);

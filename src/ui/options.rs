@@ -5,6 +5,7 @@
 //! ```text
 //! magit-no-confirm discard drop-stashes set-and-push
 //! magit-no-confirm t
+//! magit-slow-confirm discard drop-stashes
 //! magit-refs-filter-alist ^refs/pullreqs/ nil
 //! magit-refs-filter-alist ^origin/pr- nil
 //! magit-visit-ref-behavior create-branch checkout-branch
@@ -12,7 +13,7 @@
 //! transient-show-common-commands t
 //! ```
 //!
-//! magit-no-confirm and magit-visit-ref-behavior take a list of symbols
+//! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
 //! (or `t` / `nil`), magit-published-branches a list of branches (or
 //! `nil`), a line setting the whole list. Each
 //! magit-refs-filter-alist line adds an entry: a regexp (Emacs syntax,
@@ -60,6 +61,8 @@ pub const VISIT_REF_BEHAVIORS: &[&str] = &["focus-on-ref", "create-branch", "che
 pub struct Options {
     /// magit-no-confirm: None is t (no action is confirmed)
     pub no_confirm: Option<Vec<String>>,
+    /// magit-slow-confirm: None is t (all actions ask "yes or no")
+    pub slow_confirm: Option<Vec<String>>,
     /// magit-refs-filter-alist
     pub refs_filter: Vec<(Regexp, bool)>,
     /// magit-visit-ref-behavior
@@ -74,6 +77,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             no_confirm: Some(vec!["set-and-push".into()]),
+            slow_confirm: Some(vec!["drop-stashes".into()]),
             refs_filter: Vec::new(),
             visit_ref_behavior: Vec::new(),
             published_branches: vec!["origin/master".into()],
@@ -88,6 +92,14 @@ impl Options {
     /// ngit doesn't have.
     pub fn no_confirm(&self, action: &str) -> bool {
         action != "t" && self.no_confirm.as_ref().is_none_or(|l| l.iter().any(|a| a == action))
+    }
+
+    /// Whether ACTION asks a "yes or no" question (magit-y-or-n-p).
+    pub fn slow_confirm(&self, action: Option<&str>) -> bool {
+        match &self.slow_confirm {
+            None => true,
+            Some(l) => action.is_some_and(|a| l.iter().any(|x| x == a)),
+        }
     }
 
     /// magit-refs--insert-refname-p: the value of the first entry whose
@@ -116,23 +128,8 @@ impl Options {
             let name = words.next().unwrap_or_default();
             let values: Vec<&str> = words.collect();
             let err = match name {
-                "magit-no-confirm" => match values.as_slice() {
-                    ["t"] => {
-                        o.no_confirm = None;
-                        None
-                    }
-                    ["nil"] => {
-                        o.no_confirm = Some(Vec::new());
-                        None
-                    }
-                    vs => match vs.iter().find(|v| !CONFIRM_ACTIONS.contains(v)) {
-                        Some(v) => Some(format!("unknown action {v}")),
-                        None => {
-                            o.no_confirm = Some(vs.iter().map(|v| v.to_string()).collect());
-                            None
-                        }
-                    },
-                },
+                "magit-no-confirm" => actions(&values).map(|a| o.no_confirm = a).err(),
+                "magit-slow-confirm" => actions(&values).map(|a| o.slow_confirm = a).err(),
                 "magit-visit-ref-behavior" => {
                     let vs: &[&str] = if values == ["nil"] { &[] } else { &values };
                     match vs.iter().find(|v| !VISIT_REF_BEHAVIORS.contains(v)) {
@@ -184,6 +181,18 @@ impl Options {
     }
 }
 
+/// A list of magit--confirm-actions, `t` (None) or `nil`.
+fn actions(values: &[&str]) -> Result<Option<Vec<String>>, String> {
+    match values {
+        ["t"] => Ok(None),
+        ["nil"] => Ok(Some(Vec::new())),
+        vs => match vs.iter().find(|v| !CONFIRM_ACTIONS.contains(v)) {
+            Some(v) => Err(format!("unknown action {v}")),
+            None => Ok(Some(vs.iter().map(|v| v.to_string()).collect())),
+        },
+    }
+}
+
 /// `~/.config/ngit/options`
 pub fn default_options_file() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -214,6 +223,15 @@ mod tests {
         let (o, _) = Options::parse("magit-published-branches origin/main upstream/main");
         assert_eq!(o.published_branches, ["origin/main", "upstream/main"]);
         assert!(!o.show_common_commands);
+        let d = Options::default();
+        assert!(d.slow_confirm(Some("drop-stashes")) && !d.slow_confirm(Some("discard")) && !d.slow_confirm(None));
+        let (o, e) = Options::parse("magit-slow-confirm t");
+        assert!(e.is_empty() && o.slow_confirm(None) && o.slow_confirm(Some("discard")));
+        let (o, e) = Options::parse("magit-slow-confirm discard\nmagit-slow-confirm nope");
+        assert!(o.slow_confirm(Some("discard")) && !o.slow_confirm(Some("drop-stashes")));
+        assert_eq!(e, ["2: unknown action nope"]);
+        let (o, _) = Options::parse("magit-slow-confirm nil");
+        assert!(!o.slow_confirm(Some("drop-stashes")));
         let (o, e) = Options::parse("transient-show-common-commands t\ntransient-show-common-commands 1");
         assert!(o.show_common_commands);
         assert_eq!(e, ["2: expected t or nil"]);

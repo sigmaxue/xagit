@@ -222,18 +222,69 @@ fn read_and_drop_stashes() {
     assert_eq!(app.prompts()[n..], ["Drop stash"]);
     assert!(app.message().starts_with("Deleted refs/stash@{1} (was "), "{}", app.message());
     assert_eq!(stash_list(&g), ["On master: second", "On master: second"]);
-    // a region: confirmed (drop-stashes), dropped from the last
+    // a region: confirmed (drop-stashes) with "yes or no"
+    // (magit-slow-confirm), dropped from the last
     goto(&mut app, |t| t.starts_with("stash@{0}"));
     press(&mut app, &["C-SPC", "C-n"]);
-    app.script_answers(&["y"]);
+    let n = app.prompts().len();
+    app.script_answers(&["y", "yes"]);
     app.press("k").unwrap();
-    let p = app.prompts().last().unwrap().clone();
-    assert_eq!(p, "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (y/n)");
+    let p = "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (yes or no)";
+    assert_eq!(app.prompts()[n..], [p, p], "y isn't an answer");
     assert!(stash_list(&g).is_empty());
     assert!(app.message().starts_with("Deleted refs/stash@{0} (was "), "{}", app.message());
     // no stashes
     press(&mut app, &["z", "k"]);
     assert_eq!(app.message(), "No stashes");
+}
+
+#[test]
+fn slow_confirm() {
+    let (_td, g, _) = repo_with_commit();
+    write(&g, "file.txt", "changed\n");
+    let mut app = App::new(g.clone());
+    // magit-slow-confirm t: all of magit-confirm asks "yes or no"
+    app.set_options(options("magit-slow-confirm t"));
+    goto(&mut app, |t| t.starts_with("modified"));
+    app.script_answers(&["n", "no"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts(), ["Discard unstaged changes in \"file.txt\"? (yes or no)"; 2]);
+    assert_eq!(app.message(), "Abort");
+    assert_eq!(read(&g, "file.txt"), "changed\n");
+    app.script_answers(&["YES"]);
+    app.press("k").unwrap();
+    assert_eq!(read(&g, "file.txt"), "hello\n", "{}", app.message());
+    // by action
+    write(&g, "file.txt", "changed\n");
+    app.set_options(options("magit-slow-confirm stage-all-changes"));
+    goto(&mut app, |t| t.starts_with("modified"));
+    app.script_answers(&["n"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Discard unstaged changes in \"file.txt\"? (y/n)");
+    // (confirmed when something is staged already)
+    write(&g, "b.txt", "b\n");
+    git(&g, &["add", "b.txt"]);
+    app.refresh();
+    app.script_answers(&["yes"]);
+    app.press("S").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Stage all changes? (yes or no)");
+    assert_eq!(g.staged_files(), ["b.txt", "file.txt"]);
+    git(&g, &["reset", "-q", "--", "b.txt"]);
+    std::fs::remove_file(g.toplevel.join("b.txt")).unwrap();
+    // nil: drop-stashes asks "y or n"
+    app.set_options(options("magit-slow-confirm nil"));
+    git(&g, &["stash"]);
+    git(&g, &["stash", "apply"]);
+    git(&g, &["stash"]);
+    app.refresh();
+    goto(&mut app, |t| t.trim() == "Stashes (2)");
+    app.press("TAB").unwrap();
+    goto(&mut app, |t| t.starts_with("stash@{0}"));
+    press(&mut app, &["C-SPC", "C-n"]);
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (y/n)");
+    assert!(stash_list(&g).is_empty());
 }
 
 #[test]
@@ -282,4 +333,38 @@ fn published_branches() {
     press(&mut app, &["c", "e"]);
     assert_eq!(app.prompts().len(), n);
     assert_ne!(g.rev_parse("HEAD").unwrap(), head, "{}", app.message());
+}
+
+#[test]
+fn branch_reset() {
+    let (_td, g, first) = repo_with_commit();
+    commit(&g, "file.txt", "two\n", "two");
+    let two = g.rev_parse("HEAD").unwrap();
+    git(&g, &["branch", "other"]);
+    let mut app = App::new(g.clone());
+    // another branch: update-ref with a reflog message
+    app.script_answers(&["other", &first]);
+    press(&mut app, &["b", "x"]);
+    assert_eq!(app.prompts(), ["Reset branch", "Reset other to"]);
+    assert_eq!(g.rev_parse("other").unwrap(), first, "{}", app.message());
+    let reflog = g.git_string(&["reflog", "-1", "--format=%gs", "other"]).unwrap();
+    assert_eq!(reflog, format!("reset: moving to {first}"));
+    // the current branch with uncommitted changes: yes-or-no-p
+    write(&g, "file.txt", "changed\n");
+    app.script_answers(&["master", "other", "n", "no"]);
+    press(&mut app, &["b", "x"]);
+    assert_eq!(app.prompts()[3..], ["Reset master to", "Uncommitted changes will be lost.  Proceed? (yes or no)", "Uncommitted changes will be lost.  Proceed? (yes or no)"]);
+    assert_eq!(app.message(), "Abort");
+    assert_eq!(g.rev_parse("HEAD").unwrap(), two);
+    app.script_answers(&["master", "other", "yes"]);
+    press(&mut app, &["b", "x"]);
+    assert_eq!(g.rev_parse("HEAD").unwrap(), first, "{}", app.message());
+    assert_eq!(read(&g, "file.txt"), "hello\n", "a hard reset");
+    // untracked files aren't uncommitted changes: not confirmed
+    write(&g, "new.txt", "new\n");
+    let n = app.prompts().len();
+    app.script_answers(&["master", &two]);
+    press(&mut app, &["b", "x"]);
+    assert_eq!(app.prompts().len(), n + 2);
+    assert_eq!(g.rev_parse("HEAD").unwrap(), two);
 }
