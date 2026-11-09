@@ -42,7 +42,7 @@ fn goto(app: &mut App, pred: impl Fn(&str) -> bool) {
         }
         app.press("C-n").unwrap();
     }
-    panic!("no such line");
+    panic!("no such line: {:?}", app.visible_lines().iter().map(|l| l.text.clone()).collect::<Vec<_>>());
 }
 
 /// A merge of "other" into master stopped by a conflict in file.txt.
@@ -367,4 +367,155 @@ fn branch_reset() {
     press(&mut app, &["b", "x"]);
     assert_eq!(app.prompts().len(), n + 2);
     assert_eq!(g.rev_parse("HEAD").unwrap(), two);
+}
+
+/// The names in DIR, sorted.
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect(),
+        Err(_) => Vec::new(),
+    };
+    v.sort();
+    v
+}
+
+#[test]
+fn discard_untracked_to_trash() {
+    let (_td, g, _) = repo_with_commit();
+    let ttd = tempfile::tempdir().unwrap();
+    let trash = ttd.path().join("trash");
+    let mut app = App::new(g.clone());
+    app.set_options(options(&format!("trash-directory {}", trash.display())));
+    write(&g, "junk.txt", "junk\n");
+    app.refresh();
+    goto(&mut app, |t| t.starts_with("Untracked files"));
+    app.press("TAB").unwrap();
+    goto(&mut app, |t| t.trim() == "junk.txt");
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts(), ["Trash \"junk.txt\"? (y/n)"]);
+    assert!(!exists(&g, "junk.txt"));
+    assert_eq!(names(&trash), ["junk.txt"]);
+    // magit-no-confirm discard doesn't cover trash
+    app.set_options(options(&format!("trash-directory {}\nmagit-no-confirm discard", trash.display())));
+    write(&g, "junk.txt", "again\n");
+    app.refresh();
+    goto(&mut app, |t| t.trim() == "junk.txt");
+    app.script_answers(&["n"]);
+    app.press("k").unwrap();
+    assert_eq!(app.message(), "Abort");
+    assert!(exists(&g, "junk.txt"));
+    app.set_options(options(&format!("trash-directory {}\nmagit-no-confirm trash", trash.display())));
+    goto(&mut app, |t| t.trim() == "junk.txt");
+    let n = app.prompts().len();
+    app.press("k").unwrap();
+    assert_eq!(app.prompts().len(), n);
+    assert_eq!(names(&trash), ["junk.txt", "junk.txt.~1~"]);
+    // a directory: recursively
+    std::fs::create_dir(g.toplevel.join("dir")).unwrap();
+    write(&g, "dir/a.txt", "a\n");
+    app.refresh();
+    goto(&mut app, |t| t.trim() == "dir/");
+    app.script_answers(&["what", "no"]);
+    app.press("k").unwrap();
+    let q = "Recursively trash dir/? (yes, no, all, quit, help)";
+    assert_eq!(app.prompts()[n..], [q, q]);
+    assert_eq!(app.message(), "Directory is not empty, not moving to trash");
+    assert!(exists(&g, "dir/a.txt"));
+    app.script_answers(&["yes"]);
+    app.press("k").unwrap();
+    assert!(!exists(&g, "dir"));
+    assert_eq!(names(&trash.join("dir")), ["a.txt"]);
+}
+
+#[test]
+fn discard_untracked_delete() {
+    let (_td, g, _) = repo_with_commit();
+    let ttd = tempfile::tempdir().unwrap();
+    let trash = ttd.path().join("trash");
+    let mut app = App::new(g.clone());
+    app.set_options(options(&format!("magit-delete-by-moving-to-trash nil\ntrash-directory {}", trash.display())));
+    write(&g, "a.txt", "a\n");
+    write(&g, "b.txt", "b\n");
+    app.refresh();
+    goto(&mut app, |t| t.starts_with("Untracked files"));
+    app.press("TAB").unwrap();
+    goto(&mut app, |t| t.trim() == "a.txt");
+    press(&mut app, &["C-SPC", "C-n"]);
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts(), ["a.txt\nb.txt\n\nDelete 2 files? (y/n)"]);
+    assert!(!exists(&g, "a.txt") && !exists(&g, "b.txt"));
+    assert!(names(&trash).is_empty(), "deleted, not trashed");
+    // the untracked section: all untracked files
+    std::fs::create_dir(g.toplevel.join("dir")).unwrap();
+    write(&g, "dir/c.txt", "c\n");
+    write(&g, "d.txt", "d\n");
+    app.refresh();
+    goto(&mut app, |t| t.starts_with("Untracked files"));
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "d.txt\ndir/c.txt\n\nDelete 2 files? (y/n)");
+    assert!(!exists(&g, "dir/c.txt") && !exists(&g, "d.txt"));
+    // a directory: quit, or all
+    write(&g, "dir/e.txt", "e\n");
+    app.refresh();
+    goto(&mut app, |t| t.trim() == "dir/");
+    app.script_answers(&["y", "quit"]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Recursively delete dir/? (yes, no, all, quit, help)");
+    assert_eq!(app.message(), "Quit");
+    assert!(exists(&g, "dir/e.txt"));
+    app.script_answers(&["y", "all"]);
+    app.press("k").unwrap();
+    assert!(!exists(&g, "dir"), "{}", app.message());
+}
+
+#[test]
+fn worktree_delete() {
+    let (_td, g, _) = repo_with_commit();
+    let ttd = tempfile::tempdir().unwrap();
+    let trash = ttd.path().join("trash");
+    let wt = ttd.path().join("wt");
+    let wt2 = ttd.path().join("wt2");
+    let wt3 = ttd.path().join("wt3");
+    for (w, b) in [(&wt, "a"), (&wt2, "b"), (&wt3, "c")] {
+        git(&g, &["worktree", "add", "-q", "-b", b, &w.to_string_lossy()]);
+    }
+    let mut app = App::new(g.clone());
+    app.set_options(options(&format!("trash-directory {}", trash.display())));
+    let path = |p: &std::path::Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
+    // the primary worktree isn't a choice
+    app.script_answers(&[&path(g.toplevel.as_path())]);
+    press(&mut app, &["%", "k"]);
+    assert_eq!(app.message(), "[No match]");
+    // trashed, then pruned
+    let wt_path = path(&wt);
+    app.script_answers(&[&wt_path, "y"]);
+    press(&mut app, &["%", "k"]);
+    assert_eq!(app.prompts().last().unwrap(), "Trash worktree \"wt\"? (y/n)");
+    assert!(!wt.exists() && trash.join("wt").is_dir(), "{}", app.message());
+    let list = g.git_string(&["worktree", "list", "--porcelain"]).unwrap();
+    assert!(!list.contains(&format!("worktree {wt_path}\n")), "pruned: {list}");
+    // uncommitted changes: danger (not covered by magit-no-confirm)
+    std::fs::write(wt2.join("new.txt"), "x").unwrap();
+    app.set_options(options(&format!("trash-directory {}\nmagit-no-confirm trash", trash.display())));
+    app.script_answers(&[&path(&wt2), "n"]);
+    press(&mut app, &["%", "k"]);
+    assert_eq!(app.prompts().last().unwrap(), "Trash worktree \"wt2\" despite uncommitted changes? (y/n)");
+    assert_eq!(app.message(), "Abort");
+    assert!(wt2.exists());
+    // locked
+    git(&g, &["worktree", "lock", "--reason", "busy", &wt3.to_string_lossy()]);
+    app.script_answers(&[&path(&wt3)]);
+    press(&mut app, &["%", "k"]);
+    assert_eq!(app.message(), format!("Cannot delete locked {} [reason: busy]", path(&wt3)));
+    // without the trash: git worktree remove --force
+    app.set_options(options(&format!("trash-directory {}\nmagit-delete-by-moving-to-trash nil", trash.display())));
+    app.script_answers(&[&path(&wt2), "y"]);
+    press(&mut app, &["%", "k"]);
+    assert_eq!(app.prompts().last().unwrap(), "Delete worktree \"wt2\" despite uncommitted changes? (y/n)");
+    assert!(!wt2.exists(), "{}", app.message());
+    assert!(!trash.join("wt2").exists());
+    assert!(!g.git_string(&["worktree", "list"]).unwrap().contains("wt2"));
 }

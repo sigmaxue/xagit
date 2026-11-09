@@ -11,6 +11,8 @@
 //! magit-visit-ref-behavior create-branch checkout-branch
 //! magit-published-branches origin/master origin/main
 //! transient-show-common-commands t
+//! magit-delete-by-moving-to-trash nil
+//! trash-directory ~/.trash
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -71,6 +73,10 @@ pub struct Options {
     pub published_branches: Vec<String>,
     /// transient-show-common-commands
     pub show_common_commands: bool,
+    /// magit-delete-by-moving-to-trash
+    pub delete_by_moving_to_trash: bool,
+    /// trash-directory: None is the system's trash
+    pub trash_directory: Option<std::path::PathBuf>,
 }
 
 impl Default for Options {
@@ -82,6 +88,8 @@ impl Default for Options {
             visit_ref_behavior: Vec::new(),
             published_branches: vec!["origin/master".into()],
             show_common_commands: false,
+            delete_by_moving_to_trash: true,
+            trash_directory: None,
         }
     }
 }
@@ -145,12 +153,18 @@ impl Options {
                     o.published_branches = vs.iter().map(|v| v.to_string()).collect();
                     None
                 }
-                "transient-show-common-commands" => match values.as_slice() {
-                    [v @ ("t" | "nil")] => {
-                        o.show_common_commands = *v == "t";
+                "transient-show-common-commands" => boolean(&values).map(|b| o.show_common_commands = b).err(),
+                "magit-delete-by-moving-to-trash" => boolean(&values).map(|b| o.delete_by_moving_to_trash = b).err(),
+                "trash-directory" => match values.as_slice() {
+                    ["nil"] => {
+                        o.trash_directory = None;
                         None
                     }
-                    _ => Some("expected t or nil".into()),
+                    [d] => {
+                        o.trash_directory = Some(expand_home(d));
+                        None
+                    }
+                    _ => Some("expected a directory or nil".into()),
                 },
                 "magit-refs-filter-alist" => match values.as_slice() {
                     ["nil"] => {
@@ -178,6 +192,22 @@ impl Options {
             }
         }
         (o, errors)
+    }
+}
+
+/// `t` or `nil`.
+fn boolean(values: &[&str]) -> Result<bool, String> {
+    match values {
+        [v @ ("t" | "nil")] => Ok(*v == "t"),
+        _ => Err("expected t or nil".into()),
+    }
+}
+
+/// D with a leading `~/` expanded.
+fn expand_home(d: &str) -> std::path::PathBuf {
+    match (d.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+        _ => std::path::PathBuf::from(d),
     }
 }
 
@@ -230,6 +260,11 @@ mod tests {
         let (o, e) = Options::parse("magit-slow-confirm discard\nmagit-slow-confirm nope");
         assert!(o.slow_confirm(Some("discard")) && !o.slow_confirm(Some("drop-stashes")));
         assert_eq!(e, ["2: unknown action nope"]);
+        assert!(d.delete_by_moving_to_trash && d.trash_directory.is_none());
+        let (o, e) = Options::parse("magit-delete-by-moving-to-trash nil\ntrash-directory /tmp/t\ntrash-directory a b");
+        assert!(!o.delete_by_moving_to_trash);
+        assert_eq!(o.trash_directory.as_deref(), Some(std::path::Path::new("/tmp/t")));
+        assert_eq!(e, ["3: expected a directory or nil"]);
         let (o, _) = Options::parse("magit-slow-confirm nil");
         assert!(!o.slow_confirm(Some("drop-stashes")));
         let (o, e) = Options::parse("transient-show-common-commands t\ntransient-show-common-commands 1");

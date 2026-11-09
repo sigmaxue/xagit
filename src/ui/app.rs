@@ -4895,13 +4895,18 @@ impl App {
             self.git.discard_change(&fd, &scope, typ == "staged", ctx)?;
         } else {
             let files = self.sel_paths(&sel);
-            let prompt = if typ == "untracked" { "Delete".to_string() } else { format!("Discard {typ} changes in") };
+            if typ == "untracked" {
+                // magit-discard-files--delete
+                let r = self.discard_files_delete(&files);
+                self.refresh();
+                return r;
+            }
+            let prompt = format!("Discard {typ} changes in");
             if !self.confirm_files("discard", &prompt, &files)? {
                 return Ok(());
             }
             for f in &files {
                 match typ.as_str() {
-                    "untracked" => self.git.discard_untracked(f)?,
                     "unstaged" => self.git.discard_unstaged(f)?,
                     _ => self.git.discard_staged(f)?,
                 }
@@ -4910,6 +4915,88 @@ impl App {
         self.set_msg("discarded");
         self.refresh();
         Ok(())
+    }
+
+    /// magit-discard-files--delete of untracked FILES: confirmed as
+    /// `trash` (moved to the trash, magit-delete-by-moving-to-trash) or
+    /// `delete`; non-empty directories are confirmed recursively
+    /// (dired-delete-file with dired-recursive-deletes `top`).
+    fn discard_files_delete(&mut self, files: &[String]) -> Result<()> {
+        let trash = self.options.delete_by_moving_to_trash;
+        let (action, prompt) = if trash { ("trash", "Trash") } else { ("delete", "Delete") };
+        if !self.confirm_files(action, prompt, files)? {
+            return Ok(());
+        }
+        let top = self.git.toplevel.clone();
+        let mut always = false;
+        for file in files {
+            if file.starts_with('~') || file.starts_with("\\~") {
+                self.set_msg(&format!("Refusing to delete \"{file}\", too dangerous"));
+                return Ok(());
+            }
+            let path = top.join(file);
+            let nonempty_dir = !path.is_symlink()
+                && path.is_dir()
+                && std::fs::read_dir(&path).map(|mut d| d.next().is_some()).unwrap_or(false);
+            let mut recursive = true;
+            if nonempty_dir && !always {
+                let verb = if trash { "trash" } else { "delete" };
+                let answers = ["yes", "no", "all", "quit"];
+                match self.read_answer(&format!("Recursively {verb} {file}?"), &answers)?.as_deref() {
+                    Some("yes") => {}
+                    Some("all") => always = true,
+                    Some("no") => recursive = false,
+                    _ => {
+                        self.set_msg("Quit");
+                        return Ok(());
+                    }
+                }
+            }
+            let res = if nonempty_dir && !recursive {
+                Err(if trash {
+                    "Directory is not empty, not moving to trash".to_string()
+                } else {
+                    format!("Removing directory: Directory not empty, {}", path.display())
+                })
+            } else {
+                self.delete_file(&path, trash)
+            };
+            if let Err(e) = res {
+                self.set_msg(&e);
+                return Ok(());
+            }
+        }
+        self.set_msg("");
+        Ok(())
+    }
+
+    /// delete-file / delete-directory (recursive) of PATH, moving it to
+    /// the trash if TRASH.
+    fn delete_file(&self, path: &std::path::Path, trash: bool) -> std::result::Result<(), String> {
+        if trash {
+            return super::trash::move_to_trash(path, self.options.trash_directory.as_deref());
+        }
+        let r = if path.is_dir() && !path.is_symlink() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+        r.map_err(|e| format!("Removing {}: {e}", path.display()))
+    }
+
+    /// read-answer with the long ANSWERS (and help): one of them, None
+    /// when quit.
+    fn read_answer(&mut self, question: &str, answers: &[&str]) -> Result<Option<String>> {
+        let mut all: Vec<&str> = answers.to_vec();
+        all.push("help");
+        let prompt = format!("{question} ({})", all.join(", "));
+        loop {
+            let Some(ans) = self.read_line_hist(&prompt, None, Hist::None, None)? else {
+                return Ok(None);
+            };
+            let ans = ans.trim().to_lowercase();
+            if answers.contains(&ans.as_str()) {
+                return Ok(Some(ans));
+            }
+            let list: Vec<String> = all.iter().map(|a| format!("`{a}'")).collect();
+            self.set_msg(&format!("Please answer {}.", list.join(" or ")));
+        }
     }
 
     /// `v`: magit-reverse on changes; magit-revert-no-commit elsewhere
@@ -5957,6 +6044,66 @@ impl App {
             .or_else(|| atrev.first().cloned())
     }
 
+    /// magit-worktree-delete: a worktree other than the primary one,
+    /// confirmed (`danger` with uncommitted changes, else `trash` or
+    /// `delete`), moved to the trash (magit-delete-by-moving-to-trash)
+    /// or removed with `git worktree remove --force`, then pruned.
+    fn worktree_delete(&mut self) -> Result<()> {
+        // magit-list-worktrees: (path, locked reason)
+        let mut worktrees: Vec<(String, Option<String>)> = Vec::new();
+        for line in self.git.git_lines(&["worktree", "list", "--porcelain"]) {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                worktrees.push((p.to_string(), None));
+            } else if let (Some(l), Some(w)) = (line.strip_prefix("locked"), worktrees.last_mut()) {
+                w.1 = Some(l.trim().to_string());
+            }
+        }
+        let choices: Vec<String> = worktrees.iter().skip(1).map(|w| w.0.clone()).collect();
+        let Some(path) = self.read_choice("Delete worktree", &choices, None)? else {
+            return Ok(());
+        };
+        let dir = std::path::PathBuf::from(&path);
+        if dir.join(".git").is_dir() {
+            self.set_msg(&format!("Deleting {path} would delete the shared .git directory"));
+            return Ok(());
+        }
+        if let Some(Some(reason)) = worktrees.iter().find(|w| w.0 == path).map(|w| w.1.clone()) {
+            let reason = if reason.is_empty() { String::new() } else { format!(" [reason: {reason}]") };
+            self.set_msg(&format!("Cannot delete locked {path}{reason}"));
+            return Ok(());
+        }
+        let trash = self.options.delete_by_moving_to_trash;
+        if dir.exists() {
+            let uncommitted = !self.git.git_lines(&["-C", &path, "status", "--porcelain"]).is_empty();
+            let action = match (uncommitted, trash) {
+                (true, _) => "danger",
+                (false, true) => "trash",
+                (false, false) => "delete",
+            };
+            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let prompt = format!(
+                "{} worktree \"{name}\"{}",
+                if trash { "Trash" } else { "Delete" },
+                if uncommitted { " despite uncommitted changes" } else { "" }
+            );
+            if !self.confirm(action, &prompt)? {
+                return Ok(());
+            }
+            let res = if trash {
+                super::trash::move_to_trash(&dir, self.options.trash_directory.as_deref())
+            } else {
+                self.git.git_interactive(&["worktree", "remove", "--force", &path]).map_err(|e| e.to_string())
+            };
+            if let Err(e) = res {
+                self.set_msg(&e);
+                return Ok(());
+            }
+        }
+        let res = self.git.worktree_prune();
+        self.done("", res.map(|_| String::new()));
+        Ok(())
+    }
+
     /// magit-branch-reset: reset BRANCH (read, the local branch at point
     /// or the current one the default) to a revision (the branch or
     /// commit at point, else its upstream, the default). The current
@@ -6915,18 +7062,7 @@ impl App {
                 let res = self.git.worktree_move(&from, &to);
                 self.done("worktree moved", res);
             }
-            "worktree-delete" => {
-                let paths = self.git.worktree_paths();
-                let Some(path) = self.pick("Delete worktree", &paths, None)?.cloned() else {
-                    return Ok(());
-                };
-                if !self.yes_no(&format!("Delete worktree {path}?"))? {
-                    return Ok(());
-                }
-                let force = self.yes_no("Force delete (dirty worktree)?")?;
-                let res = self.git.worktree_remove(&path, force);
-                self.done("worktree removed", res);
-            }
+            "worktree-delete" => self.worktree_delete()?,
             "worktree-prune" => {
                 let res = self.git.worktree_prune();
                 self.done("worktrees pruned", res);
