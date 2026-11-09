@@ -185,6 +185,20 @@ impl Git {
         v
     }
 
+    /// magit-list-refnames: the local and remote branches and the tags
+    /// (not the symbolic remote HEADs), short names.
+    pub fn refnames(&self) -> Vec<String> {
+        self.git_lines(&["for-each-ref", "--format=%(refname)", "refs/heads/", "refs/remotes/", "refs/tags/"])
+            .into_iter()
+            .filter(|r| !r.ends_with("/HEAD"))
+            .filter_map(|r| {
+                ["refs/heads/", "refs/remotes/", "refs/tags/"]
+                    .iter()
+                    .find_map(|p| r.strip_prefix(p).map(str::to_string))
+            })
+            .collect()
+    }
+
     pub fn stashes(&self) -> Vec<(String, String)> {
         // (ref name "stash@{0}", message) — use '|' separator (git < 2.44 lacks %X)
         self.git_lines(&[

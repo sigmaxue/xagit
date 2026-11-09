@@ -11,7 +11,7 @@ use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
 };
-use super::minibuf::{add_to_history, LineEditor, Step};
+use super::minibuf::{add_to_history, Completion, LineEditor, Step};
 use super::refs::{build_refs, deferred_ref, CommitCount, RefKind};
 use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
@@ -99,6 +99,11 @@ pub struct App {
     /// minibuffer-history: the inputs of prompts without a history of
     /// their own, newest first (not saved)
     minibuffer_history: std::cell::RefCell<Vec<String>>,
+    /// magit-revision-history: the branches and commits read, newest
+    /// first (not saved)
+    revision_history: std::cell::RefCell<Vec<String>>,
+    /// the rows drawn last (the minibuffer restores those it covered)
+    screen: std::cell::RefCell<Vec<String>>,
     /// the history of each infix (its values read, newest first)
     infix_history: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
     /// transient-history-file
@@ -267,10 +272,19 @@ pub const AUTOSETUP_REBASE_CHOICES: &[&str] = &["always", "local", "remote", "ne
 /// magit-published-branches (default)
 const PUBLISHED_BRANCHES: &[&str] = &["origin/master"];
 
-/// Status buffer key map (magit-status-mode-map + magit-mode-map +
-/// magit-section-mode-map). `k` is magit-discard and `j` is
-/// magit-status-jump (Magit has no vi-style movement); `n` / `p` move
-/// between sections, C-n / C-p and the arrows between lines.
+/// The history list of a minibuffer read (its HIST argument).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hist<'a> {
+    /// minibuffer-history
+    Minibuffer,
+    /// magit-revision-history
+    Revision,
+    /// the history of the infix of that argument
+    Infix(&'a str),
+    /// none (y-or-n-p)
+    None,
+}
+
 /// The kind of the section at point in the refs buffer, for the
 /// commands remapped in its section keymaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +331,10 @@ impl PrefixArg {
     }
 }
 
+/// Status buffer key map (magit-status-mode-map + magit-mode-map +
+/// magit-section-mode-map). `k` is magit-discard and `j` is
+/// magit-status-jump (Magit has no vi-style movement); `n` / `p` move
+/// between sections, C-n / C-p and the arrows between lines.
 pub fn status_binding(key: &Key) -> Option<Binding> {
     use Binding::*;
     if key.ctrl {
@@ -448,6 +466,8 @@ impl App {
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
+            revision_history: std::cell::RefCell::new(Vec::new()),
+            screen: std::cell::RefCell::new(Vec::new()),
             infix_history: std::cell::RefCell::new(BTreeMap::new()),
             history_file: None,
             prompts: std::cell::RefCell::new(Vec::new()),
@@ -818,6 +838,8 @@ impl App {
             let _ = execute!(out, crossterm::cursor::MoveTo(0, y as u16), crossterm::style::Print(r));
         }
         let _ = out.flush();
+        rows.truncate(h);
+        *self.screen.borrow_mut() = rows;
     }
 
     // ------------------------------------------------------------ input helpers
@@ -846,6 +868,11 @@ impl App {
     /// minibuffer-history, newest first.
     pub fn minibuffer_history(&self) -> Vec<String> {
         self.minibuffer_history.borrow().clone()
+    }
+
+    /// magit-revision-history, newest first.
+    pub fn revision_history(&self) -> Vec<String> {
+        self.revision_history.borrow().clone()
     }
 
     /// transient-history-file: read the history saved by earlier sessions
@@ -899,7 +926,7 @@ impl App {
     /// Read the value of the infix of ARG (with its history), trimmed, the
     /// DEFAULT when empty.
     fn read_infix(&self, prompt: &str, default: Option<&str>, arg: &str) -> Result<Option<String>> {
-        Ok(self.read_line_hist(prompt, default, Some(arg))?.map(|i| {
+        Ok(self.read_line_hist(prompt, default, Hist::Infix(arg), None)?.map(|i| {
             let s = i.trim().to_string();
             match default {
                 Some(d) if s.is_empty() => d.to_string(),
@@ -911,32 +938,71 @@ impl App {
     /// Read a line (the DEFAULT when empty) with minibuffer-history; only
     /// EOF and C-g give none.
     fn read_line_raw(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
-        let input = self.read_line_hist(prompt, default, None)?;
-        if let Some(i) = &input {
-            add_to_history(&mut self.minibuffer_history.borrow_mut(), i.trim(), false);
+        self.completing_read(prompt, default, Hist::Minibuffer, None)
+    }
+
+    /// completing-read: read a line with completion against TABLE (none:
+    /// read-string), M-p / M-n moving through HIST, to which the input is
+    /// added (the DEFAULT for an empty input, like read-from-minibuffer).
+    /// The input trimmed, the DEFAULT when empty; only EOF and C-g give
+    /// none.
+    fn completing_read(
+        &self,
+        prompt: &str,
+        default: Option<&str>,
+        hist: Hist,
+        table: Option<Completion>,
+    ) -> Result<Option<String>> {
+        let Some(input) = self.read_line_hist(prompt, default, hist, table)? else {
+            return Ok(None);
+        };
+        let s = input.trim().to_string();
+        let s = match default {
+            Some(d) if s.is_empty() => d.to_string(),
+            _ => s,
+        };
+        let list = match hist {
+            Hist::Minibuffer => Some(&self.minibuffer_history),
+            Hist::Revision => Some(&self.revision_history),
+            Hist::Infix(_) | Hist::None => None,
+        };
+        if let Some(l) = list {
+            add_to_history(&mut l.borrow_mut(), &s, false);
         }
-        Ok(input.map(|i| {
-            let s = i.trim().to_string();
-            match default {
-                Some(d) if s.is_empty() => d.to_string(),
-                _ => s,
-            }
-        }))
+        Ok(Some(s))
+    }
+
+    /// Read a branch or commit (magit-read-branch-or-commit and friends):
+    /// completing the names of the refs, with magit-revision-history.
+    fn read_rev(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+        let table = Completion { candidates: self.git.refnames(), ..Default::default() };
+        Ok(self.completing_read(prompt, default, Hist::Revision, Some(table))?.filter(|s| !s.is_empty()))
     }
 
     /// Read the input of a line in the minibuffer, M-p / M-n moving
-    /// through the history HIST (the infix history of that key; None:
-    /// minibuffer-history). The input isn't added to the history.
-    fn read_line_hist(&self, prompt: &str, default: Option<&str>, hist: Option<&str>) -> Result<Option<String>> {
+    /// through the history HIST, completing against TABLE. The input isn't
+    /// added to the history.
+    fn read_line_hist(
+        &self,
+        prompt: &str,
+        default: Option<&str>,
+        hist: Hist,
+        table: Option<Completion>,
+    ) -> Result<Option<String>> {
         self.prompts.borrow_mut().push(prompt.to_string());
         if let Some(ans) = self.scripted.borrow_mut().pop_front() {
             return Ok(Some(ans));
         }
         let history = match hist {
-            Some(k) => self.infix_history.borrow().get(k).cloned().unwrap_or_default(),
-            None => self.minibuffer_history.borrow().clone(),
+            Hist::Infix(k) => self.infix_history.borrow().get(k).cloned().unwrap_or_default(),
+            Hist::Minibuffer => self.minibuffer_history.borrow().clone(),
+            Hist::Revision => self.revision_history.borrow().clone(),
+            Hist::None => Vec::new(),
         };
         let mut ed = LineEditor::new(history, default.map(str::to_string));
+        if let Some(t) = table {
+            ed = ed.with_completion(t);
+        }
         if let Some(keys) = self.scripted_keys.borrow_mut().pop_front() {
             for k in &keys {
                 match ed.key(k) {
@@ -978,25 +1044,59 @@ impl App {
     }
 
     /// The minibuffer in the terminal: the prompt and the input on the
-    /// last line, a message after the input until the next key.
+    /// last line, a message after the input until the next key, the
+    /// possible completions (if shown) in the rows above it.
     fn minibuffer(&self, prompt: &str, default: Option<&str>, mut ed: LineEditor) -> Result<Option<String>> {
         let prompt = match default {
             Some(d) => format!("{prompt} (default: {d}): "),
             None => format!("{prompt}: "),
         };
         let mut msg = String::new();
-        loop {
+        // the rows above the minibuffer covered by the completions
+        let mut covered = 0usize;
+        let result = loop {
             let mut out = stdout();
             let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+            let (w, h) = (w as usize, h as usize);
+            let list = match ed.completions() {
+                Some(c) => {
+                    let mut rows = super::minibuf::completion_rows(c, w);
+                    rows.truncate(h.saturating_sub(1) / 2);
+                    rows
+                }
+                None => Vec::new(),
+            };
+            let last = h.saturating_sub(1);
+            let screen = self.screen.borrow();
+            for y in last.saturating_sub(covered)..last.saturating_sub(list.len()) {
+                let row: String = screen.get(y).map(|r| r.chars().take(w).collect()).unwrap_or_default();
+                let _ = execute!(
+                    out,
+                    crossterm::cursor::MoveTo(0, y as u16),
+                    Clear(ClearType::CurrentLine),
+                    crossterm::style::Print(row)
+                );
+            }
+            drop(screen);
+            for (i, r) in list.iter().enumerate() {
+                let y = last - list.len() + i;
+                let _ = execute!(
+                    out,
+                    crossterm::cursor::MoveTo(0, y as u16),
+                    Clear(ClearType::CurrentLine),
+                    crossterm::style::Print(r.chars().take(w).collect::<String>())
+                );
+            }
+            covered = list.len();
             let text = ed.text();
-            let line = if msg.is_empty() { format!("{prompt}{text}") } else { format!("{prompt}{text} [{msg}]") };
+            let line = if msg.is_empty() { format!("{prompt}{text}") } else { format!("{prompt}{text} {msg}") };
             let col = prompt.chars().count() + ed.point();
             let _ = execute!(
                 out,
-                crossterm::cursor::MoveTo(0, h.saturating_sub(1)),
+                crossterm::cursor::MoveTo(0, last as u16),
                 Clear(ClearType::CurrentLine),
-                crossterm::style::Print(line.chars().take(w as usize).collect::<String>()),
-                crossterm::cursor::MoveTo(col.min((w as usize).saturating_sub(1)) as u16, h.saturating_sub(1)),
+                crossterm::style::Print(line.chars().take(w).collect::<String>()),
+                crossterm::cursor::MoveTo(col.min(w.saturating_sub(1)) as u16, last as u16),
                 crossterm::cursor::Show
             );
             let _ = out.flush();
@@ -1006,37 +1106,73 @@ impl App {
             }
             msg.clear();
             match ed.key(&Key::from_event(&ev)) {
-                Step::Done(s) => return Ok(Some(s)),
-                Step::Abort => return Ok(None),
-                Step::Message(m) => msg = m,
+                Step::Done(s) => break Some(s),
+                Step::Abort => break None,
+                Step::Message(m) if m.starts_with('[') => msg = m,
+                Step::Message(m) => msg = format!("[{m}]"),
                 Step::Continue => {}
             }
+        };
+        // restore the rows the completions covered
+        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        let last = (h as usize).saturating_sub(1);
+        let screen = self.screen.borrow();
+        let mut out = stdout();
+        for y in last.saturating_sub(covered)..last {
+            let row: String = screen.get(y).map(|r| r.chars().take(w as usize).collect()).unwrap_or_default();
+            let _ = execute!(
+                out,
+                crossterm::cursor::MoveTo(0, y as u16),
+                Clear(ClearType::CurrentLine),
+                crossterm::style::Print(row)
+            );
         }
+        let _ = out.flush();
+        Ok(result)
     }
 
+    /// y-or-n-p (no history)
     fn yes_no(&self, prompt: &str) -> Result<bool> {
         loop {
-            let Some(ans) = self.read_line_prompt(&format!("{prompt} (y/n)"), Some("n"))? else {
+            let Some(ans) = self.read_line_hist(&format!("{prompt} (y/n)"), Some("n"), Hist::None, None)? else {
                 return Ok(false);
             };
-            match ans.to_lowercase().as_str() {
+            match ans.trim().to_lowercase().as_str() {
                 "y" | "yes" => return Ok(true),
-                "n" | "no" => return Ok(false),
+                "n" | "no" | "" => return Ok(false),
                 _ => continue,
             }
         }
     }
 
+    /// magit-completing-read of one of CHOICES (the first being the
+    /// default without DEFAULT) with minibuffer-history; an input that
+    /// is not a choice selects the first choice containing it.
     fn pick<'a>(&mut self, prompt: &str, choices: &'a [String], default: Option<&str>) -> Result<Option<&'a String>> {
+        self.pick_hist(prompt, choices, default, Hist::Minibuffer)
+    }
+
+    /// `pick` with magit-revision-history (magit-read-branch, -tag, ...).
+    fn pick_rev<'a>(&mut self, prompt: &str, choices: &'a [String], default: Option<&str>) -> Result<Option<&'a String>> {
+        self.pick_hist(prompt, choices, default, Hist::Revision)
+    }
+
+    fn pick_hist<'a>(
+        &mut self,
+        prompt: &str,
+        choices: &'a [String],
+        default: Option<&str>,
+        hist: Hist,
+    ) -> Result<Option<&'a String>> {
         if choices.is_empty() {
             self.message = "no candidates".into();
             return Ok(None);
         }
-        // simple completion: substring match or exact
-        let Some(inp) = self.read_line_prompt(
-            prompt,
-            default.or(Some(&choices[0])),
-        )? else {
+        let table = Completion { candidates: choices.to_vec(), ..Default::default() };
+        let Some(inp) = self
+            .completing_read(prompt, default.or(Some(&choices[0])), hist, Some(table))?
+            .filter(|s| !s.is_empty())
+        else {
             return Ok(None);
         };
         if let Some(exact) = choices.iter().find(|c| c.as_str() == inp) {
@@ -1072,7 +1208,7 @@ impl App {
             .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
             .filter(|r| !r.is_empty())
             .collect();
-        Ok(self.pick(prompt, &revs, None)?.cloned())
+        Ok(self.pick_rev(prompt, &revs, None)?.cloned())
     }
 
     /// Read a commit, defaulting to the commit at point
@@ -1081,7 +1217,7 @@ impl App {
         match self.current_line().map(|l| l.kind.clone()) {
             Some(LineKind::Commit { hash, .. }) => {
                 let short = self.git.rev_short(&hash);
-                self.read_line_prompt(prompt, Some(&short))
+                self.read_rev(prompt, Some(&short))
             }
             _ => self.pick_recent_commit(prompt),
         }
@@ -2039,7 +2175,7 @@ impl App {
                 // magit-read-other-branch-or-commit: the branch at point
                 let current = g!().current_branch();
                 let default = self.branch_at_point().filter(|b| Some(b) != current.as_ref() && bs.contains(b));
-                if let Some(b) = self.pick("Checkout branch/revision", &bs, default.as_deref())? {
+                if let Some(b) = self.pick_rev("Checkout branch/revision", &bs, default.as_deref())? {
                     g!().checkout(b)?;
                     self.set_msg(&format!("checked out {b}"));
                     self.refresh();
@@ -2050,7 +2186,7 @@ impl App {
                     return Ok(());
                 };
                 let bs = g!().branches();
-                let start = self.pick("Start from (empty = HEAD)", &bs, Some(""))?;
+                let start = self.pick_rev("Start from (empty = HEAD)", &bs, Some(""))?;
                 g!().branch_and_checkout(&name, start.map(|s| s.as_str()))?;
                 self.set_msg(&format!("created and checked out {name}"));
                 self.refresh();
@@ -2060,7 +2196,7 @@ impl App {
                     return Ok(());
                 };
                 let bs = g!().branches();
-                let start = self.pick("Start from (empty = HEAD)", &bs, Some(""))?;
+                let start = self.pick_rev("Start from (empty = HEAD)", &bs, Some(""))?;
                 g!().branch_create(&name, start.map(|s| s.as_str()))?;
                 self.set_msg(&format!("created branch {name}"));
                 self.refresh();
@@ -2086,7 +2222,7 @@ impl App {
                 let bs = g!().branches();
                 // magit-read-local-branch
                 let default = self.local_branch_at_point().or_else(|| g!().current_branch());
-                let Some(old) = self.pick("Rename branch", &bs, default.as_deref())?.cloned() else {
+                let Some(old) = self.pick_rev("Rename branch", &bs, default.as_deref())?.cloned() else {
                     return Ok(());
                 };
                 let Some(new) = self.read_line_prompt(&format!("Rename branch '{old}' to"), None)? else {
@@ -2096,8 +2232,8 @@ impl App {
             }
             "branch-reset" => {
                 let bs = g!().branches();
-                if let Some(b) = self.pick("Reset branch", &bs, None)? {
-                    if let Some(rev) = self.read_line_prompt("Reset to", Some("HEAD"))? {
+                if let Some(b) = self.pick_rev("Reset branch", &bs, None)? {
+                    if let Some(rev) = self.read_rev("Reset to", Some("HEAD"))? {
                         g!().git_interactive(&["branch", "-f", b, &rev])?;
                         if g!().current_branch().as_deref() == Some(b.as_str()) {
                             let _ = g!().git_interactive(&["reset", "--keep", &rev]);
@@ -2205,7 +2341,7 @@ impl App {
             "pull-other" => {
                 let mut choices = g!().remote_branches();
                 choices.extend(g!().branches());
-                let Some(src) = self.pick("Pull from", &choices, None)?.cloned() else {
+                let Some(src) = self.pick_rev("Pull from", &choices, None)?.cloned() else {
                     return Ok(());
                 };
                 let (remote, branch) = g!().tracked_of(&src);
@@ -2231,14 +2367,14 @@ impl App {
                     }
                 } else {
                     let bs = g!().branches();
-                    let Some(b) = self.pick("Push branch", &bs, None)?.cloned() else {
+                    let Some(b) = self.pick_rev("Push branch", &bs, None)?.cloned() else {
                         return Ok(());
                     };
                     b
                 };
                 let default = g!().remotes().first().map(|r| format!("{r}/{src}"));
                 let Some(target) =
-                    self.read_line_prompt(&format!("Push {src} to (remote/branch)"), default.as_deref())?
+                    self.read_rev(&format!("Push {src} to (remote/branch)"), default.as_deref())?
                 else {
                     return Ok(());
                 };
@@ -2256,7 +2392,7 @@ impl App {
                 let tags = g!().tags();
                 if let (Some(r), Some(t)) = (
                     self.pick("Push tag to remote", &remotes, None)?,
-                    self.pick("Tag", &tags, None)?,
+                    self.pick_rev("Tag", &tags, None)?,
                 ) {
                     g!().push_tag(r, t)?;
                     self.set_msg("tag pushed");
@@ -2302,7 +2438,7 @@ impl App {
             "merge-plain" | "merge-nocommit" | "merge-squash" | "merge-editmsg" | "merge-preview" => {
                 let mut bs = g!().branches();
                 bs.extend(g!().remote_branches());
-                let Some(rev) = self.pick("Merge revision", &bs, None)?.cloned() else {
+                let Some(rev) = self.pick_rev("Merge revision", &bs, None)?.cloned() else {
                     return Ok(());
                 };
                 match cmd {
@@ -2368,7 +2504,7 @@ impl App {
                     } else {
                         self.set_msg("no upstream configured");
                     }
-                } else if let Some(onto) = self.pick("Rebase onto", &bs, None)? {
+                } else if let Some(onto) = self.pick_rev("Rebase onto", &bs, None)? {
                     g!().rebase(onto, &args)?;
                     self.set_msg("rebased");
                 }
@@ -2427,7 +2563,7 @@ impl App {
                     return Ok(());
                 };
                 let rev = self
-                    .read_line_prompt("Place tag on", Some("HEAD"))?
+                    .read_rev("Place tag on", Some("HEAD"))?
                     .unwrap_or_else(|| "HEAD".into());
                 let edit = args.iter().any(|a| a == "--edit");
                 let msg = if annotate && !edit {
@@ -2455,7 +2591,7 @@ impl App {
                     None => {
                         let tags = g!().tags();
                         let default = self.tag_at_point();
-                        match self.pick("Delete tag", &tags, default.as_deref())? {
+                        match self.pick_rev("Delete tag", &tags, default.as_deref())? {
                             Some(t) => vec![t.clone()],
                             None => return Ok(()),
                         }
@@ -2477,7 +2613,7 @@ impl App {
                     None => {
                         let prompt = if no_commit { "Revert changes" } else { "Revert commit" };
                         let default = self.commit_at_point().map(|c| self.git.rev_short(&c)).or(g!().current_branch());
-                        let Some(r) = self.read_line_prompt(prompt, default.as_deref())? else {
+                        let Some(r) = self.read_rev(prompt, default.as_deref())? else {
                             return Ok(());
                         };
                         vec![r]
@@ -2517,7 +2653,7 @@ impl App {
                             .map(|c| self.git.rev_short(&c))
                             .filter(|c| Some(c) != current.as_ref())
                             .or_else(|| self.previous_branch());
-                        let Some(r) = self.read_line_prompt(prompt, default.as_deref())? else {
+                        let Some(r) = self.read_rev(prompt, default.as_deref())? else {
                             return Ok(());
                         };
                         vec![r]
@@ -2658,7 +2794,7 @@ impl App {
                 let atpoint = self.branch_at_point().filter(|b| Some(b) != current.as_ref());
                 let previous = self.previous_branch();
                 let default = atpoint.or(previous);
-                if let Some(r) = self.pick("Compare with", &choices, default.as_deref())?.cloned() {
+                if let Some(r) = self.pick_rev("Compare with", &choices, default.as_deref())?.cloned() {
                     self.setup_buffer(BufferMode::Refs { upstream: r }, args);
                 }
             }
@@ -2717,7 +2853,7 @@ impl App {
                             Some(LineKind::Commit { hash, .. }) => Some(self.git.rev_short(&hash)),
                             _ => g!().current_branch(),
                         };
-                        let Some(r) = self.read_line_prompt("Show reflog for", default.as_deref())? else {
+                        let Some(r) = self.read_rev("Show reflog for", default.as_deref())? else {
                             return Ok(());
                         };
                         r
@@ -2730,7 +2866,7 @@ impl App {
             "shortlog-since" | "shortlog-range" => {
                 let rev = if cmd == "shortlog-since" {
                     let default = crate::ui::view::current_tag(g!()).map(|(t, _)| t);
-                    let Some(c) = self.read_line_prompt("Shortlog since", default.as_deref())? else {
+                    let Some(c) = self.read_rev("Shortlog since", default.as_deref())? else {
                         return Ok(());
                     };
                     format!("{c}..")
@@ -2740,7 +2876,7 @@ impl App {
                         Dwim::Range(r) => Some(r),
                         _ => g!().current_branch(),
                     };
-                    let Some(r) = self.read_line_prompt("Shortlog for revision or range", default.as_deref())? else {
+                    let Some(r) = self.read_rev("Shortlog for revision or range", default.as_deref())? else {
                         return Ok(());
                     };
                     r
@@ -2816,7 +2952,7 @@ impl App {
             "staged" | "worktree" if self.prefix_arg.is_some() => {
                 let prompt = if kind == "staged" { "Diff index and commit" } else { "Diff working tree and commit" };
                 let default = self.branch_or_commit_default();
-                let Some(rev) = self.read_line_prompt(prompt, default.as_deref())? else {
+                let Some(rev) = self.read_rev(prompt, default.as_deref())? else {
                     return Ok(());
                 };
                 if kind == "staged" {
@@ -2829,7 +2965,7 @@ impl App {
             "worktree" => self.show_diff(Some("HEAD".into()), None, "committed"),
             "range" => {
                 let default = self.dwim_range_default();
-                let Some(r) = self.read_line_prompt("Diff for range", default.as_deref())? else {
+                let Some(r) = self.read_rev("Diff for range", default.as_deref())? else {
                     return Ok(());
                 };
                 self.show_diff(Some(r), None, "committed");
@@ -2848,11 +2984,11 @@ impl App {
                     Some(r) if self.prefix_arg.is_none() => Some(r),
                     Some(r) => {
                         let short = self.git.rev_short(&r);
-                        self.read_line_prompt("Show commit", Some(&short))?
+                        self.read_rev("Show commit", Some(&short))?
                     }
                     None => {
                         let current = self.git.current_branch();
-                        self.read_line_prompt("Show commit", current.as_deref())?
+                        self.read_rev("Show commit", current.as_deref())?
                     }
                 };
                 if let Some(rev) = rev {
@@ -3029,7 +3165,7 @@ impl App {
                     .ok()
                     .filter(|s| !s.is_empty());
                 let default = at_point.clone().or(previous);
-                let Some(r) = self.read_line_prompt("Log rev,s", default.as_deref())? else {
+                let Some(r) = self.read_rev("Log rev,s", default.as_deref())? else {
                     return Ok(());
                 };
                 let revs: Vec<String> = r.split([',', ' ']).filter(|s| !s.is_empty()).map(str::to_string).collect();
@@ -3393,7 +3529,7 @@ impl App {
     /// `j` in log buffers (magit-log-move-to-revision).
     fn log_move_to_revision(&mut self) -> Result<()> {
         let default = self.git.current_branch();
-        let Some(rev) = self.read_line_prompt("In log, jump to", default.as_deref())? else {
+        let Some(rev) = self.read_rev("In log, jump to", default.as_deref())? else {
             return Ok(());
         };
         if !self.log_goto_commit(&rev) {
@@ -3426,7 +3562,7 @@ impl App {
         let mut branches = self.git.branches();
         branches.extend(self.git.remote_branches());
         let current = self.git.current_branch();
-        let Some(head) = self.pick("Cherry head", &branches, current.as_deref())?.cloned() else {
+        let Some(head) = self.pick_rev("Cherry head", &branches, current.as_deref())?.cloned() else {
             return Ok(());
         };
         let upstream_of = self
@@ -3441,7 +3577,7 @@ impl App {
             .filter(|s| !s.is_empty() && s != "HEAD");
         let default = current.filter(|c| *c != head).or(upstream_of).or(previous);
         let others: Vec<String> = branches.into_iter().filter(|b| *b != head).collect();
-        let Some(upstream) = self.pick("Cherry upstream", &others, default.as_deref())?.cloned() else {
+        let Some(upstream) = self.pick_rev("Cherry upstream", &others, default.as_deref())?.cloned() else {
             return Ok(());
         };
         self.setup_buffer(BufferMode::Cherry { head, upstream }, Vec::new());
@@ -4057,7 +4193,11 @@ impl App {
             .map(|f| f.1)
             .or_else(|| self.visited_file().map(|f| f.1))
             .filter(|f| choices.contains(f));
-        let Some(inp) = self.read_line_prompt(prompt, default.as_deref())? else {
+        let table = Completion { candidates: choices.to_vec(), require_match: true, multiple: true };
+        let Some(inp) = self
+            .completing_read(prompt, default.as_deref(), Hist::Minibuffer, Some(table))?
+            .filter(|s| !s.is_empty())
+        else {
             return Ok(None);
         };
         let mut files = Vec::new();
@@ -4722,7 +4862,9 @@ impl App {
 
     /// magit-completing-read with require-match.
     fn read_choice(&mut self, prompt: &str, choices: &[String], default: Option<&str>) -> Result<Option<String>> {
-        let Some(v) = self.read_line_prompt(prompt, default)? else {
+        let table = Completion { candidates: choices.to_vec(), require_match: true, multiple: false };
+        let Some(v) = self.completing_read(prompt, default, Hist::Minibuffer, Some(table))?.filter(|s| !s.is_empty())
+        else {
             return Ok(None);
         };
         if choices.contains(&v) {
@@ -4907,7 +5049,7 @@ impl App {
                     Some((r, _)) if r != "{worktree}" && r != "{index}" => Some(r),
                     _ => self.branch_or_commit_default(),
                 };
-                let Some(rev) = self.read_line_prompt("Checkout from revision", default.as_deref())? else {
+                let Some(rev) = self.read_rev("Checkout from revision", default.as_deref())? else {
                     return Ok(());
                 };
                 let Some(file) = self.read_file_from_rev(&rev, "Checkout file")? else {
@@ -4983,7 +5125,7 @@ impl App {
             // magit-find-file
             "find-file" => {
                 let default = self.branch_or_commit_default();
-                let Some(rev) = self.read_line_prompt("Find file from revision", default.as_deref())? else {
+                let Some(rev) = self.read_rev("Find file from revision", default.as_deref())? else {
                     return Ok(());
                 };
                 let from = if rev == "{worktree}" || rev == "{index}" { "HEAD" } else { rev.as_str() };
@@ -5265,7 +5407,7 @@ impl App {
                 choices.extend(self.git.remote_branches());
                 let default = self.branch_prefer_other_default();
                 let prompt = if force { "Force delete branch" } else { "Delete branch" };
-                match self.pick(prompt, &choices, default.as_deref())? {
+                match self.pick_rev(prompt, &choices, default.as_deref())? {
                     Some(b) => vec![b.clone()],
                     None => return Ok(()),
                 }
@@ -5944,10 +6086,10 @@ impl App {
         match cmd {
             // ---- bisect
             "bisect-start" => {
-                let Some(bad) = self.read_line_prompt("Bisect bad revision", Some("HEAD"))? else {
+                let Some(bad) = self.read_rev("Bisect bad revision", Some("HEAD"))? else {
                     return Ok(());
                 };
-                let good = self.read_line_prompt("Bisect good revisions (space separated)", None)?;
+                let good = self.read_rev("Bisect good revisions (space separated)", None)?;
                 let goods: Vec<String> = good
                     .as_deref()
                     .unwrap_or("")
@@ -5963,12 +6105,12 @@ impl App {
                     "bisect-good" => "good",
                     _ => "skip",
                 };
-                let rev = self.read_line_prompt(&format!("Bisect {state} revision"), Some("HEAD"))?;
+                let rev = self.read_rev(&format!("Bisect {state} revision"), Some("HEAD"))?;
                 let res = self.git.bisect_mark(state, rev.as_deref());
                 self.done(&format!("bisect {state}"), res);
             }
             "bisect-reset" => {
-                let rev = self.read_line_prompt("Reset to revision (empty = pre-bisect HEAD)", None)?;
+                let rev = self.read_rev("Reset to revision (empty = pre-bisect HEAD)", None)?;
                 let res = self.git.bisect_reset(rev.as_deref());
                 self.done("bisect reset", res);
             }
@@ -5979,10 +6121,10 @@ impl App {
             "bisect-run" | "bisect-start-run" => {
                 // magit-bisect-run: when not bisecting yet, start first
                 if cmd == "bisect-start-run" || !self.git.bisect_in_progress() {
-                    let Some(bad) = self.read_line_prompt("Bisect bad revision", Some("HEAD"))? else {
+                    let Some(bad) = self.read_rev("Bisect bad revision", Some("HEAD"))? else {
                         return Ok(());
                     };
-                    let Some(good) = self.read_line_prompt("Bisect good revision", None)? else {
+                    let Some(good) = self.read_rev("Bisect good revision", None)? else {
                         return Ok(());
                     };
                     if let Err(e) = self.git.bisect_start(Some(&bad), &[good]) {
@@ -6098,7 +6240,7 @@ impl App {
                 self.show("notes", res);
             }
             "notes-edit" => {
-                let Some(rev) = self.read_line_prompt("Note for revision", Some("HEAD"))? else {
+                let Some(rev) = self.read_rev("Note for revision", Some("HEAD"))? else {
                     return Ok(());
                 };
                 let Some(msg) = self.read_line_prompt("Note text (one line)", None)? else {
@@ -6108,14 +6250,14 @@ impl App {
                 self.done("note saved", res);
             }
             "notes-show" => {
-                let Some(rev) = self.read_line_prompt("Show note for revision", Some("HEAD"))? else {
+                let Some(rev) = self.read_rev("Show note for revision", Some("HEAD"))? else {
                     return Ok(());
                 };
                 let res = self.git.notes_show(&rev);
                 self.show(&format!("notes {rev}"), res);
             }
             "notes-remove" => {
-                let Some(rev) = self.read_line_prompt("Remove note from revision", Some("HEAD"))? else {
+                let Some(rev) = self.read_rev("Remove note from revision", Some("HEAD"))? else {
                     return Ok(());
                 };
                 if !self.yes_no(&format!("Remove note from {rev}?"))? {
@@ -6185,7 +6327,7 @@ impl App {
                 let Some(repo) = self.read_line_prompt("Subtree repository", None)? else {
                     return Ok(());
                 };
-                let Some(rev) = self.read_line_prompt("Subtree revision", Some("HEAD"))? else {
+                let Some(rev) = self.read_rev("Subtree revision", Some("HEAD"))? else {
                     return Ok(());
                 };
                 let res = match cmd {
@@ -6207,7 +6349,7 @@ impl App {
             // ---- patches
             "patches-format" => {
                 let Some(range) =
-                    self.read_line_prompt("Format patches for range", Some("HEAD~3..HEAD"))?
+                    self.read_rev("Format patches for range", Some("HEAD~3..HEAD"))?
                 else {
                     return Ok(());
                 };
@@ -6282,7 +6424,7 @@ impl App {
             }
             "request-pull" => {
                 let default_start = self.git.upstream_shortname();
-                let Some(start) = self.read_line_prompt("Start (first commit not to include)", default_start.as_deref())? else {
+                let Some(start) = self.read_rev("Start (first commit not to include)", default_start.as_deref())? else {
                     return Ok(());
                 };
                 let default_url = self
@@ -6293,7 +6435,7 @@ impl App {
                 let Some(url) = self.read_line_prompt("Public repository url", default_url.as_deref())? else {
                     return Ok(());
                 };
-                let end = self.read_line_prompt("End (default HEAD)", None)?;
+                let end = self.read_rev("End (default HEAD)", None)?;
                 let res = self.git.request_pull(&start, &url, end.as_deref());
                 self.show("request-pull", res);
             }
@@ -6305,7 +6447,7 @@ impl App {
             }
             "branch-config-upstream" => {
                 let default = self.git.upstream_shortname();
-                let Some(up) = self.read_line_prompt("Upstream branch", default.as_deref())? else {
+                let Some(up) = self.read_rev("Upstream branch", default.as_deref())? else {
                     return Ok(());
                 };
                 let res = self.git.branch_set_upstream(&up);
@@ -6378,7 +6520,7 @@ impl App {
             }
             "rebase-subset" => {
                 let default = self.git.upstream_shortname();
-                let Some(newbase) = self.read_line_prompt("Rebase subset onto", default.as_deref())? else {
+                let Some(newbase) = self.read_rev("Rebase subset onto", default.as_deref())? else {
                     return Ok(());
                 };
                 let msg = format!("Type %p on a commit to rebase it and commits above it onto {newbase},");
@@ -6498,7 +6640,7 @@ impl App {
             .filter(|b| Some(b) != current.as_ref())
             .collect();
         let (absorbed, res) = if cmd == "merge-absorb" {
-            let Some(branch) = self.pick("Absorb branch", &others, None)?.cloned() else {
+            let Some(branch) = self.pick_rev("Absorb branch", &others, None)?.cloned() else {
                 return Ok(());
             };
             if !self.confirm_absorb(&branch)? {
@@ -6517,7 +6659,7 @@ impl App {
                 .and_then(|b| self.git.upstream_of(b))
                 .filter(|(r, _)| r == ".")
                 .map(|(_, b)| b);
-            let Some(into) = self.pick(&format!("Merge `{label}' into"), &others, default.as_deref())?.cloned()
+            let Some(into) = self.pick_rev(&format!("Merge `{label}' into"), &others, default.as_deref())?.cloned()
             else {
                 return Ok(());
             };
@@ -6558,7 +6700,7 @@ impl App {
                 return Ok(());
             }
         };
-        let Some(spec) = self.read_line_prompt(&format!("{verb} cherry (commit or A..B)"), None)? else {
+        let Some(spec) = self.read_rev(&format!("{verb} cherry (commit or A..B)"), None)? else {
             return Ok(());
         };
         let commits = match self.git.resolve_cherries(&spec) {
@@ -6582,7 +6724,7 @@ impl App {
                 let src = match branches.len() {
                     0 => None,
                     1 => Some(branches[0].clone()),
-                    _ => match self.pick(&format!("Remove {cherries} from branch"), &branches, None)? {
+                    _ => match self.pick_rev(&format!("Remove {cherries} from branch"), &branches, None)? {
                         Some(b) => Some(b.clone()),
                         None => return Ok(()),
                     },
@@ -6592,7 +6734,7 @@ impl App {
             "cherry-donate" => {
                 let others: Vec<String> =
                     self.git.branches().into_iter().filter(|b| *b != current).collect();
-                let Some(dst) = self.pick(&format!("Move {cherries} to branch"), &others, None)?.cloned() else {
+                let Some(dst) = self.pick_rev(&format!("Move {cherries} to branch"), &others, None)?.cloned() else {
                     return Ok(());
                 };
                 self.git.cherry_move(&commits, Some(&current), &dst, args, None, false)
@@ -6608,7 +6750,7 @@ impl App {
                     return Ok(());
                 }
                 let default_start = self.git.upstream_shortname().unwrap_or_else(|| current.clone());
-                let Some(start) = self.read_line_prompt(
+                let Some(start) = self.read_rev(
                     &format!("Create branch from {cherries} starting at"),
                     Some(&default_start),
                 )?
