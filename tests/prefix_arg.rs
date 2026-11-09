@@ -463,6 +463,13 @@ fn read_instead_of_thing_at_point() {
     assert_eq!(app.prompts().len(), before);
     assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev.starts_with(&head)), "{:?}", app.mode());
     app.press("q").unwrap();
+    // RET (magit-show-commit) likewise
+    goto_by(&mut app, &head, |t| t.contains(&head));
+    app.script_answers(&["HEAD~1"]);
+    press(&mut app, &["C-u", "RET"]);
+    assert_eq!(last_prompt(&app), "Show commit");
+    assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "HEAD~1"), "{:?}", app.mode());
+    app.press("q").unwrap();
     app.script_answers(&["HEAD~1"]);
     press(&mut app, &["d", "C-u", "c"]);
     assert_eq!(last_prompt(&app), "Show commit");
@@ -480,4 +487,25 @@ fn read_instead_of_thing_at_point() {
         "{:?}",
         app.mode()
     );
+}
+
+#[test]
+fn show_stash_read() {
+    let (_td, g, _) = repo_with_commit();
+    write(&g, "file.txt", "one\n");
+    git(&g, &["stash", "-q"]);
+    write(&g, "file.txt", "two\n");
+    git(&g, &["stash", "-q"]);
+    let mut app = App::new(g);
+    goto(&mut app, "Stashes (2)");
+    app.press("TAB").unwrap();
+    goto_by(&mut app, "stash@{0}", |t| t.starts_with("stash@{0}"));
+    app.press("RET").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Stash { stash } if stash == "stash@{0}"), "{:?}", app.mode());
+    app.press("q").unwrap();
+    goto_by(&mut app, "stash@{0}", |t| t.starts_with("stash@{0}"));
+    app.script_answers(&["stash@{1}"]);
+    press(&mut app, &["C-u", "RET"]);
+    assert_eq!(last_prompt(&app), "Show stash");
+    assert!(matches!(app.mode(), BufferMode::Stash { stash } if stash == "stash@{1}"), "{:?}", app.mode());
 }

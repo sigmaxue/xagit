@@ -182,6 +182,20 @@ fn visit_ref() {
     assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "origin/feature"), "{:?}", app.mode());
     app.press("q").unwrap();
     assert!(matches!(app.mode(), BufferMode::Refs { .. }));
+    // with a prefix argument magit-show-commit reads the revision, the
+    // ref at point the default
+    goto(&mut app, "topic           topic work");
+    app.script_keys(&["RET"]);
+    press(&mut app, &["C-u", "RET"]);
+    assert_eq!(app.prompts().last().map(String::as_str), Some("Show commit"));
+    assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "topic"), "{:?}", app.mode());
+    app.press("q").unwrap();
+    goto(&mut app, "topic           topic work");
+    app.script_keys(&["C-a", "C-k", "v", "1", "TAB", "RET"]);
+    press(&mut app, &["C-u", "RET"]);
+    assert!(matches!(app.mode(), BufferMode::Revision { rev, .. } if rev == "v1.0"), "{:?}", app.mode());
+    assert_eq!(app.revision_history()[0], "v1.0");
+    app.press("q").unwrap();
     // magit-branch-or-commit-at-point is the default of b b
     goto(&mut app, "topic           topic work");
     app.script_answers(&[""]);

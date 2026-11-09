@@ -3009,8 +3009,11 @@ impl App {
             }
             "dwim" => self.diff_dwim()?,
             "commit" => {
+                // magit-thing-at-point 'git-revision, else
+                // magit-branch-or-commit-at-point
                 let atpoint = match self.current_line().map(|l| l.kind.clone()) {
                     Some(LineKind::Commit { hash, .. }) => Some(hash),
+                    Some(LineKind::Ref { name, .. }) => Some(name),
                     _ => match &self.mode {
                         BufferMode::Revision { rev, .. } => Some(rev.clone()),
                         _ => None,
@@ -3020,8 +3023,9 @@ impl App {
                 let rev = match atpoint {
                     Some(r) if self.prefix_arg.is_none() => Some(r),
                     Some(r) => {
-                        let short = self.git.rev_short(&r);
-                        self.read_rev("Show commit", Some(&short))?
+                        let full = r.len() >= 40 && r.chars().all(|c| c.is_ascii_hexdigit());
+                        let default = if full { self.git.rev_short(&r) } else { r };
+                        self.read_rev("Show commit", Some(&default))?
                     }
                     None => {
                         let current = self.git.current_branch();
@@ -5921,10 +5925,11 @@ impl App {
             LineKind::SectionHeader { section, .. } if section == "stashes" => {
                 self.setup_buffer(BufferMode::Stashes { refname: "refs/stash".into() }, Vec::new())
             }
-            LineKind::Stash { name, .. } => self.show_stash(&name),
-            LineKind::Commit { hash, .. } => self.show_commit(&hash),
-            // magit-visit-ref (magit-visit-ref-behavior nil)
-            LineKind::Ref { name, .. } => self.show_commit(&name),
+            // magit-stash-show / magit-show-commit, reading the stash or
+            // revision with a prefix argument; magit-visit-ref
+            // (magit-visit-ref-behavior nil) like magit-show-commit
+            LineKind::Stash { .. } => self.diff_view("stash")?,
+            LineKind::Commit { .. } | LineKind::Ref { .. } => self.diff_view("commit")?,
             _ => self.set_msg("There is no thing at point that could be visited"),
         }
         Ok(())
