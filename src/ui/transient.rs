@@ -395,6 +395,89 @@ pub fn write_values(path: &std::path::Path, values: &BTreeMap<String, Vec<String
     std::fs::write(path, text)
 }
 
+/// transient-history-limit: the values kept per key when saving.
+pub const HISTORY_LIMIT: usize = 10;
+
+/// transient-history: the values used by each prefix (latest first) and
+/// the values read by each infix (latest first, keyed by its argument).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct History {
+    pub prefixes: BTreeMap<String, Vec<Vec<String>>>,
+    pub infixes: BTreeMap<String, Vec<String>>,
+}
+
+/// transient-history-file: next to the values file.
+pub fn default_history_file() -> Option<std::path::PathBuf> {
+    Some(default_values_file()?.with_file_name("transient-history"))
+}
+
+/// Read the history file: a line per value, "P", the prefix's key and the
+/// arguments, or "I", the infix's key and the value, separated by tabs,
+/// latest first. A missing or unreadable file has no history.
+pub fn read_history(path: &std::path::Path) -> History {
+    let mut h = History::default();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return h;
+    };
+    for line in text.lines() {
+        let mut it = line.split('\t');
+        match (it.next(), it.next()) {
+            (Some("P"), Some(key)) => {
+                let args = it.filter(|a| !a.is_empty()).map(String::from).collect();
+                h.prefixes.entry(key.to_string()).or_default().push(args);
+            }
+            (Some("I"), Some(key)) => {
+                if let Some(v) = it.next() {
+                    h.infixes.entry(key.to_string()).or_default().push(v.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    h
+}
+
+/// transient-save-history: write HISTORY sorted by key, each list without
+/// duplicates and cut to HISTORY_LIMIT (nothing is written when there is
+/// no history and no file yet). Values containing tabs or newlines are
+/// skipped.
+pub fn write_history(path: &std::path::Path, history: &History) -> std::io::Result<()> {
+    if history.prefixes.is_empty() && history.infixes.is_empty() && !path.exists() {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let ok = |s: &str| !s.contains(['\t', '\n']);
+    let mut text = String::new();
+    for (key, values) in &history.prefixes {
+        let mut seen: Vec<&Vec<String>> = Vec::new();
+        for v in values.iter().filter(|v| v.iter().all(|a| ok(a))) {
+            if seen.len() == HISTORY_LIMIT {
+                break;
+            }
+            if !seen.contains(&v) {
+                seen.push(v);
+                text.push_str(&std::iter::once("P").chain([key.as_str()]).chain(v.iter().map(String::as_str)).collect::<Vec<_>>().join("\t"));
+                text.push('\n');
+            }
+        }
+    }
+    for (key, values) in &history.infixes {
+        let mut seen: Vec<&String> = Vec::new();
+        for v in values.iter().filter(|v| ok(v)) {
+            if seen.len() == HISTORY_LIMIT {
+                break;
+            }
+            if !seen.contains(&v) {
+                seen.push(v);
+                text.push_str(&format!("I\t{key}\t{v}\n"));
+            }
+        }
+    }
+    std::fs::write(path, text)
+}
+
 /// magit-blame: "r" and "f" only in blob buffers (:if-nil
 /// buffer-file-name), "q" and the Refresh group only while BLAMING.
 pub fn blame_menu(blob: bool, blaming: bool) -> Menu {

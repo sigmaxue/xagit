@@ -1,6 +1,6 @@
 //! ui/app.rs — application state machine, event loop, prompts and command dispatch.
 
-use super::keys::Key;
+use super::keys::{key_from_label, Key};
 use super::blame::{blob_ancestor, blob_successor, build_file, Blame, BlameType, STYLES};
 use super::transient::{
     blame_menu, diff_refresh_menu, file_dispatch_menu, log_refresh_menu, prefix_value, registry, resolve_menu,
@@ -11,6 +11,7 @@ use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
     build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
 };
+use super::minibuf::{add_to_history, LineEditor, Step};
 use super::refs::{build_refs, deferred_ref, CommitCount, RefKind};
 use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
@@ -92,6 +93,16 @@ pub struct App {
     pub log_args: Vec<String>,
     /// answers used instead of reading from the terminal (tests)
     scripted: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// answers typed as keys into the minibuffer (tests), used when there
+    /// are no scripted answers
+    scripted_keys: std::cell::RefCell<std::collections::VecDeque<Vec<Key>>>,
+    /// minibuffer-history: the inputs of prompts without a history of
+    /// their own, newest first (not saved)
+    minibuffer_history: std::cell::RefCell<Vec<String>>,
+    /// the history of each infix (its values read, newest first)
+    infix_history: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
+    /// transient-history-file
+    history_file: Option<std::path::PathBuf>,
     /// the prompts answered so far (tests)
     prompts: std::cell::RefCell<Vec<String>>,
     /// the TUI owns the terminal (`run`): it is handed over to editors
@@ -435,6 +446,10 @@ impl App {
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            minibuffer_history: std::cell::RefCell::new(Vec::new()),
+            infix_history: std::cell::RefCell::new(BTreeMap::new()),
+            history_file: None,
             prompts: std::cell::RefCell::new(Vec::new()),
             in_terminal: false,
             set_values: HashMap::new(),
@@ -812,6 +827,66 @@ impl App {
         self.prompts.borrow().clone()
     }
 
+    /// Answers typed as KEYS (key labels) into the minibuffer of the
+    /// next prompts, one answer per call, after the scripted answers.
+    pub fn script_keys(&self, keys: &[&str]) {
+        self.scripted_keys.borrow_mut().push_back(keys.iter().map(|k| key_from_label(k)).collect());
+    }
+
+    /// The values read by the infix of the argument ARG, newest first.
+    pub fn infix_history(&self, arg: &str) -> Vec<String> {
+        self.infix_history.borrow().get(arg).cloned().unwrap_or_default()
+    }
+
+    /// The values the prefix KEY was used with, newest first.
+    pub fn prefix_history(&self, key: &str) -> Vec<Vec<String>> {
+        self.history.get(key).cloned().unwrap_or_default()
+    }
+
+    /// minibuffer-history, newest first.
+    pub fn minibuffer_history(&self) -> Vec<String> {
+        self.minibuffer_history.borrow().clone()
+    }
+
+    /// transient-history-file: read the history saved by earlier sessions
+    /// (merged after the values used in this one), and save to FILE when
+    /// quitting.
+    pub fn load_history(&mut self, file: std::path::PathBuf) {
+        let h = super::transient::read_history(&file);
+        for (k, vs) in h.prefixes {
+            let e = self.history.entry(k).or_default();
+            for v in vs {
+                if !e.contains(&v) {
+                    e.push(v);
+                }
+            }
+        }
+        let mut ih = self.infix_history.borrow_mut();
+        for (k, vs) in h.infixes {
+            let e = ih.entry(k).or_default();
+            for v in vs {
+                if !e.contains(&v) {
+                    e.push(v);
+                }
+            }
+        }
+        drop(ih);
+        self.history_file = Some(file);
+    }
+
+    /// transient-maybe-save-history (kill-emacs-hook)
+    pub fn save_history(&mut self) {
+        let Some(f) = &self.history_file else { return };
+        let h = super::transient::History {
+            prefixes: self.history.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            infixes: self.infix_history.borrow().clone(),
+        };
+        if let Err(e) = super::transient::write_history(f, &h) {
+            let msg = format!("Error saving transient history: {e}");
+            self.set_msg(&msg);
+        }
+    }
+
     /// Answers consumed by prompts instead of reading the terminal (tests).
     pub fn script_answers(&mut self, answers: &[&str]) {
         self.scripted.borrow_mut().extend(answers.iter().map(|s| s.to_string()));
@@ -821,13 +896,61 @@ impl App {
         Ok(self.read_line_raw(prompt, default)?.filter(|s| !s.is_empty()))
     }
 
-    /// Read a line (the DEFAULT when empty); only EOF gives none.
+    /// Read the value of the infix of ARG (with its history), trimmed, the
+    /// DEFAULT when empty.
+    fn read_infix(&self, prompt: &str, default: Option<&str>, arg: &str) -> Result<Option<String>> {
+        Ok(self.read_line_hist(prompt, default, Some(arg))?.map(|i| {
+            let s = i.trim().to_string();
+            match default {
+                Some(d) if s.is_empty() => d.to_string(),
+                _ => s,
+            }
+        }))
+    }
+
+    /// Read a line (the DEFAULT when empty) with minibuffer-history; only
+    /// EOF and C-g give none.
     fn read_line_raw(&self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+        let input = self.read_line_hist(prompt, default, None)?;
+        if let Some(i) = &input {
+            add_to_history(&mut self.minibuffer_history.borrow_mut(), i.trim(), false);
+        }
+        Ok(input.map(|i| {
+            let s = i.trim().to_string();
+            match default {
+                Some(d) if s.is_empty() => d.to_string(),
+                _ => s,
+            }
+        }))
+    }
+
+    /// Read the input of a line in the minibuffer, M-p / M-n moving
+    /// through the history HIST (the infix history of that key; None:
+    /// minibuffer-history). The input isn't added to the history.
+    fn read_line_hist(&self, prompt: &str, default: Option<&str>, hist: Option<&str>) -> Result<Option<String>> {
         self.prompts.borrow_mut().push(prompt.to_string());
-        let scripted = self.scripted.borrow_mut().pop_front();
-        let buf = if let Some(ans) = scripted {
-            ans
-        } else {
+        if let Some(ans) = self.scripted.borrow_mut().pop_front() {
+            return Ok(Some(ans));
+        }
+        let history = match hist {
+            Some(k) => self.infix_history.borrow().get(k).cloned().unwrap_or_default(),
+            None => self.minibuffer_history.borrow().clone(),
+        };
+        let mut ed = LineEditor::new(history, default.map(str::to_string));
+        if let Some(keys) = self.scripted_keys.borrow_mut().pop_front() {
+            for k in &keys {
+                match ed.key(k) {
+                    Step::Done(s) => return Ok(Some(s)),
+                    Step::Abort => return Ok(None),
+                    Step::Continue | Step::Message(_) => {}
+                }
+            }
+            return Ok(Some(ed.text()));
+        }
+        if self.in_terminal {
+            return self.minibuffer(prompt, default, ed);
+        }
+        {
             // Leave raw mode temporarily to read a normal line.
             let _ = disable_raw_mode();
             let mut out = stdout();
@@ -850,15 +973,45 @@ impl App {
             if n == 0 {
                 return Ok(None); // EOF / C-d
             }
-            buf
+            Ok(Some(buf.trim_end_matches(['\n', '\r']).to_string()))
+        }
+    }
+
+    /// The minibuffer in the terminal: the prompt and the input on the
+    /// last line, a message after the input until the next key.
+    fn minibuffer(&self, prompt: &str, default: Option<&str>, mut ed: LineEditor) -> Result<Option<String>> {
+        let prompt = match default {
+            Some(d) => format!("{prompt} (default: {d}): "),
+            None => format!("{prompt}: "),
         };
-        let mut s = buf.trim().to_string();
-        if s.is_empty() {
-            if let Some(d) = default {
-                s = d.to_string();
+        let mut msg = String::new();
+        loop {
+            let mut out = stdout();
+            let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+            let text = ed.text();
+            let line = if msg.is_empty() { format!("{prompt}{text}") } else { format!("{prompt}{text} [{msg}]") };
+            let col = prompt.chars().count() + ed.point();
+            let _ = execute!(
+                out,
+                crossterm::cursor::MoveTo(0, h.saturating_sub(1)),
+                Clear(ClearType::CurrentLine),
+                crossterm::style::Print(line.chars().take(w as usize).collect::<String>()),
+                crossterm::cursor::MoveTo(col.min((w as usize).saturating_sub(1)) as u16, h.saturating_sub(1)),
+                crossterm::cursor::Show
+            );
+            let _ = out.flush();
+            let Event::Key(ev) = event::read()? else { continue };
+            if ev.kind == crossterm::event::KeyEventKind::Release {
+                continue;
+            }
+            msg.clear();
+            match ed.key(&Key::from_event(&ev)) {
+                Step::Done(s) => return Ok(Some(s)),
+                Step::Abort => return Ok(None),
+                Step::Message(m) => msg = m,
+                Step::Continue => {}
             }
         }
-        Ok(Some(s))
     }
 
     fn yes_no(&self, prompt: &str) -> Result<bool> {
@@ -989,6 +1142,7 @@ impl App {
             }
             self.draw();
         }
+        self.save_history();
         let _ = execute!(stdout(), LeaveAlternateScreen);
         let _ = disable_raw_mode();
         Ok(())
@@ -1488,6 +1642,11 @@ impl App {
         menu: Menu,
         mut active: BTreeMap<String, bool>,
     ) -> Result<()> {
+        // transient-map: C-M-p / C-M-n
+        if key.ctrl && (key.code == "M-p" || key.code == "M-n") && self.pending.is_empty() {
+            self.transient_history(key.code == "M-p");
+            return Ok(());
+        }
         // transient-common-commands: the value commands under C-x
         let cx = Key { code: "x".into(), ctrl: true };
         if self.pending == [cx.clone()] {
@@ -1615,10 +1774,20 @@ impl App {
     /// user quit (nothing changes); Some(None): unset; Some(Some(v)): set
     /// to ARG followed by V.
     fn read_option(&mut self, arg: &str, reader: &Reader) -> Result<Option<Option<String>>> {
+        let value = self.read_option_value(arg, reader)?;
+        // transient-infix-read: the value read becomes the newest of the
+        // infix's history
+        if let Some(Some(v)) = &value {
+            add_to_history(self.infix_history.borrow_mut().entry(arg.to_string()).or_default(), v, true);
+        }
+        Ok(value)
+    }
+
+    fn read_option_value(&mut self, arg: &str, reader: &Reader) -> Result<Option<Option<String>>> {
         let value = match reader {
             Reader::Choices(choices) => {
                 let prompt = format!("{arg} [unspecified, {}]", choices.join(", "));
-                let Some(v) = self.read_line_prompt(&prompt, Some("unspecified"))? else {
+                let Some(v) = self.read_infix(&prompt, Some("unspecified"), arg)?.filter(|v| !v.is_empty()) else {
                     return Ok(None);
                 };
                 if "unspecified".starts_with(v.as_str()) {
@@ -1644,11 +1813,8 @@ impl App {
             _ => {
                 // an option with :allow-empty is the argument alone when
                 // the answer is empty
-                let read = if *reader == Reader::OptionalNumber {
-                    self.read_line_raw(arg, None)?
-                } else {
-                    self.read_line_prompt(arg, None)?
-                };
+                let read = self.read_infix(arg, None, arg)?;
+                let read = if *reader == Reader::OptionalNumber { read } else { read.filter(|v| !v.is_empty()) };
                 let Some(v) = read else {
                     return Ok(None);
                 };
@@ -6545,6 +6711,9 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
     }
     if let Some(f) = super::transient::default_values_file() {
         app.load_values(f);
+    }
+    if let Some(f) = super::transient::default_history_file() {
+        app.load_history(f);
     }
     app.run()
 }
