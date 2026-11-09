@@ -6435,9 +6435,43 @@ impl App {
                 return Ok(());
             }
         }
-        let res = self.git.worktree_prune();
+        if self.git.toplevel.exists() {
+            let res = self.git.git_interactive(&["worktree", "prune"]);
+            self.done("", res.map(|_| String::new()));
+            return Ok(());
+        }
+        // the worktree of this buffer was deleted: pruned from the primary
+        // one, whose status replaces a status buffer
+        let primary = std::path::PathBuf::from(&worktrees[0].0);
+        let git = match Git::discover(&primary) {
+            Ok(g) => g,
+            Err(e) => {
+                self.set_msg(&e.to_string());
+                return Ok(());
+            }
+        };
+        let res = git.git_interactive(&["worktree", "prune"]);
+        self.switch_repository(git);
         self.done("", res.map(|_| String::new()));
         Ok(())
+    }
+
+    /// Show the repository of GIT: the buffers of the current one are
+    /// killed, a status buffer becomes that of GIT.
+    fn switch_repository(&mut self, git: Git) {
+        self.cwd = git.toplevel.clone();
+        self.git = git;
+        self.buried.clear();
+        self.background.clear();
+        self.mark = None;
+        self.view_text = None;
+        if self.mode == BufferMode::Status {
+            self.buf = StatusBuffer::default();
+            self.vis.clear();
+            self.lines.clear();
+            self.cursor = 0;
+            self.scroll = 0;
+        }
     }
 
     /// magit-branch-reset: reset BRANCH (read, the local branch at point

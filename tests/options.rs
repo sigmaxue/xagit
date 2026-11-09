@@ -517,3 +517,28 @@ fn worktree_delete() {
     assert!(!trash.join("wt2").exists());
     assert!(!g.git_string(&["worktree", "list"]).unwrap().contains("wt2"));
 }
+
+#[test]
+fn worktree_delete_current() {
+    let (_td, g, _) = repo_with_commit();
+    let ttd = tempfile::tempdir().unwrap();
+    let trash = ttd.path().join("trash");
+    let wt = ttd.path().join("wt");
+    git(&g, &["worktree", "add", "-q", "-b", "a", &wt.to_string_lossy()]);
+    let wg = Git::discover(&wt).unwrap();
+    let mut app = App::new(wg.clone());
+    app.set_options(options(&format!("trash-directory {}", trash.display())));
+    // the status of the worktree, a diff buffer buried below it
+    press(&mut app, &["d", "d"]);
+    app.press("q").unwrap();
+    let wt_path = wg.toplevel.to_string_lossy().into_owned();
+    app.script_answers(&[&wt_path, "y"]);
+    press(&mut app, &["%", "k"]);
+    assert!(!wt.exists(), "{}", app.message());
+    // pruned from the primary worktree, whose status is shown
+    assert!(!g.git_string(&["worktree", "list"]).unwrap().contains("/wt"));
+    assert_eq!(app.git.toplevel, g.toplevel);
+    assert_eq!(app.cwd, g.toplevel);
+    assert!(app.visible_lines()[0].text.starts_with("Head:"), "{:?}", app.visible_lines()[0].text);
+    assert!(app.visible_lines().iter().any(|l| l.text.contains("master")));
+}
