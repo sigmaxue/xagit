@@ -3,8 +3,8 @@
 use super::keys::Key;
 use super::blame::{blob_ancestor, blob_successor, build_file, Blame, BlameType, STYLES};
 use super::transient::{
-    diff_refresh_menu, log_refresh_menu, prefix_value, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader,
-    RepoState, VALUE_COMMANDS,
+    blame_menu, diff_refresh_menu, file_dispatch_menu, log_refresh_menu, prefix_value, registry, resolve_menu, Action,
+    Lookup, Menu, MenuEntry, Reader, RepoState, VALUE_COMMANDS,
 };
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
 use super::logbuf::{
@@ -161,6 +161,17 @@ impl BufferMode {
             _ => return None,
         })
     }
+}
+
+/// regexp-quote
+fn regex_quote(s: &str) -> String {
+    s.chars().fold(String::new(), |mut out, c| {
+        if "[*.\\?+^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+        out
+    })
 }
 
 /// The default of the margin option NAME (magit-log-margin and friends).
@@ -858,6 +869,8 @@ impl App {
                 (true, "k") if select => self.bury_buffer(),
                 // magit-blame-mode-map
                 (true, "q") if blaming => self.blame_quit(),
+                // the global binding of magit-file-dispatch
+                (false, "M-g") => self.open_menu("file-dispatch"),
                 _ => self.set_msg(&format!("C-c {} is undefined", key.label())),
             }
             return Ok(());
@@ -983,6 +996,18 @@ impl App {
             // "Arguments" group elsewhere
             let full = matches!(self.mode, BufferMode::Log { .. });
             self.menus.insert(name.clone(), log_refresh_menu(full));
+        }
+        // suffixes with :if conditions on the visited file or blob
+        let (in_file, blob, blaming) = match &self.mode {
+            BufferMode::File { rev, blame, .. } => (true, rev != "{worktree}", blame.is_some()),
+            _ => (false, false, false),
+        };
+        if name == "blame-menu" {
+            self.menus.insert(name.clone(), blame_menu(blob, blaming));
+        }
+        if name == "file-dispatch" {
+            let status = self.mode == BufferMode::Status;
+            self.menus.insert(name.clone(), file_dispatch_menu(in_file, blaming, status));
         }
         // `d` starts with the arguments of the diff buffer shown, else the
         // current value of magit-diff-mode; `D` with the buffer's arguments.
@@ -1167,6 +1192,14 @@ impl App {
     /// Name of the transient currently shown, if any.
     pub fn current_menu(&self) -> Option<&str> {
         self.stack.last().map(|(n, _)| n.as_str())
+    }
+
+    /// The keys of the suffixes and infixes of the transient shown.
+    pub fn menu_keys(&self) -> Vec<String> {
+        self.current_menu()
+            .and_then(|n| self.menus.get(n))
+            .map(|m| m.groups.iter().flatten().map(|e| e.key.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Feed one key (Emacs notation, e.g. "h", "C-g", "<tab>") as if typed.
@@ -1455,6 +1488,13 @@ impl App {
             "blame-removal" => self.blame(BlameType::Removal, args)?,
             "blame-reverse" => self.blame(BlameType::Final, args)?,
             "blame-quit" => self.blame_quit(),
+            // magit-file-dispatch
+            "file-stage" | "file-unstage" | "file-untrack" | "file-rename" | "file-delete" | "file-checkout"
+            | "diff-buffer-file" | "log-buffer-file" | "log-trace-definition" | "blob-previous" | "blob-next"
+            | "find-file" | "blob-visit-file" | "status-here" | "edit-line-commit" => self.file_command(cmd)?,
+            "stage-files" => self.stage_files()?,
+            "unstage-files" => self.unstage_files()?,
+            "display-repository-buffer" | "display-buffer" => self.display_repository_buffer()?,
             "quit" => self.bury_buffer(),
             "toggle-section" => self.toggle_section(),
             "visit" => self.visit_thing()?,
@@ -3468,14 +3508,41 @@ impl App {
     fn stage_files(&mut self) -> Result<()> {
         let mut choices = self.git.unstaged_files();
         choices.extend(self.git.untracked_files());
-        let default = self.current_file().map(|f| f.1).filter(|f| choices.contains(f));
-        let Some(file) = self.pick("Stage file,s", &choices, default.as_deref())?.cloned() else {
+        let Some(files) = self.pick_files("Stage file,s", &choices)? else {
             return Ok(());
         };
-        self.git.stage(&file)?;
+        let mut a = vec!["add", "--"];
+        a.extend(files.iter().map(String::as_str));
+        self.git.git_interactive(&a)?;
         self.set_msg("staged");
         self.refresh();
         Ok(())
+    }
+
+    /// magit-completing-read-multiple of files from CHOICES (separated by
+    /// commas), the default being the file at point or the visited file.
+    fn pick_files(&mut self, prompt: &str, choices: &[String]) -> Result<Option<Vec<String>>> {
+        if choices.is_empty() {
+            self.set_msg("no candidates");
+            return Ok(None);
+        }
+        let default = self
+            .current_file()
+            .map(|f| f.1)
+            .or_else(|| self.visited_file().map(|f| f.1))
+            .filter(|f| choices.contains(f));
+        let Some(inp) = self.read_line_prompt(prompt, default.as_deref())? else {
+            return Ok(None);
+        };
+        let mut files = Vec::new();
+        for f in inp.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+            if !choices.iter().any(|c| c == f) {
+                self.set_msg("no match");
+                return Ok(None);
+            }
+            files.push(f.to_string());
+        }
+        Ok(Some(files))
     }
 
     /// magit-stage-modified (S): `git add -u .`, confirming when something
@@ -3549,11 +3616,12 @@ impl App {
     /// magit-unstage-files: read staged files, default the file at point.
     fn unstage_files(&mut self) -> Result<()> {
         let choices = self.git.staged_files();
-        let default = self.current_file().map(|f| f.1).filter(|f| choices.contains(f));
-        let Some(file) = self.pick("Unstage file,s", &choices, default.as_deref())?.cloned() else {
+        let Some(files) = self.pick_files("Unstage file,s", &choices)? else {
             return Ok(());
         };
-        self.git.unstage(&file)?;
+        for f in &files {
+            self.git.unstage(f)?;
+        }
         self.set_msg("unstaged");
         self.refresh();
         Ok(())
@@ -4069,6 +4137,513 @@ impl App {
             let (n, unit) = super::logbuf::age(super::logbuf::now() - time.parse::<f64>().unwrap_or(0.0));
             self.set_msg(&format!("{subject} ({n} {unit} ago)"));
         }
+    }
+
+    /// (revision, file) of the file or blob buffer shown
+    /// (magit-buffer-revision, magit-file-relative-name).
+    fn visited_file(&self) -> Option<(String, String)> {
+        match &self.mode {
+            BufferMode::File { rev, file, .. } => Some((rev.clone(), file.clone())),
+            _ => None,
+        }
+    }
+
+    /// magit-current-file: the visited file, the file at point, or the
+    /// file the log buffer is limited to.
+    fn current_file_name(&self) -> Option<String> {
+        self.visited_file().map(|f| f.1).or_else(|| self.current_file().map(|f| f.1)).or_else(|| match &self.mode {
+            BufferMode::Log { files, .. } => files.first().cloned(),
+            _ => None,
+        })
+    }
+
+    fn is_tracked(&self, file: &str) -> bool {
+        self.git.git_ok(&["ls-files", "--error-unmatch", "--", file])
+    }
+
+    /// magit-read-file (TRACKED: magit-read-tracked-file) with
+    /// require-match, the default being the current file.
+    fn read_file_name(&mut self, prompt: &str, tracked: bool) -> Result<Option<String>> {
+        let mut choices = self.git.git_lines(&["ls-files", "--full-name", "-z"]);
+        if !tracked {
+            choices.extend(self.git.untracked_files());
+        }
+        let default = self.current_file_name().filter(|f| choices.contains(f));
+        self.read_choice(prompt, &choices, default.as_deref())
+    }
+
+    /// magit-read-file-from-rev
+    fn read_file_from_rev(&mut self, rev: &str, prompt: &str) -> Result<Option<String>> {
+        let choices = self.git.git_lines(&["ls-tree", "-r", "--full-tree", "--name-only", "-z", rev]);
+        let default = self.current_file_name().filter(|f| choices.contains(f));
+        self.read_choice(prompt, &choices, default.as_deref())
+    }
+
+    /// magit-completing-read with require-match.
+    fn read_choice(&mut self, prompt: &str, choices: &[String], default: Option<&str>) -> Result<Option<String>> {
+        let Some(v) = self.read_line_prompt(prompt, default)? else {
+            return Ok(None);
+        };
+        if choices.contains(&v) {
+            Ok(Some(v))
+        } else {
+            self.set_msg("[No match]");
+            Ok(None)
+        }
+    }
+
+    /// magit-branch-or-commit-at-point, else the current branch.
+    fn branch_or_commit_default(&self) -> Option<String> {
+        match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Commit { hash, .. }) => Some(self.git.rev_short(&hash)),
+            _ => self.git.current_branch(),
+        }
+    }
+
+    /// The files of the selected file sections (magit-region-values 'file).
+    fn region_files(&self) -> Option<Vec<String>> {
+        let secs = self.region_sections(true)?;
+        secs.iter()
+            .map(|&s| match &self.buf.all[self.sec(s).start].kind {
+                LineKind::File { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The file commands of magit-file-dispatch (magit-files.el).
+    fn file_command(&mut self, cmd: &str) -> Result<()> {
+        match cmd {
+            // magit-file-stage / magit-file-unstage
+            "file-stage" | "file-unstage" => {
+                let Some((_, file)) = self.visited_file().filter(|(r, _)| r == "{worktree}") else {
+                    self.set_msg("Not visiting a file");
+                    return Ok(());
+                };
+                if cmd == "file-unstage" {
+                    self.git.unstage(&file)?;
+                    self.set_msg("unstaged");
+                } else {
+                    let mut a = vec!["add"];
+                    if self.git.git_ok(&["check-ignore", "-q", "--", &file]) {
+                        if !self.yes_no("Visited file is ignored; stage anyway?")? {
+                            self.set_msg("Abort");
+                            return Ok(());
+                        }
+                        a.push("--force");
+                    }
+                    a.extend(["--", &file]);
+                    self.git.git_interactive(&a)?;
+                    self.set_msg("staged");
+                }
+                self.refresh();
+            }
+            // magit-file-untrack
+            "file-untrack" => {
+                let files = match self.region_files() {
+                    Some(files) => {
+                        if !self.is_tracked(&files[0]) {
+                            self.set_msg("Already untracked");
+                            return Ok(());
+                        }
+                        if !self.confirm_files("Untrack", &files)? {
+                            return Ok(());
+                        }
+                        files
+                    }
+                    None => match self.read_file_name("Untrack file", true)? {
+                        Some(f) => vec![f],
+                        None => return Ok(()),
+                    },
+                };
+                let mut a = vec!["rm", "--cached", "--"];
+                a.extend(files.iter().map(String::as_str));
+                let res = self.git.git_interactive(&a);
+                self.done("untracked", res.map(|()| String::new()));
+            }
+            // magit-file-rename
+            "file-rename" => {
+                let Some(file) = self.read_file_name("Rename file", false)? else {
+                    return Ok(());
+                };
+                let dir = match file.rfind('/') {
+                    Some(i) => file[..=i].to_string(),
+                    None => String::new(),
+                };
+                let prompt = format!("Move {file} to destination");
+                let Some(newname) = self.read_line_prompt(&prompt, Some(&dir).filter(|d| !d.is_empty()).map(|d| d.as_str()))?
+                else {
+                    return Ok(());
+                };
+                let top = self.git.toplevel.clone();
+                let base = file.rsplit('/').next().unwrap_or(&file).to_string();
+                let dst = if newname.ends_with('/') || top.join(&newname).is_dir() {
+                    format!("{}/{base}", newname.trim_end_matches('/'))
+                } else {
+                    newname
+                };
+                if top.join(&dst).exists() {
+                    self.set_msg(&format!("{dst} already exists"));
+                    return Ok(());
+                }
+                let dstdir = top.join(&dst).parent().map(std::path::Path::to_path_buf).unwrap_or(top.clone());
+                if !dstdir.is_dir() {
+                    self.set_msg(&format!("Destination directory {} does not exist", dstdir.display()));
+                    return Ok(());
+                }
+                if self.is_tracked(&file) {
+                    self.git.git_interactive(&["mv", &file, &dst])?;
+                } else {
+                    std::fs::rename(top.join(&file), top.join(&dst))?;
+                }
+                // the buffer visiting the file now visits the new name
+                if let BufferMode::File { rev, file: f, .. } = &mut self.mode {
+                    if rev == "{worktree}" && *f == file {
+                        *f = dst.clone();
+                    }
+                }
+                self.set_msg(&format!("renamed {file} to {dst}"));
+                self.refresh();
+            }
+            // magit-file-delete
+            "file-delete" => {
+                let files = match self.region_files() {
+                    Some(files) => {
+                        if !self.confirm_files("Delete", &files)? {
+                            return Ok(());
+                        }
+                        files
+                    }
+                    None => match self.read_file_name("Delete file", false)? {
+                        Some(f) => vec![f],
+                        None => return Ok(()),
+                    },
+                };
+                let top = self.git.toplevel.clone();
+                let dirs: Vec<&String> = files.iter().filter(|f| top.join(f).is_dir()).collect();
+                let mut args = vec!["rm"];
+                if !dirs.is_empty() {
+                    let what = if dirs.len() == 1 { "directory" } else { "directories" };
+                    let names = dirs.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(",");
+                    if !self.yes_no(&format!("Recursively delete {what} \"{names}\":"))? {
+                        self.set_msg("Abort");
+                        return Ok(());
+                    }
+                    args.push("-r");
+                }
+                if self.is_tracked(&files[0]) {
+                    args.push("--");
+                    args.extend(files.iter().map(String::as_str));
+                    let res = self.git.git_interactive(&args);
+                    self.done("deleted", res.map(|()| String::new()));
+                } else {
+                    for f in &files {
+                        let p = top.join(f);
+                        if p.is_dir() {
+                            std::fs::remove_dir_all(p)?;
+                        } else {
+                            std::fs::remove_file(p)?;
+                        }
+                    }
+                    self.set_msg("deleted");
+                    self.refresh();
+                }
+            }
+            // magit-file-checkout
+            "file-checkout" => {
+                let default = match self.visited_file() {
+                    Some((r, _)) if r != "{worktree}" && r != "{index}" => Some(r),
+                    _ => self.branch_or_commit_default(),
+                };
+                let Some(rev) = self.read_line_prompt("Checkout from revision", default.as_deref())? else {
+                    return Ok(());
+                };
+                let Some(file) = self.read_file_from_rev(&rev, "Checkout file")? else {
+                    return Ok(());
+                };
+                let res = self.git.git_interactive(&["checkout", &rev, "--", &file]);
+                self.done("checked out", res.map(|()| String::new()));
+            }
+            // magit-diff-buffer-file: the commit of a blob, else the
+            // changes to the file since the current branch
+            "diff-buffer-file" => {
+                let Some((rev, file)) = self.visited_file() else {
+                    self.set_msg("Buffer isn't visiting a file");
+                    return Ok(());
+                };
+                if rev != "{worktree}" && rev != "{index}" {
+                    let args = match &self.transient_diff_args {
+                        Some(a) => a.clone(),
+                        None => self.diff_args.clone(),
+                    };
+                    self.setup_buffer(BufferMode::Revision { rev, files: vec![file] }, args);
+                } else {
+                    let line = self.file_line().unwrap_or(1);
+                    let range = self.git.current_branch().unwrap_or_else(|| "HEAD".into());
+                    let spec = DiffSpec { range: Some(range), typearg: None, typ: "unstaged".into(), files: vec![file.clone()] };
+                    let args = self.transient_diff_args.clone().unwrap_or_else(|| self.diff_args.clone());
+                    self.setup_buffer(BufferMode::Diff(spec), args);
+                    self.goto_file_position(&file, line, &[]);
+                }
+            }
+            // magit-log-buffer-file: with a region, the log of its lines
+            "log-buffer-file" | "log-trace-definition" => {
+                let Some((rev, file)) = self.visited_file() else {
+                    self.set_msg("Buffer isn't visiting a file");
+                    return Ok(());
+                };
+                let rev = if rev == "{worktree}" || rev == "{index}" {
+                    self.git.current_branch().unwrap_or_else(|| "HEAD".into())
+                } else {
+                    rev
+                };
+                let mut args = self.log_arguments();
+                let mut files = vec![file.clone()];
+                let lines = if cmd == "log-trace-definition" {
+                    let Some(name) = self.which_function() else {
+                        self.set_msg("No function at point found");
+                        return Ok(());
+                    };
+                    Some(format!("-L:{}:{file}", regex_quote(&name).replace(':', "\\:")))
+                } else {
+                    self.mark.take().and_then(|m| {
+                        let line_at = |p: usize| match self.buf.all.get(p).map(|l| &l.kind) {
+                            Some(LineKind::FileLine { line, .. }) => Some(*line),
+                            _ => None,
+                        };
+                        let (a, b) = (line_at(m)?, self.file_line()?);
+                        Some(format!("-L{},{}:{file}", a.min(b), a.max(b)))
+                    })
+                };
+                if let Some(l) = lines {
+                    args.retain(|a| !a.starts_with("-L"));
+                    args.insert(0, l);
+                    files.clear();
+                }
+                self.setup_buffer(BufferMode::Log { revs: vec![rev], files }, args);
+            }
+            "blob-previous" => self.blob_visit(true),
+            "blob-next" => self.blob_visit(false),
+            // magit-find-file
+            "find-file" => {
+                let default = self.branch_or_commit_default();
+                let Some(rev) = self.read_line_prompt("Find file from revision", default.as_deref())? else {
+                    return Ok(());
+                };
+                let from = if rev == "{worktree}" || rev == "{index}" { "HEAD" } else { rev.as_str() };
+                let Some(file) = self.read_file_from_rev(from, "Find file")? else {
+                    return Ok(());
+                };
+                let line = match self.visited_file() {
+                    Some((_, f)) if f == file => self.file_line().unwrap_or(1),
+                    _ => 1,
+                };
+                if let Err(e) = super::blame::file_contents(&self.git, &rev, &file) {
+                    self.set_msg(&format!("{e}"));
+                    return Ok(());
+                }
+                self.find_file(&rev, &file, line);
+            }
+            // magit-blob-visit-file
+            "blob-visit-file" => {
+                let Some((_, file)) = self.visited_file() else {
+                    self.set_msg("Not visiting a blob");
+                    return Ok(());
+                };
+                let line = self.file_line().unwrap_or(1);
+                self.find_file("{worktree}", &file, line);
+            }
+            // magit-status-here: the status buffer, at the visited
+            // position in the diff of its unstaged or staged changes
+            "status-here" => {
+                let pos = self.visited_file().map(|(_, f)| (f, self.file_line().unwrap_or(1)));
+                self.switch_to_mode(BufferMode::Status);
+                if let Some((file, line)) = pos {
+                    self.goto_file_position(&file, line, &["unstaged", "staged"]);
+                }
+            }
+            "edit-line-commit" => self.edit_line_commit()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// magit-which-function: the name of the definition around point.
+    fn which_function(&self) -> Option<String> {
+        const KEYWORDS: [&str; 7] = ["fn", "def", "func", "function", "(defun", "class", "sub"];
+        let i = self.cursor.min(self.lines.len().checked_sub(1)?);
+        self.lines[..=i].iter().rev().filter(|l| matches!(l.kind, LineKind::FileLine { .. })).find_map(|l| {
+            let words: Vec<&str> = l.text.split_whitespace().collect();
+            let k = words.iter().position(|w| KEYWORDS.contains(w))?;
+            let name: String = words
+                .get(k + 1)?
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '$'))
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+    }
+
+    /// magit-edit-line-commit: make the commit that added the line at
+    /// point editable, by an interactive rebase if it is reachable from
+    /// HEAD, else by checking it (or a branch at it) out.
+    fn edit_line_commit(&mut self) -> Result<()> {
+        let Some((rev, file)) = self.visited_file() else {
+            self.set_msg("Buffer isn't visiting a file");
+            return Ok(());
+        };
+        let blame_type = match &self.mode {
+            BufferMode::File { blame: Some(b), .. } => Some(b.typ),
+            _ => None,
+        };
+        let chunk = match blame_type {
+            Some(BlameType::Addition) => self.current_blame_chunk(),
+            _ => {
+                // magit-current-blame-chunk: blame the line at point
+                let line = self.file_line().unwrap_or(1);
+                let r = (rev != "{worktree}" && rev != "{index}").then_some(rev.as_str());
+                let range = vec!["-L".to_string(), format!("{line},{line}")];
+                super::blame::run_blame(&self.git, r, &file, &range, BlameType::Addition)?.into_iter().next()
+            }
+        };
+        let Some(chunk) = chunk else {
+            self.set_msg("No chunk at point");
+            return Ok(());
+        };
+        if chunk.orig_rev.chars().all(|c| c == '0') {
+            self.set_msg("This line has not been committed yet");
+            return Ok(());
+        }
+        let rebase = self.git.is_ancestor(&chunk.orig_rev, "HEAD");
+        if rebase {
+            let args = self.prefix_args("rebase-menu");
+            self.rebase_commit("rebase-edit-commit", &chunk.orig_rev, &args)?;
+        } else {
+            let branch = self
+                .git
+                .git_lines(&["for-each-ref", "--points-at", &chunk.orig_rev, "--format=%(refname:short)", "refs/heads"])
+                .into_iter()
+                .next();
+            let target = branch.unwrap_or_else(|| chunk.orig_rev.clone());
+            let res = self.git.checkout(&target);
+            self.done("checked out", res.map(|()| String::new()));
+        }
+        if chunk.orig_file != file || rev != "{worktree}" {
+            self.find_file("{worktree}", &chunk.orig_file, chunk.orig_line);
+            if let Some(t) = blame_type {
+                let args = self.prefix_args("blame-menu");
+                self.blame(t, args)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The name of the buffer of MODE (magit-generate-buffer-name-default-function).
+    fn buffer_name_of(&self, mode: &BufferMode) -> String {
+        let repo = self.git.toplevel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let m = match mode {
+            BufferMode::Status => "magit",
+            BufferMode::Diff(_) => "magit-diff",
+            BufferMode::Revision { .. } => "magit-revision",
+            BufferMode::Stash { .. } => "magit-stash",
+            BufferMode::Log { .. } => "magit-log",
+            BufferMode::Reflog { .. } => "magit-reflog",
+            BufferMode::Stashes { .. } => "magit-stashes",
+            BufferMode::Cherry { .. } => "magit-cherry",
+            BufferMode::LogSelect { .. } => "magit-log-select",
+            BufferMode::File { rev, file, .. } => return super::blame::buffer_name(rev, file),
+        };
+        format!("{m}: {repo}")
+    }
+
+    /// magit-display-repository-buffer (J, and G of magit-file-dispatch)
+    fn display_repository_buffer(&mut self) -> Result<()> {
+        let mut names: Vec<String> = self.buried.iter().rev().map(|b| self.buffer_name_of(&b.mode)).collect();
+        names.insert(0, self.buffer_name_of(&self.mode));
+        let status = self.buffer_name_of(&BufferMode::Status);
+        let default = names.contains(&status).then_some(status);
+        let Some(name) = self.read_choice("Display magit buffer", &names, default.as_deref())? else {
+            return Ok(());
+        };
+        if let Some(i) = self.buried.iter().position(|b| self.buffer_name_of(&b.mode) == name) {
+            self.raise_buried(i);
+        }
+        Ok(())
+    }
+
+    /// Show the buried buffer I, burying the buffer shown.
+    fn raise_buried(&mut self, i: usize) {
+        let b = self.buried.remove(i);
+        let saved = SavedBuffer {
+            mode: std::mem::replace(&mut self.mode, b.mode),
+            args: std::mem::replace(&mut self.buf_args, b.args),
+            buf: std::mem::replace(&mut self.buf, b.buf),
+            vis: std::mem::replace(&mut self.vis, b.vis),
+            cursor: self.cursor,
+            scroll: self.scroll,
+        };
+        self.buried.push(saved);
+        self.view_text = None;
+        self.lines = self.buf.visible(&self.vis);
+        self.cursor = b.cursor.min(self.lines.len().saturating_sub(1));
+        self.scroll = b.scroll;
+        self.refresh();
+    }
+
+    /// Switch to the buffer of MODE: the one shown, a buried one, or a new one.
+    fn switch_to_mode(&mut self, mode: BufferMode) {
+        if self.mode.same_kind(&mode) {
+            self.view_text = None;
+            self.refresh();
+        } else if let Some(i) = self.buried.iter().position(|b| b.mode.same_kind(&mode)) {
+            self.raise_buried(i);
+        } else {
+            self.setup_buffer(mode, Vec::new());
+        }
+    }
+
+    /// magit-diff--goto-file-position / magit-status--goto-file-position:
+    /// go to LINE of FILE in the diffs of GROUPS (all when empty): the
+    /// diff line, else the file section; the sections around it are shown.
+    fn goto_file_position(&mut self, file: &str, line: usize, groups: &[&str]) {
+        let groups: Vec<String> = if groups.is_empty() {
+            self.buf.diffs.iter().map(|(g, _)| g.clone()).collect()
+        } else {
+            groups.iter().map(|g| g.to_string()).collect()
+        };
+        let mut target = None;
+        'find: for group in &groups {
+            let Some(fd) = self.buf.diff(group, file) else { continue };
+            for (h, hunk) in fd.hunks.iter().enumerate() {
+                let Some(r) = hunk.range() else { continue };
+                let mut n = r.new_start;
+                for (li, l) in hunk.lines.iter().enumerate() {
+                    if l.starts_with('-') || l.starts_with('\\') {
+                        continue;
+                    }
+                    if n == line {
+                        let kind = LineKind::DiffLine { section: group.clone(), path: file.into(), hunk: h, line: li };
+                        target = self.buf.all.iter().position(|b| b.kind == kind);
+                        break 'find;
+                    }
+                    n += 1;
+                }
+            }
+        }
+        if target.is_none() {
+            target = groups.iter().find_map(|group| {
+                let kind = LineKind::File { section: group.clone(), path: file.into() };
+                self.buf.all.iter().position(|b| b.kind == kind)
+            });
+        }
+        let Some(p) = target else { return };
+        // magit-section-reveal
+        let ancestors = self.buf.all[p].ancestors.clone();
+        for a in ancestors {
+            self.vis.insert(a, false);
+        }
+        self.lines = self.buf.visible(&self.vis);
+        self.cursor = self.visible_index_near(p);
     }
 
     /// The keys of a file or blob buffer: magit-blame-read-only-mode-map
@@ -4615,13 +5190,6 @@ impl App {
                     None => "No line at point".into(),
                 };
                 self.view_text = Some(("section info".into(), text));
-            }
-            "display-buffer" => {
-                let mut out = format!("Status buffer ({} lines)\n\n", self.lines.len());
-                for (i, l) in self.lines.iter().enumerate() {
-                    out.push_str(&format!("{:>4}  {}\n", i + 1, l.text));
-                }
-                self.view_text = Some(("status buffer".into(), out));
             }
             "cherries" => self.cherry()?,
 

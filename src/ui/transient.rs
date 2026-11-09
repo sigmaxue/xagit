@@ -395,6 +395,92 @@ pub fn write_values(path: &std::path::Path, values: &BTreeMap<String, Vec<String
     std::fs::write(path, text)
 }
 
+/// magit-blame: "r" and "f" only in blob buffers (:if-nil
+/// buffer-file-name), "q" and the Refresh group only while BLAMING.
+pub fn blame_menu(blob: bool, blaming: bool) -> Menu {
+    let mut actions = vec![cmd("b", "Show commits adding lines", "blame-addition")];
+    if blob {
+        actions.push(cmd("r", "Show commits removing lines", "blame-removal"));
+        actions.push(cmd("f", "Show last commits that still have lines", "blame-reverse"));
+    }
+    if blaming {
+        actions.push(cmd("q", "Quit blaming", "blame-quit"));
+    }
+    let mut groups = vec![
+        vec![
+            sw("-w", "Ignore whitespace", "-w"),
+            sw("-r", "Do not treat root commits as boundaries", "--root"),
+            sw("-P", "Follow only first parent", "--first-parent"),
+            opt("-M", "Detect lines moved or copied within a file", "-M", Reader::OptionalNumber),
+            opt("-C", "Detect lines moved or copied between files", "-C", Reader::OptionalNumber),
+        ],
+        actions,
+    ];
+    if blaming {
+        groups.push(vec![cmd("c", "Cycle style", "blame-cycle-style")]);
+    }
+    Menu { name: "blame-menu".into(), title: "Blame".into(), groups }
+}
+
+/// magit-file-dispatch (C-c M-g): the commands for the visited file or
+/// blob (IN_FILE), else the file commands and navigation ("g" not in the
+/// STATUS buffer). "q" only while BLAMING.
+pub fn file_dispatch_menu(in_file: bool, blaming: bool, status: bool) -> Menu {
+    let groups = if in_file {
+        let mut blame = vec![
+            cmd("B", "Blame...", "blame-menu"),
+            cmd("b", "Blame", "blame-addition"),
+            cmd("r", "...removal", "blame-removal"),
+            cmd("f", "...reverse", "blame-reverse"),
+        ];
+        if blaming {
+            blame.push(cmd("q", "Quit blame", "blame-quit"));
+        }
+        vec![
+            vec![
+                cmd("s", "Stage", "file-stage"),
+                cmd("u", "Unstage", "file-unstage"),
+                cmd(", x", "Untrack", "file-untrack"),
+                cmd(", r", "Rename", "file-rename"),
+                cmd(", k", "Delete", "file-delete"),
+                cmd(", c", "Checkout", "file-checkout"),
+            ],
+            vec![cmd("D", "Diff...", "diff-menu"), cmd("d", "Diff", "diff-buffer-file")],
+            vec![
+                cmd("L", "Log...", "log-menu"),
+                cmd("l", "Log", "log-buffer-file"),
+                cmd("t", "Trace", "log-trace-definition"),
+            ],
+            blame,
+            vec![
+                cmd("p", "Prev blob", "blob-previous"),
+                cmd("n", "Next blob", "blob-next"),
+                cmd("v", "Goto blob", "find-file"),
+                cmd("V", "Goto file", "blob-visit-file"),
+                cmd("g", "Goto status", "status-here"),
+                cmd("G", "Goto magit", "display-repository-buffer"),
+            ],
+            vec![cmd("c", "Commit", "commit-menu"), cmd("e", "Edit line", "edit-line-commit")],
+        ]
+    } else {
+        vec![
+            vec![
+                cmd("s", "Stage", "stage-files"),
+                cmd("u", "Unstage", "unstage-files"),
+                cmd("x", "Untrack", "file-untrack"),
+                cmd("r", "Rename", "file-rename"),
+                cmd("k", "Delete", "file-delete"),
+                cmd("c", "Checkout", "file-checkout"),
+            ],
+            vec![cmd("g", "Goto status", "status-here"), cmd("G", "Goto magit", "display-repository-buffer")]
+                .into_iter()
+                .filter(|e| !(status && e.key == "g"))
+                .collect(),
+        ]
+    };
+    Menu { name: "file-dispatch".into(), title: "File dispatch".into(), groups }
+}
+
 pub fn registry() -> BTreeMap<String, Menu> {
     let mut m = BTreeMap::new();
 
@@ -1037,29 +1123,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
 
     // ------------------------------------------------ magit-blame (B in
     // file and blob buffers)
-    m.insert(
-        "blame-menu".into(),
-        Menu {
-            name: "blame-menu".into(),
-            title: "Blame".into(),
-            groups: vec![
-                vec![
-                    sw("-w", "Ignore whitespace", "-w"),
-                    sw("-r", "Do not treat root commits as boundaries", "--root"),
-                    sw("-P", "Follow only first parent", "--first-parent"),
-                    opt("-M", "Detect lines moved or copied within a file", "-M", Reader::OptionalNumber),
-                    opt("-C", "Detect lines moved or copied between files", "-C", Reader::OptionalNumber),
-                ],
-                vec![
-                    cmd("b", "Show commits adding lines", "blame-addition"),
-                    cmd("r", "Show commits removing lines", "blame-removal"),
-                    cmd("f", "Show last commits that still have lines", "blame-reverse"),
-                    cmd("q", "Quit blaming", "blame-quit"),
-                ],
-                vec![cmd("c", "Cycle style", "blame-cycle-style")],
-            ],
-        },
-    );
+    m.insert("blame-menu".into(), blame_menu(true, true));
+    m.insert("file-dispatch".into(), file_dispatch_menu(true, false, false));
 
     // ------------------------------------------------ magit-submodule (o)
     m.insert(
