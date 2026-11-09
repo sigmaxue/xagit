@@ -7,6 +7,7 @@
 //! across refreshes by the caller, and the initial visibility follows the
 //! HIDE argument Magit passes to `magit-insert-section`.
 
+use super::logbuf::{now, shortstats, Margin};
 use crate::git::diff::FileDiff;
 use crate::git::status::{FileEntry, Status};
 use crate::git::Git;
@@ -175,7 +176,7 @@ pub fn hunk_ident(section: &str, path: &str, header: &str) -> String {
 
 /// Status buffer with default visibility (for tests and `J`).
 pub fn render_status(g: &Git, st: &Status) -> Vec<BufferLine> {
-    build_status(g, st, &[]).visible(&Visibility::new())
+    build_status(g, st, &[], &Margin::status()).visible(&Visibility::new())
 }
 
 /// Build the section tree from the lines' headings and ancestors.
@@ -221,11 +222,13 @@ pub(crate) struct Builder {
     pub(crate) lines: Vec<BufferLine>,
     /// idents of the sections whose body is being inserted
     stack: Vec<String>,
+    /// the margin of the commits of log sections (magit-status-margin)
+    pub(crate) log_margin: Margin,
 }
 
 impl Builder {
     pub(crate) fn new() -> Builder {
-        Builder { lines: Vec::new(), stack: Vec::new() }
+        Builder { lines: Vec::new(), stack: Vec::new(), log_margin: Margin::status() }
     }
 
     fn push(&mut self, text: String, kind: LineKind, ident: &str, heading: bool, depth: usize, has_body: bool, ancestors: Vec<String>) {
@@ -313,21 +316,30 @@ impl Builder {
         self.push(String::new(), LineKind::Info, "", false, 0, false, Vec::new());
     }
 
-    /// A top-level section of commits (log or sequence lines).
-    fn commit_section(&mut self, ident: &str, title: String, section: &str, commits: &[(String, String)]) {
+    /// A top-level section of commits (log or sequence lines), with the
+    /// margin of each commit (magit-log-format-margin).
+    fn commit_section(&mut self, g: &Git, ident: &str, title: String, section: &str, commits: &[LogCommit]) {
         let n = commits.len();
         self.heading(title, LineKind::SectionHeader { section: section.into(), n }, ident, 0, n > 0);
-        for (hash, text) in commits {
-            let id = format!("{ident}/{hash}");
-            self.line(text.clone(), LineKind::Commit { section: section.into(), hash: hash.clone() }, &id, true, 1);
+        let revs: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
+        let stats = shortstats(g, &self.log_margin, &revs);
+        let now = now();
+        for c in commits {
+            let id = format!("{ident}/{}", c.hash);
+            let kind = LineKind::Commit { section: section.into(), hash: c.hash.clone() };
+            self.line(c.text.clone(), kind, &id, true, 1);
+            let m = self.log_margin.format(&c.hash, &c.author, &c.date, now, &stats);
+            self.margin(m);
         }
         self.blank();
     }
 }
 
-/// Build the status buffer (magit-status-refresh-buffer).
-pub fn build_status(g: &Git, st: &Status, diff_args: &[String]) -> StatusBuffer {
+/// Build the status buffer (magit-status-refresh-buffer); MARGIN is
+/// magit-status-margin (shown for the commits and stashes).
+pub fn build_status(g: &Git, st: &Status, diff_args: &[String], margin: &Margin) -> StatusBuffer {
     let mut b = Builder::new();
+    b.log_margin = margin.clone();
     let unstaged = g.diff_sections(false, diff_args).unwrap_or_default();
     let staged = g.diff_sections(true, diff_args).unwrap_or_default();
 
@@ -340,13 +352,15 @@ pub fn build_status(g: &Git, st: &Status, diff_args: &[String]) -> StatusBuffer 
     insert_untracked(&mut b, &st.untracked);
     insert_changes(&mut b, "unstaged", "Unstaged changes", &st.unstaged, &unstaged);
     insert_changes(&mut b, "staged", "Staged changes", &st.staged, &staged);
-    insert_stashes(&mut b, &st.stashes);
+    insert_stashes(&mut b, g, &st.stashes);
     insert_log_sections(&mut b, g);
 
     while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
         b.lines.pop();
     }
-    StatusBuffer::new(b.lines, vec![("unstaged".into(), unstaged), ("staged".into(), staged)], String::new())
+    let mut buf = StatusBuffer::new(b.lines, vec![("unstaged".into(), unstaged), ("staged".into(), staged)], String::new());
+    buf.margin_width = margin.shown_width();
+    buf
 }
 
 // ---------------------------------------------------------------- headers
@@ -498,21 +512,32 @@ fn ref_labels(d: &str) -> String {
         .join(" ")
 }
 
-/// magit--insert-log for status sections: (hash, "abbrev refs subject").
-pub fn log_lines(g: &Git, range: Option<&str>, limit: usize, extra: &[&str]) -> Vec<(String, String)> {
+/// A commit line of a log section.
+pub struct LogCommit {
+    pub hash: String,
+    /// "abbrev refs subject"
+    pub text: String,
+    pub author: String,
+    /// author date, seconds since the epoch
+    pub date: String,
+}
+
+/// magit--insert-log for status sections.
+pub fn log_lines(g: &Git, range: Option<&str>, limit: usize, extra: &[&str]) -> Vec<LogCommit> {
     let n = format!("-n{limit}");
-    let mut a: Vec<&str> = vec!["log", "--format=%H%x00%h%x00%D%x00%s", &n];
+    let mut a: Vec<&str> = vec!["log", "--format=%H%x00%h%x00%D%x00%aN%x00%at%x00%s", "--use-mailmap", &n];
     a.extend(extra);
     a.extend(range);
     a.push("--");
     let Ok(out) = g.git_string(&a) else { return Vec::new() };
     out.lines()
         .filter_map(|l| {
-            let mut p = l.splitn(4, '\0');
-            let (full, h, d, s) = (p.next()?, p.next()?, p.next()?, p.next().unwrap_or(""));
+            let mut p = l.splitn(6, '\0');
+            let (full, h, d) = (p.next()?, p.next()?, p.next()?);
+            let (author, date, s) = (p.next()?, p.next()?, p.next().unwrap_or(""));
             let refs = ref_labels(d);
             let text = if refs.is_empty() { format!("{h} {s}") } else { format!("{h} {refs} {s}") };
-            Some((full.to_string(), text))
+            Some(LogCommit { hash: full.to_string(), text, author: author.to_string(), date: date.to_string() })
         })
         .collect()
 }
@@ -541,7 +566,7 @@ fn insert_log_sections(b: &mut Builder, g: &Git) {
         let c = log_lines(g, Some(&format!("{t}..")), LOG_SECTION_LIMIT, &["--decorate"]);
         if !c.is_empty() {
             let title = format!("Unpushed to {t} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-            b.commit_section("unpushed:@{push}..", title, "unpushed", &c);
+            b.commit_section(g, "unpushed:@{push}..", title, "unpushed", &c);
         }
     }
     // magit-insert-unpushed-to-upstream-or-recent
@@ -550,7 +575,7 @@ fn insert_log_sections(b: &mut Builder, g: &Git) {
             let c = log_lines(g, Some("@{upstream}.."), LOG_SECTION_LIMIT, &["--decorate"]);
             if !c.is_empty() {
                 let title = format!("Unmerged into {up} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-                b.commit_section("unpushed:@{upstream}..", title, "unpushed", &c);
+                b.commit_section(g, "unpushed:@{upstream}..", title, "unpushed", &c);
             }
         }
         _ => insert_recent(b, g),
@@ -560,14 +585,14 @@ fn insert_log_sections(b: &mut Builder, g: &Git) {
         let c = log_lines(g, Some(&format!("..{t}")), LOG_SECTION_LIMIT, &["--decorate"]);
         if !c.is_empty() {
             let title = format!("Unpulled from {t} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-            b.commit_section("unpulled:..@{push}", title, "unpulled", &c);
+            b.commit_section(g, "unpulled:..@{push}", title, "unpulled", &c);
         }
     }
     if let Some(up) = &upstream {
         let c = log_lines(g, Some("..@{upstream}"), LOG_SECTION_LIMIT, &["--decorate"]);
         if !c.is_empty() {
             let title = format!("Unpulled from {up} ({})", count_label(c.len(), LOG_SECTION_LIMIT));
-            b.commit_section("unpulled:..@{upstream}", title, "unpulled", &c);
+            b.commit_section(g, "unpulled:..@{upstream}", title, "unpulled", &c);
         }
     }
 }
@@ -576,7 +601,7 @@ fn insert_log_sections(b: &mut Builder, g: &Git) {
 fn insert_recent(b: &mut Builder, g: &Git) {
     let c = log_lines(g, None, RECENT_COMMIT_COUNT, &["--decorate"]);
     if !c.is_empty() {
-        b.commit_section("recent", "Recent commits".into(), "recent", &c);
+        b.commit_section(g, "recent", "Recent commits".into(), "recent", &c);
     }
 }
 
@@ -631,7 +656,7 @@ fn insert_merge_log(b: &mut Builder, g: &Git) {
     } else {
         format!("Merging {} ({})", heads.join(", "), c.len())
     };
-    b.commit_section("unmerged", title, "merge-log", &c);
+    b.commit_section(g, "unmerged", title, "merge-log", &c);
 }
 
 /// magit-sequence-insert-sequence: the stopped commit, done commits and onto.
@@ -858,7 +883,7 @@ fn insert_bisect(b: &mut Builder, g: &Git) {
 
     // git bisect visualize git log == git log --bisect
     let rest = log_lines(g, None, LOG_SECTION_LIMIT, &["--decorate=full", "--bisect"]);
-    b.commit_section("bisect-view", format!("Bisect Rest ({})", rest.len()), "bisect-view", &rest);
+    b.commit_section(g, "bisect-view", format!("Bisect Rest ({})", rest.len()), "bisect-view", &rest);
 
     // magit-wash-bisect-log
     let log = g.git_string(&["bisect", "log"]).unwrap_or_default();
@@ -980,10 +1005,24 @@ fn insert_changes(b: &mut Builder, section: &str, title: &str, files: &[FileEntr
 }
 
 /// magit-insert-stashes ("Stashes (N)", hidden by default)
-fn insert_stashes(b: &mut Builder, stashes: &[(String, String)]) {
+fn insert_stashes(b: &mut Builder, g: &Git, stashes: &[(String, String)]) {
     if stashes.is_empty() {
         return;
     }
+    // the margins: author and date of each entry of the stash reflog
+    let idents: Vec<(String, String)> = if b.log_margin.enable {
+        g.git_string(&["reflog", "--format=%aN%x00%at", "refs/stash", "--"])
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                let (a, d) = l.split_once('\0').unwrap_or((l, ""));
+                (a.to_string(), d.to_string())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let now = now();
     let n = stashes.len();
     let kind = LineKind::SectionHeader { section: "stashes".into(), n };
     if b.heading(format!("Stashes ({n})"), kind, "stashes", 0, true) {
@@ -991,6 +1030,10 @@ fn insert_stashes(b: &mut Builder, stashes: &[(String, String)]) {
             let id = format!("stashes/{name}");
             let k = LineKind::Stash { idx: i, name: name.clone(), msg: msg.clone() };
             b.line(format!("{name} {msg}"), k, &id, true, 1);
+            if let Some((author, date)) = idents.get(i) {
+                let m = b.log_margin.author(author, date, now);
+                b.margin(m);
+            }
         }
     }
     b.blank();

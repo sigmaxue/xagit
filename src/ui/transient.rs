@@ -179,6 +179,16 @@ fn merge_strategy(key: &str) -> MenuEntry {
 fn mainline() -> MenuEntry {
     opt("-m", "Replay merge relative to parent", "--mainline=", Reader::Number { zero: false })
 }
+/// magit-toggle-margin, magit-cycle-margin-style, magit-toggle-margin-details
+fn margin_toggle() -> MenuEntry {
+    cmd("L", "Toggle visibility", "margin-toggle")
+}
+fn margin_cycle() -> MenuEntry {
+    cmd("l", "Cycle style", "margin-cycle-style")
+}
+fn margin_details() -> MenuEntry {
+    cmd("d", "Toggle details", "margin-toggle-details")
+}
 
 fn cmd(key: &str, desc: &str, command: &str) -> MenuEntry {
     MenuEntry { key: key.into(), desc: desc.into(), action: Action::Command(command.into()) }
@@ -765,7 +775,22 @@ pub fn registry() -> BTreeMap<String, Menu> {
         Menu {
             name: "log-refresh-menu".into(),
             title: "Change arguments of log buffers".into(),
-            groups: vec![log_switches(), vec![cmd("g", "Refresh", "log-refresh")]],
+            groups: vec![
+                log_switches(),
+                vec![cmd("g", "Refresh", "log-refresh")],
+                vec![margin_toggle(), margin_cycle(), margin_details(), cmd("x", "Toggle shortstat", "margin-toggle-shortstat")],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-margin-settings
+    // (L in reflog, stashes and cherry buffers)
+    m.insert(
+        "margin-settings-menu".into(),
+        Menu {
+            name: "margin-settings-menu".into(),
+            title: "Margin".into(),
+            groups: vec![vec![margin_toggle(), margin_cycle(), margin_details()]],
         },
     );
 

@@ -3,7 +3,9 @@
 use super::keys::Key;
 use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, Reader, RepoState};
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
-use super::logbuf::{build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, REFLOG_LIMIT};
+use super::logbuf::{
+    build_cherry, build_log, build_reflog, build_stashes, set_commit_limit, Limit, Margin, REFLOG_LIMIT,
+};
 use super::view::{build_status, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
@@ -18,7 +20,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{stdout, Write};
 
 pub struct App {
@@ -54,6 +56,8 @@ pub struct App {
     transient_log_args: Option<Vec<String>>,
     /// C-c was typed (the prefix of C-c C-n)
     cc_prefix: bool,
+    /// magit--right-margin-config of the buffer of each mode (permanent)
+    margins: HashMap<&'static str, Margin>,
     message: String,
     quit: bool,
     /// pending text-mode buffer shown instead of status (diff/log/show output)
@@ -90,6 +94,27 @@ impl BufferMode {
     /// Magit has one buffer per mode and repository.
     fn same_kind(&self, other: &BufferMode) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// magit--right-margin-option: the buffers with a right margin.
+    fn margin_option(&self) -> Option<&'static str> {
+        Some(match self {
+            BufferMode::Status => "status",
+            BufferMode::Log { .. } => "log",
+            BufferMode::Reflog { .. } => "reflog",
+            BufferMode::Stashes { .. } => "stashes",
+            BufferMode::Cherry { .. } => "cherry",
+            _ => return None,
+        })
+    }
+}
+
+/// The default of the margin option NAME (magit-log-margin and friends).
+fn default_margin(name: &str) -> Margin {
+    match name {
+        "status" => Margin::status(),
+        "reflog" | "stashes" => Margin::reflog(),
+        _ => Margin::log(),
     }
 }
 
@@ -264,6 +289,7 @@ impl App {
             transient_diff_args: None,
             transient_log_args: None,
             cc_prefix: false,
+            margins: HashMap::new(),
             message: String::new(),
             quit: false,
             view_text: None,
@@ -337,19 +363,45 @@ impl App {
 
     /// The refresh function of the buffer's mode.
     fn build_buffer(&self) -> StatusBuffer {
+        let margin = self.margin_config();
         match &self.mode {
             BufferMode::Status => {
                 let st = Status::load(&self.git);
-                build_status(&self.git, &st, &self.status_diff_args())
+                build_status(&self.git, &st, &self.status_diff_args(), &margin)
             }
             BufferMode::Diff(spec) => build_diff(&self.git, spec, &self.buf_args),
             BufferMode::Revision { rev, files } => build_revision(&self.git, rev, &self.buf_args, files),
             BufferMode::Stash { stash } => build_stash(&self.git, stash, &self.buf_args),
-            BufferMode::Log { revs, files } => build_log(&self.git, revs, &self.buf_args, files),
-            BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args),
-            BufferMode::Stashes { refname } => build_stashes(&self.git, refname),
-            BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream),
+            BufferMode::Log { revs, files } => build_log(&self.git, revs, &self.buf_args, files, &margin),
+            BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args, &margin),
+            BufferMode::Stashes { refname } => build_stashes(&self.git, refname, &margin),
+            BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream, &margin),
         }
+    }
+
+    /// magit--right-margin-config of the buffer shown (the default of its
+    /// margin option until it is changed).
+    pub fn margin_config(&self) -> Margin {
+        let name = self.mode.margin_option().unwrap_or("log");
+        self.margins.get(name).cloned().unwrap_or_else(|| default_margin(name))
+    }
+
+    /// The margin commands of magit-margin-settings and magit-log-refresh.
+    fn margin_command(&mut self, cmd: &str) {
+        let Some(name) = self.mode.margin_option() else {
+            self.set_msg("Magit margin isn't supported in this buffer");
+            return;
+        };
+        let mut m = self.margin_config();
+        match cmd {
+            "margin-toggle" => m.enable = !m.enable,
+            "margin-cycle-style" => m.cycle_style(),
+            "margin-toggle-details" => m.details = !m.details,
+            "margin-toggle-shortstat" => m.shortstat = !m.shortstat,
+            _ => return,
+        }
+        self.margins.insert(name, m);
+        self.refresh();
     }
 
     /// magit-setup-buffer: show a buffer in MODE with ARGS, reusing the
@@ -749,6 +801,16 @@ impl App {
                 return Ok(());
             }
         }
+        // L is magit-margin-settings in magit-reflog-mode-map (and so in
+        // magit-stashes-mode) and magit-cherry-mode-map
+        if matches!(self.mode, BufferMode::Reflog { .. } | BufferMode::Stashes { .. } | BufferMode::Cherry { .. })
+            && self.view_text.is_none()
+            && !key.ctrl
+            && key.code == "L"
+        {
+            self.open_menu("margin-settings-menu");
+            return Ok(());
+        }
         // status buffer bindings (magit-status-mode-map)
         let Some(binding) = status_binding(&key) else {
             return Ok(());
@@ -968,6 +1030,8 @@ impl App {
                 self.stack.pop();
                 self.open_menu(&name);
             }
+            // the margin commands are transient: the menu stays
+            Action::Command(cmd) if cmd.starts_with("margin-") => self.margin_command(&cmd),
             Action::Command(cmd) => {
                 self.stack.pop();
                 if menu.name == "diff-menu" {

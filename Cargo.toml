@@ -26,3 +26,6 @@ tempfile = "3"
 # dead-code allowed broadly: the TUI keeps API surface that tests exercise
 [lints.rust]
 dead_code = "allow"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

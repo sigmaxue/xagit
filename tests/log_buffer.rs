@@ -7,7 +7,10 @@ mod common;
 use common::*;
 use ngit_lib::prelude::*;
 use ngit_lib::ui::app::{App, BufferMode};
-use ngit_lib::ui::logbuf::{age, author_margin, reflog_subject, LOG_MARGIN_WIDTH};
+use ngit_lib::ui::logbuf::{
+    age, author_margin, format_shortstat, format_time, reflog_subject, Margin, MarginStyle, DEFAULT_TIME_FORMAT,
+    LOG_MARGIN_WIDTH,
+};
 
 /// initial -> three (master) and two (side), merged into master, tagged v1.
 fn merge_repo() -> (TempDir, Git) {
@@ -272,7 +275,11 @@ fn reflog_buffer() {
     assert!(t[2].ends_with(" 2  commit           three"), "{t:#?}");
     assert!(t[3].ends_with(" 3  initial          initial"), "{t:#?}");
     assert!(app.visible_lines()[0].margin.ends_with("seconds") || app.visible_lines()[0].margin.contains("second"));
-    // L: magit-log-refresh refuses reflog buffers
+    // L is magit-margin-settings; magit-log-refresh (h L) refuses reflogs
+    app.press("L").unwrap();
+    assert_eq!(app.current_menu(), Some("margin-settings-menu"));
+    app.press("C-g").unwrap();
+    app.press("h").unwrap();
     app.press("L").unwrap();
     assert_eq!(app.message(), "Cannot change log arguments in reflog buffers");
     assert!(app.current_menu().is_none());
@@ -345,6 +352,95 @@ fn log_trace_lines() {
 }
 
 #[test]
+fn margin_styles() {
+    let mut m = Margin::log();
+    assert_eq!(m.width(), LOG_MARGIN_WIDTH);
+    assert_eq!(m.author("Jane", "1000", 1000.0 + 7200.0), format!("{:<18}  2 hours   ", "Jane"));
+    m.cycle_style();
+    assert_eq!(m.style, MarginStyle::AgeAbbreviated);
+    assert_eq!(m.width(), 18 + 1 + 4);
+    assert_eq!(m.author("Jane", "1000", 1000.0 + 7200.0), format!("{:<18}  2h ", "Jane"));
+    m.cycle_style();
+    assert_eq!(m.style, MarginStyle::Format(DEFAULT_TIME_FORMAT.into()));
+    assert_eq!(m.width(), 18 + 1 + 17);
+    let date = format_time("%Y-%m-%d %H:%M ", 86_400 * 365);
+    assert!(date.starts_with("1971-01-0"), "{date}");
+    assert_eq!(m.author("Jane", &(86_400 * 365).to_string(), 0.0), format!("{:<18} {date}", "Jane"));
+    m.cycle_style();
+    assert_eq!(m.style, MarginStyle::Age);
+    // without details
+    m.details = false;
+    assert_eq!(m.width(), 11);
+    assert_eq!(m.author("Jane", "0", 3.0 * 86_400.0), " 3 days    ");
+    // the shortstat style
+    assert_eq!(format_shortstat("2 files changed, 10 insertions(+), 3 deletions(-)"), "  10+    3-   2");
+    assert_eq!(format_shortstat("1 file changed, 1 deletion(-)"), "         1-   1");
+    assert_eq!(format_shortstat(""), "");
+    m.shortstat = true;
+    assert_eq!(m.width(), 16);
+}
+
+#[test]
+fn margin_settings() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    log_current(&mut app);
+    let lines = app.visible_lines();
+    assert_eq!(lines[0].margin.chars().count(), LOG_MARGIN_WIDTH);
+    // L L hides the margin, the menu stays
+    app.press("L").unwrap();
+    app.press("L").unwrap();
+    assert_eq!(app.current_menu(), Some("log-refresh-menu"));
+    assert!(!app.margin_config().enable);
+    // l cycles the style
+    app.press("L").unwrap();
+    app.press("l").unwrap();
+    assert!(app.visible_lines()[0].margin.ends_with("s "), "{:?}", app.visible_lines()[0].margin);
+    // d hides the author
+    app.press("d").unwrap();
+    assert_eq!(app.visible_lines()[0].margin.chars().count(), 4);
+    // x shows the shortstat
+    app.press("x").unwrap();
+    let t = texts(&app);
+    let three = t.iter().position(|l| l.ends_with(" three")).unwrap();
+    assert_eq!(app.visible_lines()[three].margin, "   1+    1-   1");
+    app.press("x").unwrap();
+    app.press("C-g").unwrap();
+    // the setting is the buffer's: another log keeps it
+    app.press("l").unwrap();
+    app.press("a").unwrap();
+    assert_eq!(app.visible_lines()[0].margin.chars().count(), 4);
+
+    // the status buffer has no margin until L L
+    app.press("q").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Status);
+    goto(&mut app, "Recent commits");
+    app.press("TAB").unwrap();
+    let at = app.visible_lines().iter().position(|l| l.text.ends_with(" three")).unwrap();
+    assert!(!app.margin_config().enable);
+    app.press("L").unwrap();
+    app.press("L").unwrap();
+    app.press("C-g").unwrap();
+    assert!(app.visible_lines()[at].margin.contains("second"), "{:?}", app.visible_lines()[at].margin);
+    // without details: only the age
+    assert_eq!(app.visible_lines()[at].margin.chars().count(), 11);
+
+    // reflog buffers: L opens magit-margin-settings
+    app.press("l").unwrap();
+    app.press("r").unwrap();
+    assert!(app.visible_lines()[0].margin.contains("second"));
+    app.press("L").unwrap();
+    app.press("d").unwrap();
+    let author = g.git_string(&["log", "-1", "--format=%aN"]).unwrap();
+    assert!(app.visible_lines()[0].margin.starts_with(&author), "{:?}", app.visible_lines()[0].margin);
+    app.press("L").unwrap();
+    assert!(app.visible_lines()[0].margin.is_empty() || !app.margin_config().enable);
+    // x is not a margin-settings command
+    app.press("x").unwrap();
+    assert_eq!(app.current_menu(), Some("margin-settings-menu"));
+}
+
+#[test]
 fn reflog_subjects() {
     assert_eq!(reflog_subject("commit"), format!("{:<16} ", "commit"));
     assert_eq!(reflog_subject("commit (amend)"), format!("{:<16} ", "amend"));
@@ -372,7 +468,8 @@ fn stashes_buffer() {
     assert!(app.visible_lines()[1].margin.contains("second"), "{:?}", app.visible_lines()[1].margin);
     // magit-stashes-mode derives from magit-reflog-mode
     app.press("L").unwrap();
-    assert_eq!(app.message(), "Cannot change log arguments in reflog buffers");
+    assert_eq!(app.current_menu(), Some("margin-settings-menu"));
+    app.press("C-g").unwrap();
     // RET shows the stash, q comes back
     goto(&mut app, "stash@{0}");
     app.press("RET").unwrap();
@@ -426,6 +523,10 @@ fn cherry_buffer() {
     );
     let author = g.git_string(&["log", "-1", "--format=%aN"]).unwrap();
     assert!(app.visible_lines()[4].margin.starts_with(&author));
+    app.press("L").unwrap();
+    assert_eq!(app.current_menu(), Some("margin-settings-menu"));
+    app.press("C-g").unwrap();
+    app.press("h").unwrap();
     app.press("L").unwrap();
     assert_eq!(app.message(), "Cannot change log arguments in cherry buffers");
     goto(&mut app, "+ ");

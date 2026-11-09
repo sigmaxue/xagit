@@ -188,6 +188,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "git2",
+ "libc",
  "tempfile",
 ]
 
