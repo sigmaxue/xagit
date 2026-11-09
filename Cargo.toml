@@ -1,0 +1,26 @@
+[package]
+name = "ngit"
+version = "0.1.0"
+edition = "2021"
+description = "A Magit-style git TUI in Rust (command-line git operations with Magit keybindings)"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "ngit_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ngit"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.28"
+anyhow = "1"
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+# dead-code allowed broadly: the TUI keeps API surface that tests exercise
+[lints.rust]
+dead_code = "allow"

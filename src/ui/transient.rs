@@ -1,0 +1,517 @@
+//! ui/transient.rs — transient prefix menus mirroring Magit's dispatchers.
+//!
+//! Menus are plain data so they can be unit-tested against the Magit
+//! definitions extracted from lisp sources.
+
+use super::keys::{key_from_label, Key};
+use std::collections::BTreeMap;
+
+/// One entry in a transient menu: either an argument switch or an action.
+#[derive(Debug, Clone)]
+pub struct MenuEntry {
+    pub key: String,          // "z" / "C-c" style label
+    pub desc: String,
+    pub action: Action,
+}
+
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// toggle an infix argument for the *next* action (e.g. "-u" for stash)
+    Switch(String),
+    /// run a named command (dispatch to App)
+    Command(String),
+    /// open a sub-menu
+    Submenu(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Menu {
+    pub name: String,
+    pub title: String,
+    /// groups of entries rendered as columns (like Magit's vector layout)
+    pub groups: Vec<Vec<MenuEntry>>,
+}
+
+impl Menu {
+    pub fn find(&self, key: &Key) -> Option<&MenuEntry> {
+        for g in &self.groups {
+            for e in g {
+                if key_from_label(&e.key) == *key {
+                    return Some(e);
+                }
+            }
+        }
+        None
+    }
+
+    /// All keys in order — used by tests to compare with Magit's maps.
+    pub fn keys(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        for g in &self.groups {
+            for e in g {
+                v.push(e.key.clone());
+            }
+        }
+        v
+    }
+
+    /// Render like Magit's transient popup:
+    ///   key             description
+    ///   --------------------------
+    pub fn render(&self, active: &BTreeMap<String, bool>) -> String {
+        let mut out = String::new();
+        let ncols = self.groups.len();
+        let widths: Vec<usize> = self
+            .groups
+            .iter()
+            .map(|g| g.iter().map(|e| display(e).len()).max().unwrap_or(0))
+            .collect();
+        let nrows = self.groups.iter().map(|g| g.len()).max().unwrap_or(0);
+        for row in 0..nrows {
+            let mut line = String::new();
+            for c in 0..ncols {
+                match self.groups[c].get(row) {
+                    Some(e) => {
+                        let d = display(e);
+                        let on = match &e.action {
+                            Action::Switch(sw) => *active.get(sw).unwrap_or(&false),
+                            _ => false,
+                        };
+                        let shown = if on {
+                            format!("-{}", d.trim_start_matches('-'))
+                        } else {
+                            d.clone()
+                        };
+                        line.push_str(&format!("{:<w$}", shown, w = widths[c] + 3));
+                    }
+                    None => line.push_str(&" ".repeat(widths[c] + 3)),
+                }
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+}
+
+fn display(e: &MenuEntry) -> String {
+    format!("{} {}", e.key, e.desc)
+}
+
+fn cmd(key: &str, desc: &str, command: &str) -> MenuEntry {
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Command(command.into()) }
+}
+fn sw(key: &str, desc: &str, switch: &str) -> MenuEntry {
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switch(switch.into()) }
+}
+fn sub(key: &str, desc: &str, menu: &str) -> MenuEntry {
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Submenu(menu.into()) }
+}
+
+/// Build the menu registry — every menu mirrors a transient-define-prefix in Magit.
+pub fn registry() -> BTreeMap<String, Menu> {
+    let mut m = BTreeMap::new();
+
+    // ------------------------------------------------ magit-dispatch (h/?)
+    m.insert(
+        "dispatch".into(),
+        Menu {
+            name: "dispatch".into(),
+            title: "Magit dispatch".into(),
+            groups: vec![
+                vec![
+                    cmd("A", "Apply", "cherry-pick-menu"),
+                    cmd("b", "Branch", "branch-menu"),
+                    cmd("B", "Bisect", "unsupported"),
+                    cmd("c", "Commit", "commit-menu"),
+                    cmd("C", "Clone", "clone"),
+                    cmd("d", "Diff", "diff-menu"),
+                    cmd("D", "Diff (change)", "unsupported"),
+                    cmd("e", "Ediff (dwim)", "unsupported"),
+                    cmd("E", "Ediff", "unsupported"),
+                    cmd("f", "Fetch", "fetch-menu"),
+                    cmd("F", "Pull", "pull-menu"),
+                    cmd("h", "Help", "help"),
+                    cmd("H", "Section info", "unsupported"),
+                ],
+                vec![
+                    cmd("i", "Ignore", "gitignore-menu"),
+                    cmd("I", "Init", "init"),
+                    cmd("j", "Jump to section", "jump"),
+                    cmd("J", "Display buffer", "unsupported"),
+                    cmd("l", "Log", "log-menu"),
+                    cmd("L", "Log (change)", "unsupported"),
+                    cmd("m", "Merge", "merge-menu"),
+                    cmd("M", "Remote", "remote-menu"),
+                    cmd("o", "Submodule", "unsupported"),
+                    cmd("O", "Subtree", "unsupported"),
+                    cmd("P", "Push", "push-menu"),
+                    cmd("q", "Bury buffer", "quit"),
+                    cmd("Q", "Command", "git-command"),
+                ],
+                vec![
+                    cmd("r", "Rebase", "rebase-menu"),
+                    cmd("t", "Tag", "tag-menu"),
+                    cmd("T", "Note", "unsupported"),
+                    cmd("V", "Revert", "revert"),
+                    cmd("w", "Apply patches", "unsupported"),
+                    cmd("W", "Format patches", "unsupported"),
+                    cmd("X", "Reset", "reset-menu"),
+                    cmd("y", "Show Refs", "show-refs"),
+                    cmd("Y", "Cherries", "unsupported"),
+                    cmd("z", "Stash", "stash-menu"),
+                    cmd("Z", "Worktree", "unsupported"),
+                    cmd("!", "Run", "run-menu"),
+                ],
+                vec![
+                    cmd("a", "Apply", "apply"),
+                    cmd("v", "Reverse", "reverse"),
+                    cmd("k", "Discard", "discard"),
+                    cmd("s", "Stage", "stage"),
+                    cmd("u", "Unstage", "unstage"),
+                    cmd("S", "Stage all", "stage-all"),
+                    cmd("U", "Unstage all", "unstage-all"),
+                ],
+                vec![
+                    cmd("g", "Refresh current buffer", "refresh"),
+                    cmd("<tab>", "Toggle section at point", "toggle-section"),
+                    cmd("<return>", "Visit thing at point", "visit"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-commit (c)
+    m.insert(
+        "commit-menu".into(),
+        Menu {
+            name: "commit-menu".into(),
+            title: "Create a new commit or replace an existing commit".into(),
+            groups: vec![
+                vec![
+                    sw("-a", "Stage all modified and deleted files", "--all"),
+                    sw("-e", "Allow empty commit", "--allow-empty"),
+                    sw("-v", "Show diff of changes to be committed", "--verbose"),
+                    sw("-n", "Disable hooks", "--no-verify"),
+                    sw("-R", "Claim authorship and reset author date", "--reset-author"),
+                ],
+                vec![
+                    cmd("c", "Commit", "commit-create"),
+                    cmd("e", "Extend", "commit-extend"),
+                    cmd("a", "Amend", "commit-amend"),
+                    cmd("w", "Reword", "commit-reword"),
+                    cmd("f", "Fixup", "commit-fixup"),
+                    cmd("s", "Squash", "commit-squash"),
+                    cmd("F", "Instant fixup", "commit-instant-fixup"),
+                    cmd("S", "Instant squash", "commit-instant-squash"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-branch (b)
+    m.insert(
+        "branch-menu".into(),
+        Menu {
+            name: "branch-menu".into(),
+            title: "Add, configure or remove a branch".into(),
+            groups: vec![
+                vec![
+                    cmd("b", "branch/revision", "checkout"),
+                    cmd("l", "local branch", "branch-checkout"),
+                    cmd("c", "new branch", "branch-and-checkout"),
+                    cmd("s", "new spin-off", "branch-spinoff"),
+                    cmd("n", "new branch", "branch-create"),
+                    cmd("S", "new spin-out", "branch-spinout"),
+                    cmd("m", "rename", "branch-rename"),
+                    cmd("x", "reset", "branch-reset"),
+                    cmd("k", "delete", "branch-delete"),
+                    cmd("C", "configure...", "unsupported"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-remote (M)
+    m.insert(
+        "remote-menu".into(),
+        Menu {
+            name: "remote-menu".into(),
+            title: "Add, configure or remove a remote".into(),
+            groups: vec![
+                vec![
+                    sw("-f", "Fetch after add", "-f"),
+                ],
+                vec![
+                    cmd("a", "Add", "remote-add"),
+                    cmd("r", "Rename", "remote-rename"),
+                    cmd("k", "Remove", "remote-remove"),
+                    cmd("p", "Prune stale branches", "remote-prune"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-fetch (f)
+    m.insert(
+        "fetch-menu".into(),
+        Menu {
+            name: "fetch-menu".into(),
+            title: "Fetch from another repository".into(),
+            groups: vec![
+                vec![
+                    sw("-p", "Prune deleted branches", "--prune"),
+                    sw("-t", "Fetch all tags", "--tags"),
+                    sw("-F", "Force", "--force"),
+                ],
+                vec![
+                    cmd("u", "from upstream", "fetch-upstream"),
+                    cmd("e", "elsewhere", "fetch-other"),
+                    cmd("a", "all remotes", "fetch-all"),
+                    cmd("o", "another branch", "fetch-branch"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-pull (F)
+    m.insert(
+        "pull-menu".into(),
+        Menu {
+            name: "pull-menu".into(),
+            title: "Pull from another repository".into(),
+            groups: vec![
+                vec![
+                    sw("-f", "Fast-forward only", "--ff-only"),
+                    sw("-r", "Rebase local commits", "--rebase"),
+                    sw("-A", "Autostash", "--autostash"),
+                    sw("-F", "Force", "--force"),
+                ],
+                vec![
+                    cmd("u", "from upstream", "pull-upstream"),
+                    cmd("e", "elsewhere", "pull-other"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-push (P)
+    m.insert(
+        "push-menu".into(),
+        Menu {
+            name: "push-menu".into(),
+            title: "Push to another repository".into(),
+            groups: vec![
+                vec![
+                    sw("-f", "Force with lease", "--force-with-lease"),
+                    sw("-F", "Force", "--force"),
+                    sw("-n", "Dry run", "--dry-run"),
+                    sw("-u", "Set upstream", "--set-upstream"),
+                ],
+                vec![
+                    cmd("u", "to upstream", "push-upstream"),
+                    cmd("e", "elsewhere", "push-other"),
+                    cmd("t", "a tag", "push-tag"),
+                    cmd("o", "another branch", "push-other-branch"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-merge (m)
+    m.insert(
+        "merge-menu".into(),
+        Menu {
+            name: "merge-menu".into(),
+            title: "Merge branches".into(),
+            groups: vec![
+                vec![
+                    sw("-f", "Fast-forward only", "--ff-only"),
+                    sw("-n", "No fast-forward", "--no-ff"),
+                ],
+                vec![
+                    cmd("m", "Merge", "merge-plain"),
+                    cmd("n", "Merge but don't commit", "merge-nocommit"),
+                    cmd("s", "Squash merge", "merge-squash"),
+                    cmd("a", "Abort merge", "merge-abort"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-rebase (r)
+    m.insert(
+        "rebase-menu".into(),
+        Menu {
+            name: "rebase-menu".into(),
+            title: "Transplant commits and/or modify existing commits".into(),
+            groups: vec![
+                vec![
+                    sw("-d", "Use author date as committer date", "--committer-date-is-author-date"),
+                    sw("-t", "Use current time as author date", "--ignore-date"),
+                    sw("-a", "Autosquash", "--autosquash"),
+                    sw("-A", "Autostash", "--autostash"),
+                    sw("-i", "Interactive", "--interactive"),
+                    sw("-h", "Disable hooks", "--no-verify"),
+                ],
+                vec![
+                    cmd("u", "onto upstream", "rebase-upstream"),
+                    cmd("e", "elsewhere", "rebase-other"),
+                    cmd("r", "Continue", "rebase-continue"),
+                    cmd("s", "Skip", "rebase-skip"),
+                    cmd("a", "Abort", "rebase-abort"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-reset (X)
+    m.insert(
+        "reset-menu".into(),
+        Menu {
+            name: "reset-menu".into(),
+            title: "Reset the HEAD, index and/or worktree to a previous state".into(),
+            groups: vec![
+                vec![
+                    cmd("m", "mixed    (HEAD and index)", "reset-mixed"),
+                    cmd("s", "soft     (HEAD only)", "reset-soft"),
+                    cmd("h", "hard     (HEAD, index and worktree)", "reset-hard"),
+                    cmd("k", "keep     (HEAD and index, keeping uncommitted)", "reset-keep"),
+                    cmd("i", "index    (only)", "reset-index"),
+                    cmd("w", "worktree (only)", "reset-worktree"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-tag (t)
+    m.insert(
+        "tag-menu".into(),
+        Menu {
+            name: "tag-menu".into(),
+            title: "Create or delete a tag".into(),
+            groups: vec![
+                vec![
+                    sw("-f", "Force", "--force"),
+                    sw("-a", "Annotate", "--annotate"),
+                    sw("-s", "Sign", "--sign"),
+                ],
+                vec![
+                    cmd("t", "tag", "tag-create"),
+                    cmd("k", "delete", "tag-delete"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-stash (z)
+    m.insert(
+        "stash-menu".into(),
+        Menu {
+            name: "stash-menu".into(),
+            title: "Stash uncommitted changes".into(),
+            groups: vec![
+                vec![
+                    sw("-u", "Also save untracked files", "--include-untracked"),
+                    sw("-a", "Also save untracked and ignored files", "--all"),
+                ],
+                vec![
+                    cmd("z", "both", "stash-both"),
+                    cmd("i", "index", "stash-index"),
+                    cmd("w", "worktree", "stash-worktree"),
+                    cmd("x", "keeping index", "stash-keep-index"),
+                    cmd("a", "Apply", "stash-apply"),
+                    cmd("p", "Pop", "stash-pop"),
+                    cmd("k", "Drop", "stash-drop"),
+                    cmd("l", "List", "stash-list"),
+                    cmd("v", "Show", "stash-show"),
+                    cmd("b", "Branch", "stash-branch"),
+                ],
+                vec![
+                    cmd("Z", "snapshot both", "snapshot-both"),
+                    cmd("I", "snapshot index", "snapshot-index"),
+                    cmd("W", "snapshot worktree", "snapshot-worktree"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-gitignore (i)
+    m.insert(
+        "gitignore-menu".into(),
+        Menu {
+            name: "gitignore-menu".into(),
+            title: "Instruct Git to ignore a file or pattern".into(),
+            groups: vec![vec![
+                cmd("t", "in top dir", "ignore"),
+                cmd("s", "in subdirectory", "ignore"),
+            ]],
+        },
+    );
+
+    // ------------------------------------------------ magit-diff (d)
+    m.insert(
+        "diff-menu".into(),
+        Menu {
+            name: "diff-menu".into(),
+            title: "Show changes between different versions".into(),
+            groups: vec![vec![
+                cmd("u", "Diff unstaged", "diff-unstaged"),
+                cmd("s", "Diff staged", "diff-staged"),
+                cmd("c", "Show commit", "show-commit"),
+                cmd("t", "Show stash", "stash-show"),
+            ]],
+        },
+    );
+
+    // ------------------------------------------------ magit-log (l)
+    m.insert(
+        "log-menu".into(),
+        Menu {
+            name: "log-menu".into(),
+            title: "Show a commit or reference log".into(),
+            groups: vec![vec![
+                cmd("l", "current", "log-current"),
+                cmd("o", "other", "log-other"),
+                cmd("L", "local branches", "log-branches"),
+                cmd("b", "all branches", "log-all-branches"),
+                cmd("r", "reflog current", "unsupported"),
+            ]],
+        },
+    );
+
+    // ------------------------------------------------ magit-run (!)
+    m.insert(
+        "run-menu".into(),
+        Menu {
+            name: "run-menu".into(),
+            title: "Run git or another command".into(),
+            groups: vec![vec![
+                cmd("!", "in repository root", "git-command"),
+                cmd("p", "in working directory", "git-command"),
+            ]],
+        },
+    );
+
+    // ------------------------------------------------ magit-cherry-pick (A)
+    m.insert(
+        "cherry-pick-menu".into(),
+        Menu {
+            name: "cherry-pick-menu".into(),
+            title: "Apply or transplant commits".into(),
+            groups: vec![
+                vec![
+                    sw("-x", "Reference cherry in commit message", "-x"),
+                    sw("-e", "Edit commit messages", "--edit"),
+                    sw("-F", "Attempt fast-forward", "--ff"),
+                ],
+                vec![
+                    cmd("A", "Pick", "cherry-pick"),
+                    cmd("a", "Apply", "cherry-apply"),
+                ],
+            ],
+        },
+    );
+
+    m
+}
