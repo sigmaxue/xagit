@@ -655,6 +655,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("l", "current", "log-current"),
                     cmd("o", "other", "log-other"),
+                    cmd("u", "related", "log-related"),
                     cmd("L", "local branches", "log-branches"),
                     cmd("b", "all branches", "log-all-branches"),
                     cmd("a", "all references", "log-all"),

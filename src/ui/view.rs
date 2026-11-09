@@ -50,6 +50,9 @@ pub struct BufferLine {
     /// for headings with a body: hidden when first shown (the HIDE argument
     /// of magit-insert-section)
     pub hide: bool,
+    /// text of the right margin (magit-make-margin-overlay), e.g. the
+    /// author and age of a commit in log buffers
+    pub margin: String,
 }
 
 /// A section of the buffer (magit-section): its heading line, extent,
@@ -87,13 +90,15 @@ pub struct StatusBuffer {
     pub line_section: Vec<usize>,
     /// initial visibility of the sections that have a body
     defaults: HashMap<String, bool>,
+    /// width of the right margin (0: no margin, as in the status buffer)
+    pub margin_width: usize,
 }
 
 impl StatusBuffer {
     pub(crate) fn new(all: Vec<BufferLine>, diffs: Vec<(String, Vec<FileDiff>)>, title: String) -> StatusBuffer {
         let (sections, line_section) = index_sections(&all);
         let defaults = all.iter().filter(|l| l.heading && l.has_body).map(|l| (l.ident.clone(), l.hide)).collect();
-        StatusBuffer { all, diffs, title, sections, line_section, defaults }
+        StatusBuffer { all, diffs, title, sections, line_section, defaults, margin_width: 0 }
     }
 
     /// Whether the section IDENT is hidden under VIS (else its initial state).
@@ -235,7 +240,15 @@ impl Builder {
             hidden: None,
             pos: self.lines.len(),
             hide: false,
+            margin: String::new(),
         });
+    }
+
+    /// Set the margin of the line inserted last.
+    pub(crate) fn margin(&mut self, text: String) {
+        if let Some(l) = self.lines.last_mut() {
+            l.margin = text;
+        }
     }
 
     /// A heading without body (HEADING) or a body line of the section at DEPTH.

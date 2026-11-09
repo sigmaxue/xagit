@@ -3,6 +3,7 @@
 use super::keys::Key;
 use super::transient::{diff_refresh_menu, registry, resolve_menu, Action, Lookup, Menu, MenuEntry, RepoState};
 use super::diffbuf::{build_diff, build_revision, build_stash, DiffSpec};
+use super::logbuf::{build_log, build_reflog, set_commit_limit, Limit, REFLOG_LIMIT};
 use super::view::{build_status, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
@@ -49,6 +50,10 @@ pub struct App {
     /// the arguments of the `d` transient while one of its suffixes runs
     /// (magit-diff-arguments when transient-current-command is magit-diff)
     transient_diff_args: Option<Vec<String>>,
+    /// the same for the `l` transient (magit-log-arguments)
+    transient_log_args: Option<Vec<String>>,
+    /// C-c was typed (the prefix of C-c C-n)
+    cc_prefix: bool,
     message: String,
     quit: bool,
     /// pending text-mode buffer shown instead of status (diff/log/show output)
@@ -59,23 +64,24 @@ pub struct App {
     /// arguments of new diff / revision / stash buffers (the current value
     /// of magit-diff, initially magit-diff-mode's "--stat --no-ext-diff")
     pub diff_args: Vec<String>,
-    /// arguments for log views, changed with `L` (magit-log-refresh);
-    /// Magit's default is "--graph --decorate"
+    /// arguments of new log buffers (the current value of magit-log-mode,
+    /// initially "--graph -n256 --decorate")
     pub log_args: Vec<String>,
-    /// command that produced the current text view, re-run by `D g` / `L g`
-    last_view: Option<String>,
     /// answers used instead of reading from the terminal (tests)
     scripted: std::cell::RefCell<std::collections::VecDeque<String>>,
 }
 
 /// The major mode of a buffer: magit-status-mode, magit-diff-mode,
-/// magit-revision-mode or magit-stash-mode.
+/// magit-revision-mode, magit-stash-mode, magit-log-mode or
+/// magit-reflog-mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BufferMode {
     Status,
     Diff(DiffSpec),
     Revision { rev: String, files: Vec<String> },
     Stash { stash: String },
+    Log { revs: Vec<String>, files: Vec<String> },
+    Reflog { refname: String },
 }
 
 impl BufferMode {
@@ -254,14 +260,15 @@ impl App {
             status_args: vec!["--no-ext-diff".into(), "--ignore-submodules=none".into()],
             buried: Vec::new(),
             transient_diff_args: None,
+            transient_log_args: None,
+            cc_prefix: false,
             message: String::new(),
             quit: false,
             view_text: None,
             view_scroll: 0,
             cwd,
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
-            log_args: vec!["--graph".into(), "--decorate".into()],
-            last_view: None,
+            log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
         };
         app.refresh();
@@ -336,6 +343,8 @@ impl App {
             BufferMode::Diff(spec) => build_diff(&self.git, spec, &self.buf_args),
             BufferMode::Revision { rev, files } => build_revision(&self.git, rev, &self.buf_args, files),
             BufferMode::Stash { stash } => build_stash(&self.git, stash, &self.buf_args),
+            BufferMode::Log { revs, files } => build_log(&self.git, revs, &self.buf_args, files),
+            BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args),
         }
     }
 
@@ -490,7 +499,16 @@ impl App {
                     Some(false) => '▾',
                     None => ' ',
                 };
-                rows.push(format!("{cur}{fringe}{}", line.text));
+                let row = format!("{cur}{fringe}{}", line.text);
+                let mw = self.buf.margin_width;
+                if mw > 0 && w > mw {
+                    // the right margin (magit-log-margin)
+                    let text: String = row.chars().take(w - mw).collect();
+                    let pad = (w - mw).saturating_sub(text.chars().count());
+                    rows.push(format!("{text}{}{}", " ".repeat(pad), line.margin));
+                } else {
+                    rows.push(row);
+                }
             }
         }
         while rows.len() < body {
@@ -697,6 +715,32 @@ impl App {
                 return self.handle_transient_key(key, menu, active);
             }
         }
+        if std::mem::take(&mut self.cc_prefix) {
+            match (&self.mode, key.ctrl, key.code.as_str()) {
+                (BufferMode::Log { .. }, true, "n") => self.log_move_to_parent(),
+                _ => self.set_msg(&format!("C-c {} is undefined", key.label())),
+            }
+            return Ok(());
+        }
+        if key.ctrl && key.code == "c" {
+            self.cc_prefix = true;
+            self.set_msg("C-c-");
+            return Ok(());
+        }
+        // magit-log-mode-map (also the parent of magit-reflog-mode-map)
+        if matches!(self.mode, BufferMode::Log { .. } | BufferMode::Reflog { .. }) && self.view_text.is_none() && !key.ctrl {
+            let limit = match key.code.as_str() {
+                "+" => Some(Limit::Double),
+                "-" => Some(Limit::Half),
+                "=" => Some(Limit::Toggle),
+                "j" => return self.log_move_to_revision(),
+                _ => None,
+            };
+            if let Some(limit) = limit {
+                self.log_set_commit_limit(limit);
+                return Ok(());
+            }
+        }
         // status buffer bindings (magit-status-mode-map)
         let Some(binding) = status_binding(&key) else {
             return Ok(());
@@ -748,6 +792,10 @@ impl App {
             let menu = diff_refresh_menu(self.mode != BufferMode::Status);
             self.menus.insert(name.clone(), menu);
         }
+        if name == "log-refresh-menu" && matches!(self.mode, BufferMode::Reflog { .. }) {
+            self.set_msg("Cannot change log arguments in reflog buffers");
+            return;
+        }
         // `d` starts with the arguments of the diff buffer shown, else the
         // current value of magit-diff-mode; `D` with the buffer's arguments
         let preset: &[String] = match (name.as_str(), &self.mode) {
@@ -755,6 +803,7 @@ impl App {
             ("diff-menu", _) => &self.diff_args,
             ("diff-refresh-menu", BufferMode::Status) => &self.status_args,
             ("diff-refresh-menu", _) => &self.buf_args,
+            ("log-menu" | "log-refresh-menu", BufferMode::Log { .. }) => &self.buf_args,
             ("log-menu" | "log-refresh-menu", _) => &self.log_args,
             _ => &[],
         };
@@ -869,8 +918,12 @@ impl App {
                 if menu.name == "diff-menu" {
                     self.transient_diff_args = Some(self.args_from(&active));
                 }
+                if menu.name == "log-menu" {
+                    self.transient_log_args = Some(self.args_from(&active));
+                }
                 let r = self.run_command(&cmd, &active);
                 self.transient_diff_args = None;
+                self.transient_log_args = None;
                 r?;
             }
         }
@@ -1580,31 +1633,35 @@ impl App {
             }
 
             // -------- log / diff / show (arguments come from the l/d menus)
-            "log-current" | "log-other" | "log-branches" | "log-all-branches" | "log-all" => {
-                self.log_args = args.clone();
-                self.log_view(cmd)?;
-            }
-            "log-refresh" => {
-                self.log_args = args.clone();
-                match self.last_view.clone() {
-                    Some(v) if v.starts_with("log:") => self.log_view(&v[4..])?,
-                    _ => self.set_msg(&format!("log arguments: {}", self.log_args.join(" "))),
+            "log-current" | "log-head" | "log-other" | "log-related" | "log-branches" | "log-all-branches"
+            | "log-all" | "log-change" => self.log_view(cmd)?,
+            // magit-log-refresh (L g): new arguments for the log buffer shown
+            "log-refresh" => match self.mode {
+                BufferMode::Log { .. } => {
+                    self.buf_args = args.clone();
+                    self.refresh();
                 }
-            }
-            "reflog-other" | "reflog-head" => {
-                let rev = if cmd == "reflog-head" {
-                    "HEAD".to_string()
-                } else {
-                    let bs = g!().branches();
-                    let Some(b) = self.pick("Reflog of branch", &bs, None)?.cloned() else {
-                        return Ok(());
-                    };
-                    b
+                _ => {
+                    self.log_args = args.clone();
+                    self.set_msg(&format!("log arguments: {}", self.log_args.join(" ")));
+                }
+            },
+            "reflog-current" | "reflog-other" | "reflog-head" => {
+                let refname = match cmd {
+                    "reflog-head" => "HEAD".to_string(),
+                    "reflog-current" => g!().current_branch().unwrap_or_else(|| "HEAD".into()),
+                    _ => {
+                        let default = match self.current_line().map(|l| l.kind.clone()) {
+                            Some(LineKind::Commit { hash, .. }) => Some(self.git.rev_short(&hash)),
+                            _ => g!().current_branch(),
+                        };
+                        let Some(r) = self.read_line_prompt("Show reflog for", default.as_deref())? else {
+                            return Ok(());
+                        };
+                        r
+                    }
                 };
-                match g!().reflog(Some(&rev), 50) {
-                    Ok(o) => self.view_text = Some((format!("reflog {rev}"), o)),
-                    Err(e) => self.set_msg(&format!("{e}")),
-                }
+                self.setup_buffer(BufferMode::Reflog { refname }, vec![format!("-n{REFLOG_LIMIT}")]);
             }
             "shortlog" => match g!().git_string(&["shortlog", "-s", "-n", "HEAD"]) {
                 Ok(o) => self.view_text = Some(("shortlog".into(), o)),
@@ -1763,6 +1820,18 @@ impl App {
                 })
             }
             BufferMode::Revision { rev, .. } => Dwim::Commit(rev.clone()),
+            // [commit], [file commit], [hunk file commit]: the diffs of a
+            // commit in a log use its hash as their group
+            BufferMode::Log { .. } | BufferMode::Reflog { .. } => match line.map(|l| &l.kind) {
+                Some(LineKind::Commit { hash, .. }) => Dwim::Commit(hash.clone()),
+                Some(
+                    LineKind::File { section, .. }
+                    | LineKind::Hunk { section, .. }
+                    | LineKind::DiffLine { section, .. }
+                    | LineKind::Meta { section, .. },
+                ) => Dwim::Commit(section.clone()),
+                _ => Dwim::None,
+            },
             BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
                 ("committed", Some(r)) => Dwim::Range(r.clone()),
                 (t, _) => Dwim::Type(t.to_string()),
@@ -1811,44 +1880,151 @@ impl App {
         Ok(())
     }
 
-    /// Show a log buffer using `self.log_args` (magit-log-arguments, -n256).
+    /// magit-log-arguments: the arguments of the `l` transient, else those
+    /// of the log buffer shown, else the current value of magit-log-mode.
+    fn log_arguments(&self) -> Vec<String> {
+        match (&self.transient_log_args, &self.mode) {
+            (Some(a), _) => a.clone(),
+            (None, BufferMode::Log { .. }) => self.buf_args.clone(),
+            (None, _) => self.log_args.clone(),
+        }
+    }
+
+    /// The log commands of `l` (magit-log-current, -head, -other, -related,
+    /// -branches, -all-branches, -all) and magit-log-buffer-file.
     fn log_view(&mut self, cmd: &str) -> Result<()> {
-        let mut a = self.log_args.clone();
-        let title = match cmd {
-            "log-current" => "log".to_string(),
+        let current = self.git.current_branch();
+        let at_point = match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Commit { hash, .. }) => Some(self.git.rev_short(&hash)),
+            _ => None,
+        };
+        let mut files = Vec::new();
+        let revs: Vec<String> = match cmd {
+            "log-current" => vec![current.unwrap_or_else(|| "HEAD".into())],
+            "log-head" => vec!["HEAD".into()],
             "log-other" => {
-                let mut refs = self.git.branches();
-                refs.extend(self.git.remote_branches());
-                refs.extend(self.git.tags());
-                let Some(r) = self.pick("Log rev", &refs, None)?.cloned() else {
+                // magit-log-read-revs
+                let previous = self
+                    .git
+                    .git_string(&["rev-parse", "--abbrev-ref", "@{-1}"])
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                let default = at_point.clone().or(previous);
+                let Some(r) = self.read_line_prompt("Log rev,s", default.as_deref())? else {
                     return Ok(());
                 };
-                a.push(r.clone());
-                format!("log {r}")
+                let revs: Vec<String> = r.split([',', ' ']).filter(|s| !s.is_empty()).map(str::to_string).collect();
+                if revs.is_empty() {
+                    return Ok(());
+                }
+                revs
             }
-            "log-branches" => {
-                a.push("--branches".into());
-                "log local branches".into()
+            "log-related" => self.related_revs(),
+            "log-branches" | "log-all-branches" => {
+                let mut v = Vec::new();
+                if current.is_none() {
+                    v.push("HEAD".to_string());
+                }
+                v.push("--branches".into());
+                if cmd == "log-all-branches" {
+                    v.push("--remotes".into());
+                }
+                v
             }
-            "log-all-branches" => {
-                a.extend(["--branches".into(), "--remotes".into()]);
-                "log all branches".into()
-            }
-            "log-all" => {
-                a.push("--all".into());
-                "log all references".into()
+            "log-all" => vec!["--all".into()],
+            "log-change" => {
+                let path = match self.current_file() {
+                    Some((_, p)) => p,
+                    None => {
+                        let Some(p) = self.read_line_prompt("Log file", None)? else {
+                            return Ok(());
+                        };
+                        p
+                    }
+                };
+                files.push(path);
+                vec![current.unwrap_or_else(|| "HEAD".into())]
             }
             _ => return Ok(()),
         };
-        match self.git.log_with(None, 256, &a) {
-            Ok(l) if l.is_empty() => self.set_msg("no commits"),
-            Ok(l) => {
-                self.view_text = Some((title, l.join("\n")));
-                self.last_view = (cmd != "log-other").then(|| format!("log:{cmd}"));
-            }
-            Err(e) => self.set_msg(&format!("{e}")),
+        let args = self.log_arguments();
+        self.setup_buffer(BufferMode::Log { revs, files }, args);
+        // magit-log-goto-same-commit
+        if let Some(h) = at_point {
+            self.log_goto_commit(&h);
         }
         Ok(())
+    }
+
+    /// The revisions of magit-log-related: the current branch, its push
+    /// target and upstream (and that upstream's upstream when it is local);
+    /// for a detached HEAD, HEAD and the previous branch's.
+    fn related_revs(&self) -> Vec<String> {
+        let g = &self.git;
+        let mut head = None;
+        let current = g.current_branch().or_else(|| {
+            head = Some("HEAD".to_string());
+            g.git_string(&["rev-parse", "--abbrev-ref", "@{-1}"]).ok().filter(|s| !s.is_empty() && s != "HEAD")
+        });
+        let Some(current) = current else { return vec!["HEAD".into()] };
+        let upstream_of = |b: &str| {
+            g.git_string(&["rev-parse", "--abbrev-ref", &format!("{b}@{{upstream}}")]).ok().filter(|s| !s.is_empty())
+        };
+        let target = super::view::push_branch(g, &current)
+            .filter(|t| g.git_ok(&["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{t}")]));
+        let upstream = upstream_of(&current);
+        let upup = upstream
+            .as_ref()
+            .filter(|u| g.git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{u}")]))
+            .and_then(|u| upstream_of(u));
+        [Some(current), head, target, upstream, upup].into_iter().flatten().collect()
+    }
+
+    /// magit-log-goto-commit-section: move to the commit REV in the log.
+    fn log_goto_commit(&mut self, rev: &str) -> bool {
+        let abbrev = self.git.rev_short(rev);
+        let id = format!("commit:{abbrev}");
+        match (1..self.buf.sections.len()).find(|&i| self.sec(i).ident == id || self.sec(i).ident.starts_with(&format!("{id}:"))) {
+            Some(s) => {
+                self.goto_sec(s);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `+`, `-` and `=` in log and reflog buffers.
+    fn log_set_commit_limit(&mut self, f: Limit) {
+        self.buf_args = set_commit_limit(&self.buf_args, f);
+        self.refresh();
+    }
+
+    /// `j` in log buffers (magit-log-move-to-revision).
+    fn log_move_to_revision(&mut self) -> Result<()> {
+        let default = self.git.current_branch();
+        let Some(rev) = self.read_line_prompt("In log, jump to", default.as_deref())? else {
+            return Ok(());
+        };
+        if !self.log_goto_commit(&rev) {
+            self.set_msg(&format!("{rev} isn't visible in the current log buffer"));
+        }
+        Ok(())
+    }
+
+    /// C-c C-n in log buffers (magit-log-move-to-parent).
+    fn log_move_to_parent(&mut self) {
+        let Some(LineKind::Commit { hash, .. }) = self.current_line().map(|l| l.kind.clone()) else { return };
+        let parent_rev = format!("{hash}^1");
+        let Ok(parent) = self.git.git_string(&["rev-parse", "--short", &parent_rev]) else {
+            self.set_msg(&format!("Parent {parent_rev} does not exist"));
+            return;
+        };
+        let s = self.cur_sec();
+        let id = format!("commit:{parent}");
+        match (s + 1..self.buf.sections.len()).find(|&i| self.sec(i).ident == id) {
+            Some(t) => self.goto_sec(t),
+            None => self.set_msg(&format!("Parent {parent} not found.  Try typing + first")),
+        }
     }
 
     // ------------------------------------------------------------ sections (magit-section)
@@ -2721,6 +2897,10 @@ impl App {
         let abbrev = |r: &str| self.git.rev_short(r);
         let (old, new) = match (&self.mode, self.diff_type(group)) {
             (BufferMode::Revision { rev, .. }, _) => (abbrev(&format!("{rev}^")), abbrev_if_oid(&self.git, rev)),
+            // a diff inside a log: its group is the commit
+            (BufferMode::Log { .. } | BufferMode::Reflog { .. }, _) => {
+                (abbrev(&format!("{group}^")), abbrev_if_oid(&self.git, group))
+            }
             (BufferMode::Stash { stash }, _) => {
                 let rev = match group {
                     "stash-index" => format!("{stash}^2"),
@@ -2854,6 +3034,11 @@ impl App {
     /// RET, or C-RET / C-j (magit-diff-visit-worktree-file) when WORKTREE.
     fn visit(&mut self, worktree: bool) -> Result<()> {
         let Some(kind) = self.current_line().map(|l| l.kind.clone()) else { return Ok(()) };
+        // the "Type + to show more history" button of log buffers
+        if !worktree && self.current_line().is_some_and(|l| l.ident == "longer") {
+            self.log_set_commit_limit(Limit::Double);
+            return Ok(());
+        }
         self.view_scroll = 0;
         match kind {
             LineKind::File { section, path } | LineKind::Meta { section, path, .. } => {
@@ -2921,7 +3106,7 @@ impl App {
             self.view_scroll = if up { self.view_scroll + page } else { self.view_scroll.saturating_sub(page) };
             return Ok(());
         }
-        if self.mode != BufferMode::Status {
+        if !matches!(self.mode, BufferMode::Status | BufferMode::Log { .. } | BufferMode::Reflog { .. }) {
             if up {
                 if self.scroll + page >= self.lines.len() {
                     self.set_msg("End of buffer");
@@ -3337,28 +3522,11 @@ impl App {
                 }
                 self.view_text = Some(("status buffer".into(), out));
             }
-            "log-change" => {
-                let path = match self.current_file() {
-                    Some((_, p)) => p,
-                    None => {
-                        let Some(p) = self.read_line_prompt("Log file path", None)? else {
-                            return Ok(());
-                        };
-                        p
-                    }
-                };
-                let res = self.git.log_file(&path, 50);
-                self.show(&format!("log {path}"), res);
-            }
             "cherries" => {
                 let default = self.git.upstream_shortname();
                 let up = self.read_line_prompt("Cherry against upstream", default.as_deref())?;
                 let res = self.git.cherries(up.as_deref(), None);
                 self.show("cherries", res);
-            }
-            "reflog-current" => {
-                let res = self.git.reflog(None, 50);
-                self.show("reflog", res);
             }
 
             // ---- subtree
@@ -3444,7 +3612,7 @@ impl App {
                     BufferMode::Diff(s) => (s.range.clone(), s.typearg.clone(), s.files.clone()),
                     BufferMode::Revision { rev, files } => (Some(format!("{rev}^..{rev}")), None, files.clone()),
                     BufferMode::Stash { stash } => (Some(format!("{stash}^..{stash}")), None, Vec::new()),
-                    BufferMode::Status => {
+                    BufferMode::Status | BufferMode::Log { .. } | BufferMode::Reflog { .. } => {
                         self.set_msg("Only diff buffers can be saved as patches");
                         return Ok(());
                     }

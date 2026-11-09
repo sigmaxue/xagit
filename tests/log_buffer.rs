@@ -1,0 +1,290 @@
+//! Log and reflog buffers (magit-log-mode, magit-reflog-mode): commit
+//! lines with graph, refs and margin, the commit limit, movement and the
+//! arguments of `l` / `L`.
+
+mod common;
+
+use common::*;
+use ngit_lib::prelude::*;
+use ngit_lib::ui::app::{App, BufferMode};
+use ngit_lib::ui::logbuf::{age, author_margin, reflog_subject, LOG_MARGIN_WIDTH};
+
+/// initial -> three (master) and two (side), merged into master, tagged v1.
+fn merge_repo() -> (TempDir, Git) {
+    let (td, g, _) = repo_with_commit();
+    g.git_interactive(&["checkout", "-q", "-b", "side"]).unwrap();
+    write(&g, "g.txt", "g\n");
+    g.git_interactive(&["add", "."]).unwrap();
+    g.git_interactive(&["commit", "-q", "-m", "two"]).unwrap();
+    g.git_interactive(&["checkout", "-q", "master"]).unwrap();
+    write(&g, "file.txt", "changed\n");
+    g.git_interactive(&["commit", "-q", "-am", "three"]).unwrap();
+    g.git_interactive(&["merge", "-q", "--no-edit", "side"]).unwrap();
+    g.git_interactive(&["tag", "v1"]).unwrap();
+    (td, g)
+}
+
+fn short(g: &Git, rev: &str) -> String {
+    g.git_string(&["rev-parse", "--short", rev]).unwrap()
+}
+
+fn texts(app: &App) -> Vec<String> {
+    app.visible_lines().iter().map(|l| l.text.clone()).collect()
+}
+
+fn goto(app: &mut App, prefix: &str) {
+    let n = app.visible_lines().len();
+    for _ in 0..n {
+        app.press("C-p").unwrap();
+    }
+    for _ in 0..n {
+        if app.point_text().starts_with(prefix) {
+            return;
+        }
+        app.press("C-n").unwrap();
+    }
+    panic!("no visible line starting with {prefix:?} in {:#?}", texts(app));
+}
+
+fn log_current(app: &mut App) {
+    app.press("l").unwrap();
+    app.press("l").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Log { .. }), "{:?}", app.mode());
+}
+
+#[test]
+fn log_buffer_layout() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    log_current(&mut app);
+    assert_eq!(app.header_line(), "Commits in master");
+    let (m, t, s, i) = (short(&g, "HEAD"), short(&g, "HEAD^1"), short(&g, "side"), short(&g, "HEAD~2"));
+    let pad = " ".repeat(m.len() + 1);
+    assert_eq!(
+        texts(&app),
+        [
+            format!("{m} *   master v1 Merge branch 'side'"),
+            format!("{pad}|\\  "),
+            format!("{s} | * side two"),
+            format!("{t} * | three"),
+            format!("{pad}|/  "),
+            format!("{i} * initial"),
+        ]
+    );
+    // graph lines belong to the commit above them; RET there shows it
+    let lines = app.visible_lines();
+    assert!(lines[1].ancestors.is_empty() && !lines[1].heading);
+    let author = g.git_string(&["log", "-1", "--format=%aN"]).unwrap();
+    assert!(lines[0].margin.starts_with(&author), "{:?}", lines[0].margin);
+    assert!(lines[1].margin.is_empty());
+    goto(&mut app, &format!("{pad}|\\"));
+    app.press("RET").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Revision { rev: m.clone(), files: vec![] });
+    // q returns to the log, at the same commit
+    app.press("q").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Log { .. }));
+    app.press("SPC").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Revision { .. }), "SPC shows the commit");
+    app.press("q").unwrap();
+    app.press("q").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Status);
+}
+
+#[test]
+fn margin_and_age() {
+    assert_eq!(age(0.4), (0, "seconds"));
+    assert_eq!(age(1.0), (1, "second"));
+    assert_eq!(age(90.0), (2, "minutes"));
+    assert_eq!(age(3.0 * 86_400.0), (3, "days"));
+    assert_eq!(age(-3.0 * 86_400.0), (3, "days"));
+    assert_eq!(age(400.0 * 86_400.0), (1, "year"));
+    let m = author_margin("Jane", "1000", 1000.0 + 7200.0);
+    assert_eq!(m, format!("{:<18}  2 hours     ", "Jane")[..LOG_MARGIN_WIDTH].to_string());
+    assert_eq!(m.chars().count(), LOG_MARGIN_WIDTH);
+    let long = author_margin("A very long author name", "0", 0.0);
+    assert!(long.starts_with("A very long autho… "), "{long}");
+}
+
+#[test]
+fn commit_limit_and_more_button() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g);
+    log_current(&mut app);
+    // -n256 halved down to -n2
+    for _ in 0..7 {
+        app.press("-").unwrap();
+    }
+    let t = texts(&app);
+    assert_eq!(t.iter().filter(|l| l.contains('*')).count(), 2, "{t:#?}");
+    assert_eq!(t.last().unwrap(), "Type + to show more history");
+    // the button doubles the limit
+    goto(&mut app, "Type + to show more history");
+    app.press("RET").unwrap();
+    let t = texts(&app);
+    assert_eq!(t.iter().filter(|l| l.contains('*')).count(), 4, "{t:#?}");
+    // exactly as many commits as the limit: there might be more
+    assert_eq!(t.last().unwrap(), "Type + to show more history");
+    app.press("+").unwrap();
+    let t = texts(&app);
+    assert_eq!(t.iter().filter(|l| l.contains('*')).count(), 4, "{t:#?}");
+    assert!(!t.iter().any(|l| l.starts_with("Type +")));
+    // = removes the limit, and sets it to 256 again
+    app.press("=").unwrap();
+    app.press("L").unwrap();
+    assert!(!app.active_switches().iter().any(|a| a.starts_with("-n")), "{:?}", app.active_switches());
+    app.press("q").unwrap();
+    app.press("=").unwrap();
+    app.press("L").unwrap();
+    assert!(app.active_switches().contains(&"-n256".to_string()));
+}
+
+#[test]
+fn move_to_revision_and_parent() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    log_current(&mut app);
+    app.script_answers(&["side"]);
+    app.press("j").unwrap();
+    assert!(app.point_text().starts_with(&short(&g, "side")), "{}", app.point_text());
+    app.script_answers(&["nope"]);
+    app.press("j").unwrap();
+    assert_eq!(app.message(), "nope isn't visible in the current log buffer");
+    // C-c C-n on the merge moves to its first parent
+    goto(&mut app, &short(&g, "HEAD"));
+    app.press("C-c").unwrap();
+    app.press("C-n").unwrap();
+    assert!(app.point_text().ends_with("three"), "{}", app.point_text());
+    app.press("C-c").unwrap();
+    app.press("C-n").unwrap();
+    assert!(app.point_text().ends_with("initial"), "{}", app.point_text());
+    app.press("C-c").unwrap();
+    app.press("C-n").unwrap();
+    assert_eq!(app.message(), format!("Parent {}^1 does not exist", short(&g, "HEAD~2")));
+}
+
+#[test]
+fn log_refresh_changes_only_the_buffer_shown() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g);
+    log_current(&mut app);
+    app.press("L").unwrap();
+    assert_eq!(app.active_switches(), ["--decorate", "--graph", "-n256"]);
+    app.press("-").unwrap();
+    app.press("g").unwrap();
+    app.press("g").unwrap();
+    let t = texts(&app);
+    assert_eq!(t.len(), 4, "{t:#?}");
+    assert!(!t.iter().any(|l| l.contains('*')), "{t:#?}");
+    // `l` in a log buffer starts with that buffer's arguments
+    app.press("l").unwrap();
+    assert_eq!(app.active_switches(), ["--decorate", "-n256"]);
+    app.press("q").unwrap();
+    app.press("q").unwrap();
+    // new log buffers still use the default arguments
+    log_current(&mut app);
+    assert!(texts(&app)[0].contains('*'));
+}
+
+#[test]
+fn log_with_diffstat_and_patches() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    // l -g (no graph) -p (patches) l
+    app.press("l").unwrap();
+    app.press("-").unwrap();
+    app.press("g").unwrap();
+    app.press("-").unwrap();
+    app.press("p").unwrap();
+    app.press("l").unwrap();
+    let t = texts(&app);
+    let three = t.iter().position(|l| l.ends_with(" three")).unwrap();
+    assert_eq!(&t[three + 1..three + 4], ["modified   file.txt", "@@ -1 +1 @@", "-hello"], "{t:#?}");
+    // TAB folds the commit
+    goto(&mut app, &short(&g, "HEAD^1"));
+    app.press("TAB").unwrap();
+    assert!(!texts(&app).iter().any(|l| l == "-hello"));
+    app.press("TAB").unwrap();
+    // RET on a removed line visits the parent's version of the file
+    goto(&mut app, "-hello");
+    app.press("RET").unwrap();
+    let (title, content) = app.text_view().unwrap();
+    assert_eq!(title, format!("file.txt.~{}~", short(&g, "HEAD~2")));
+    assert_eq!(content, "hello");
+    app.press("q").unwrap();
+    // u on a committed hunk reverses it in the index
+    goto(&mut app, "+changed");
+    app.script_answers(&["y"]);
+    app.press("u").unwrap();
+    let cached = g.git_string(&["diff", "--cached"]).unwrap();
+    assert!(cached.contains("-changed\n+hello"), "{cached}");
+}
+
+#[test]
+fn log_from_commit_goes_to_that_commit() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    goto(&mut app, "Recent commits");
+    app.press("TAB").unwrap();
+    app.press("C-n").unwrap();
+    app.press("C-n").unwrap();
+    let at = app.point_text().to_string();
+    log_current(&mut app);
+    let h = at.split(' ').next().unwrap();
+    assert!(app.point_text().starts_with(h), "{} / {at}", app.point_text());
+}
+
+#[test]
+fn log_other_related_and_file() {
+    let (_td, g) = merge_repo();
+    let mut app = App::new(g.clone());
+    app.script_answers(&["side, v1"]);
+    app.press("l").unwrap();
+    app.press("o").unwrap();
+    assert_eq!(app.header_line(), "Commits in side v1");
+    app.press("l").unwrap();
+    app.press("u").unwrap();
+    assert_eq!(app.header_line(), "Commits in master");
+    app.press("l").unwrap();
+    app.press("b").unwrap();
+    assert_eq!(app.header_line(), "Commits in --branches --remotes");
+    app.script_answers(&["g.txt"]);
+    app.press("l").unwrap();
+    app.press("f").unwrap();
+    assert_eq!(app.header_line(), "Commits in master touching g.txt");
+    let t = texts(&app);
+    assert_eq!(t.len(), 1, "{t:#?}");
+    assert!(t[0].ends_with("* side two"), "{t:#?}");
+}
+
+#[test]
+fn reflog_buffer() {
+    let (_td, g) = merge_repo();
+    g.git_interactive(&["commit", "-q", "--amend", "-m", "Merge branch 'side'", "-m", "amended"]).unwrap();
+    let mut app = App::new(g.clone());
+    app.press("l").unwrap();
+    app.press("r").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Reflog { refname: "master".into() });
+    assert_eq!(app.header_line(), "Reflog for master");
+    let t = texts(&app);
+    let h = short(&g, "HEAD");
+    assert_eq!(t[0], format!("{h} 0  amend            Merge branch 'side'"));
+    assert!(t[1].ends_with(" 1  merge            side: Merge made by the 'ort' strategy."), "{t:#?}");
+    assert!(t[2].ends_with(" 2  commit           three"), "{t:#?}");
+    assert!(t[3].ends_with(" 3  initial          initial"), "{t:#?}");
+    assert!(app.visible_lines()[0].margin.ends_with("seconds") || app.visible_lines()[0].margin.contains("second"));
+    // L: magit-log-refresh refuses reflog buffers
+    app.press("L").unwrap();
+    assert_eq!(app.message(), "Cannot change log arguments in reflog buffers");
+    assert!(app.current_menu().is_none());
+    app.press("RET").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Revision { .. }));
+}
+
+#[test]
+fn reflog_subjects() {
+    assert_eq!(reflog_subject("commit"), format!("{:<16} ", "commit"));
+    assert_eq!(reflog_subject("commit (amend)"), format!("{:<16} ", "amend"));
+    assert_eq!(reflog_subject("checkout"), format!("{:<16} ", "checkout"));
+    assert_eq!(reflog_subject("pull --rebase (finish)"), format!("{:<16} ", "pull --rebase finish"));
+    assert_eq!(reflog_subject("rebase (start)"), format!("{:<16} ", "rebase start"));
+}

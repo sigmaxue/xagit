@@ -87,7 +87,7 @@ fn parse_diffstat(pre: &[&str]) -> Option<DiffStat> {
 /// Insert the sections of a diff (magit-diff-wash-diffs) at DEPTH for diff
 /// group GROUP and return its files. REVISION: combined diffs are shown as
 /// "resolved" (magit-revision-mode).
-fn insert_diff(b: &mut Builder, group: &str, text: &str, depth: usize, revision: bool, stat: bool) -> Vec<FileDiff> {
+pub(crate) fn insert_diff(b: &mut Builder, group: &str, text: &str, depth: usize, revision: bool, stat: bool) -> Vec<FileDiff> {
     let lines: Vec<&str> = text.lines().collect();
     let first = lines
         .iter()
@@ -234,63 +234,87 @@ fn trim_trailing_empty(b: &mut Builder) {
 
 /// magit-format-ref-labels for `%D` of `--decorate=full`.
 pub fn format_ref_labels(g: &Git, decoration: &str) -> String {
-    let current = g.git_string(&["symbolic-ref", "--short", "-q", "HEAD"]).ok().filter(|s| !s.is_empty());
-    let target = current
-        .as_ref()
-        .and_then(|c| g.git_string(&["rev-parse", "--abbrev-ref", &format!("{c}@{{upstream}}")]).ok())
-        .filter(|s| !s.is_empty());
-    let (mut state, mut head, mut upstream) = (None, None, None);
-    let (mut tags, mut branches, mut remotes, mut other, mut combined) = (vec![], vec![], vec![], vec![], vec![]);
-    for r in decoration.split(", ").filter(|r| !r.is_empty()) {
-        let r = r.strip_prefix("tag: ").unwrap_or(r);
-        let r = r.strip_prefix("HEAD -> ").unwrap_or(r);
-        if r == "HEAD" {
-            head = Some("@".to_string());
-        } else if let Some(t) = r.strip_prefix("refs/tags/") {
-            tags.push(t.to_string());
-        } else if let Some(b) = r.strip_prefix("refs/heads/") {
-            branches.push(b.to_string());
-        } else if let Some(b) = r.strip_prefix("refs/remotes/") {
-            remotes.push(b.to_string());
-        } else if let Some(b) = r.strip_prefix("refs/bisect/") {
-            state = Some(b.split('-').next().unwrap_or(b).to_string());
-        } else {
-            other.push(r.to_string());
-        }
+    RefLabeler::new(g).format(g, decoration)
+}
+
+/// magit-format-ref-labels with the current branch, its upstream and the
+/// push targets looked up once (for the many lines of a log).
+pub struct RefLabeler {
+    current: Option<String>,
+    target: Option<String>,
+    push: std::collections::HashMap<String, Option<String>>,
+}
+
+impl RefLabeler {
+    pub fn new(g: &Git) -> RefLabeler {
+        let current = g.git_string(&["symbolic-ref", "--short", "-q", "HEAD"]).ok().filter(|s| !s.is_empty());
+        let target = current
+            .as_ref()
+            .and_then(|c| g.git_string(&["rev-parse", "--abbrev-ref", &format!("{c}@{{upstream}}")]).ok())
+            .filter(|s| !s.is_empty());
+        RefLabeler { current, target, push: std::collections::HashMap::new() }
     }
-    remotes.retain(|name| !matches!(name.split_once('/'), Some((_, "HEAD"))));
-    for name in branches {
-        let mut prefix = String::new();
-        if let Some(push) = push_branch(g, &name).filter(|p| remotes.contains(p)) {
-            remotes.retain(|r| *r != push);
-            prefix = format!("{}/", push.split('/').next().unwrap_or(""));
-        }
-        if current.as_deref() == Some(name.as_str()) {
-            head = Some(format!("{prefix}{name}"));
-        } else if target.as_deref() == Some(name.as_str()) {
-            upstream = Some(format!("{prefix}{name}"));
-        } else {
-            combined.push(format!("{prefix}{name}"));
-        }
+
+    fn push_of(&mut self, g: &Git, branch: &str) -> Option<String> {
+        self.push.entry(branch.to_string()).or_insert_with(|| push_branch(g, branch)).clone()
     }
-    if let (None, Some(t)) = (&upstream, &target) {
-        if remotes.contains(t) {
-            remotes.retain(|r| r != t);
-            upstream = Some(t.clone());
-        } else if combined.contains(t) {
-            combined.retain(|r| r != t);
-            upstream = Some(t.clone());
+
+    pub fn format(&mut self, g: &Git, decoration: &str) -> String {
+        let current = self.current.clone();
+        let target = self.target.clone();
+        let (mut state, mut head, mut upstream) = (None, None, None);
+        let (mut tags, mut branches, mut remotes, mut other, mut combined) = (vec![], vec![], vec![], vec![], vec![]);
+        for r in decoration.split(", ").filter(|r| !r.is_empty()) {
+            let r = r.strip_prefix("tag: ").unwrap_or(r);
+            let r = r.strip_prefix("HEAD -> ").unwrap_or(r);
+            if r == "HEAD" {
+                head = Some("@".to_string());
+            } else if let Some(t) = r.strip_prefix("refs/tags/") {
+                tags.push(t.to_string());
+            } else if let Some(b) = r.strip_prefix("refs/heads/") {
+                branches.push(b.to_string());
+            } else if let Some(b) = r.strip_prefix("refs/remotes/") {
+                remotes.push(b.to_string());
+            } else if let Some(b) = r.strip_prefix("refs/bisect/") {
+                state = Some(b.split('-').next().unwrap_or(b).to_string());
+            } else {
+                other.push(r.to_string());
+            }
         }
+        remotes.retain(|name| !matches!(name.split_once('/'), Some((_, "HEAD"))));
+        for name in branches {
+            let mut prefix = String::new();
+            if let Some(push) = self.push_of(g, &name).filter(|p| remotes.contains(p)) {
+                remotes.retain(|r| *r != push);
+                prefix = format!("{}/", push.split('/').next().unwrap_or(""));
+            }
+            if current.as_deref() == Some(name.as_str()) {
+                head = Some(format!("{prefix}{name}"));
+            } else if target.as_deref() == Some(name.as_str()) {
+                upstream = Some(format!("{prefix}{name}"));
+            } else {
+                combined.push(format!("{prefix}{name}"));
+            }
+        }
+        if let (None, Some(t)) = (&upstream, &target) {
+            if remotes.contains(t) {
+                remotes.retain(|r| r != t);
+                upstream = Some(t.clone());
+            } else if combined.contains(t) {
+                combined.retain(|r| r != t);
+                upstream = Some(t.clone());
+            }
+        }
+        let mut all: Vec<String> = Vec::new();
+        all.extend(state);
+        all.extend(head);
+        all.extend(upstream);
+        all.extend(tags);
+        all.extend(combined);
+        all.extend(remotes);
+        all.extend(other);
+        all.join(" ")
     }
-    let mut all: Vec<String> = Vec::new();
-    all.extend(state);
-    all.extend(head);
-    all.extend(upstream);
-    all.extend(tags);
-    all.extend(combined);
-    all.extend(remotes);
-    all.extend(other);
-    all.join(" ")
 }
 
 /// magit-get-current-tag REV with distance.
