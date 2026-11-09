@@ -20,7 +20,7 @@ use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
 use crate::git::exec::Editor;
 use crate::git::ops::Untracked;
-use crate::git::status::Status;
+use crate::git::status::{file_status, FileStatus, Status};
 use crate::git::Git;
 use anyhow::Result;
 use crossterm::event::{self, Event};
@@ -4894,80 +4894,317 @@ impl App {
             let fd = self.file_diff(&group, &path)?;
             self.git.discard_change(&fd, &scope, typ == "staged", ctx)?;
         } else {
-            let files = self.sel_paths(&sel);
-            if typ == "untracked" {
-                // magit-discard-files--delete
-                let r = self.discard_files_delete(&files);
-                self.refresh();
-                return r;
-            }
-            let prompt = format!("Discard {typ} changes in");
-            if !self.confirm_files("discard", &prompt, &files)? {
-                return Ok(());
-            }
-            for f in &files {
-                match typ.as_str() {
-                    "unstaged" => self.git.discard_unstaged(f)?,
-                    _ => self.git.discard_staged(f)?,
-                }
-            }
+            let r = if matches!(&sel, DiffSel::List { typ } if typ == "untracked") {
+                // magit-discard-untracked: magit-list-untracked-files
+                self.set_msg("");
+                let files = self.list_untracked_files();
+                self.discard_files_delete(&files, "untracked", &[]).map(|_| ())
+            } else {
+                let files = self.sel_paths(&sel);
+                self.discard_files(&typ, &group, &files)
+            };
+            self.refresh();
+            return r;
         }
         self.set_msg("discarded");
         self.refresh();
         Ok(())
     }
 
-    /// magit-discard-files--delete of untracked FILES: confirmed as
-    /// `trash` (moved to the trash, magit-delete-by-moving-to-trash) or
-    /// `delete`; non-empty directories are confirmed recursively
-    /// (dired-delete-file with dired-recursive-deletes `top`).
-    fn discard_files_delete(&mut self, files: &[String]) -> Result<()> {
+    /// magit-list-untracked-files: the untracked files and directories
+    /// (`--untracked-files=normal`, or `all` per the local
+    /// status.showUntrackedFiles; none for `no`).
+    fn list_untracked_files(&self) -> Vec<String> {
+        let local = self.git.git_string(&["config", "--local", "status.showUntrackedFiles"]).unwrap_or_default();
+        let mode = match local.trim() {
+            "no" | "off" | "false" | "0" => return Vec::new(),
+            "all" => "all",
+            _ => "normal",
+        };
+        file_status(&self.git, &["--porcelain", &format!("--untracked-files={mode}")])
+            .into_iter()
+            .filter(|s| s.x == '?')
+            .map(|s| s.file)
+            .collect()
+    }
+
+    /// magit-discard-files: the FILES of a TYP (staged, unstaged or
+    /// untracked) section of GROUP, by their status: conflicts are
+    /// resolved, deletions resurrected, new and untracked files deleted,
+    /// renames undone, other changes discarded, each kind confirmed.
+    fn discard_files(&mut self, typ: &str, group: &str, files: &[String]) -> Result<()> {
+        let status = file_status(&self.git, &[]);
+        let t = match typ {
+            "staged" => 'X',
+            "unstaged" => 'Y',
+            _ => 'Z',
+        };
+        let (mut delete, mut resurrect, mut rename, mut discard, mut discard_new, mut resolve) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for file in files {
+            let f = file.clone();
+            match (t, status.iter().find(|s| s.file == *file).map(|s| (s.x, s.y))) {
+                // an untracked directory whose files are listed
+                ('Z', None) => delete.extend(
+                    file_status(&self.git, &["--porcelain", "--untracked-files=all", "--", file])
+                        .into_iter()
+                        .filter(|s| matches!((s.x, s.y), ('?', '?') | ('!', '!')))
+                        .map(|s| s.file),
+                ),
+                ('Z', Some(('?', '?') | ('!', '!') | ('D', ' '))) => delete.push(f),
+                (_, Some(('D', 'D') | ('U', _) | (_, 'U') | ('A', 'A'))) => resolve.push(f),
+                ('X', Some(('M', ' ' | 'M' | 'D'))) | ('Y', Some((_, 'M'))) => discard.push(f),
+                ('X', Some(('A' | 'C', 'M'))) => discard_new.push(f),
+                ('X', Some(('A' | 'C', ' ' | 'D'))) => delete.push(f),
+                ('X', Some(('D', ' ' | 'M'))) | ('Y', Some((_, 'D'))) => resurrect.push(f),
+                ('X', Some(('R', ' ' | 'M' | 'D'))) => rename.push(f),
+                _ => {}
+            }
+        }
+        self.set_msg("");
+        if !resolve.is_empty() && !self.discard_files_resolve(&resolve)? {
+            return Ok(());
+        }
+        if !resurrect.is_empty() {
+            if !self.confirm_files("resurrect", "Resurrect", &resurrect)? {
+                return Ok(());
+            }
+            let mut args = if typ == "staged" { vec!["reset", "--"] } else { vec!["checkout", "--"] };
+            args.extend(resurrect.iter().map(String::as_str));
+            self.git.git_interactive(&args)?;
+        }
+        if !delete.is_empty() && !self.discard_files_delete(&delete, typ, &status)? {
+            return Ok(());
+        }
+        if !rename.is_empty() {
+            let orig = |f: &String| status.iter().find(|s| s.file == *f).and_then(|s| s.orig.clone()).unwrap_or_default();
+            let items: Vec<String> = rename.iter().map(|f| format!("{} -> {f}", orig(f))).collect();
+            if !self.confirm_items("rename", "Undo rename %s", "Undo %d renames", &items)? {
+                return Ok(());
+            }
+            let top = self.git.toplevel.clone();
+            for f in &rename {
+                let o = orig(f);
+                if top.join(f).exists() {
+                    if let Some(parent) = top.join(&o).parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    self.git.git_interactive(&["mv", f, &o])?;
+                } else {
+                    self.git.git_interactive(&["rm", "--cached", "--", f])?;
+                    self.git.git_interactive(&["reset", "--", &o])?;
+                }
+            }
+        }
+        if !discard.is_empty() || !discard_new.is_empty() {
+            self.discard_files_discard(typ, group, &discard, &discard_new)?;
+        }
+        Ok(())
+    }
+
+    /// magit-discard-files--discard: FILES with changes and NEW_FILES
+    /// (added and modified) of a TYP section, confirmed together.
+    fn discard_files_discard(&mut self, typ: &str, group: &str, files: &[String], new_files: &[String]) -> Result<()> {
+        let all: Vec<String> = files.iter().chain(new_files).cloned().collect();
+        if !self.confirm_files("discard", &format!("Discard {typ} changes in"), &all)? {
+            return Ok(());
+        }
+        if typ == "unstaged" {
+            let mut args = vec!["checkout", "--"];
+            args.extend(files.iter().map(String::as_str));
+            return self.git.git_interactive(&args);
+        }
+        if !new_files.is_empty() {
+            for cmd in ["add", "reset"] {
+                let mut args = vec![cmd, "--"];
+                args.extend(new_files.iter().map(String::as_str));
+                self.git.git_interactive(&args)?;
+            }
+        }
+        let mut diffs = Vec::new();
+        let mut binaries = Vec::new();
+        for f in files {
+            let fd = self.file_diff(group, f)?;
+            if fd.binary {
+                binaries.push(f.clone());
+            } else {
+                diffs.push(fd);
+            }
+        }
+        if !diffs.is_empty() {
+            // magit-discard-apply with magit-apply-diffs
+            let ctx = self.context();
+            let refs: Vec<&FileDiff> = diffs.iter().collect();
+            if self.git.file_has_unstaged(&diffs[0].path) {
+                self.git.apply_files(&refs, &["--reverse", "--cached"], ctx)?;
+                self.git.apply_files(&refs, &["--reverse", "--reject"], ctx)?;
+            } else {
+                self.git.apply_files(&refs, &["--reverse", "--index"], ctx)?;
+            }
+        }
+        if !binaries.is_empty() {
+            let modified = self.git.unstaged_files();
+            let (dirty, clean): (Vec<String>, Vec<String>) = binaries.into_iter().partition(|b| modified.contains(b));
+            if !clean.is_empty() {
+                let mut args = vec!["reset", "--"];
+                args.extend(clean.iter().map(String::as_str));
+                self.git.git_interactive(&args)?;
+            }
+            if !dirty.is_empty() {
+                self.set_msg(
+                    "Cannot discard staged changes to binary files, which also have unstaged changes.  Unstage instead.",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// magit-discard-files--resolve: check out a stage of the conflicted
+    /// FILES, chosen for all of them or for each. False when quit.
+    fn discard_files_resolve(&mut self, files: &[String]) -> Result<bool> {
+        let stage = |c: char| match c {
+            'o' => Some("--ours"),
+            't' => Some("--theirs"),
+            'c' => Some("--merge"),
+            _ => None,
+        };
+        let mut arg = None;
+        if files.len() > 1 {
+            let list: Vec<String> = files.iter().map(|f| format!("  {f}")).collect();
+            let prompt = format!(
+                "For these {} files\n{}\ncheckout:\n[o]ur stage, [t]heir stage, [c]onflict, decide [i]ndividually, or [C-g] to abort",
+                files.len(),
+                list.join("\n")
+            );
+            let Some(c) = self.read_char_choice(&prompt, &['o', 't', 'c', 'i'])? else {
+                self.set_msg("Quit");
+                return Ok(false);
+            };
+            arg = stage(c);
+        }
+        for file in files {
+            let a = match arg {
+                Some(a) => a,
+                None => {
+                    let prompt = format!("For {file} checkout: [o]ur stage, [t]heir stage, [c]onflict, or [C-g] to abort");
+                    match self.read_char_choice(&prompt, &['o', 't', 'c'])?.and_then(stage) {
+                        Some(a) => a,
+                        None => {
+                            self.set_msg("Quit");
+                            return Ok(false);
+                        }
+                    }
+                }
+            };
+            self.checkout_stage(file, a)?;
+        }
+        Ok(true)
+    }
+
+    /// magit-checkout-stage: check out and stage the side ARG (--ours,
+    /// --theirs) of the conflicted FILE (removed if deleted on that side),
+    /// or restore the conflict (--merge).
+    fn checkout_stage(&mut self, file: &str, arg: &str) -> Result<()> {
+        let st = file_status(&self.git, &["--", file]).into_iter().next().map(|s| (s.x, s.y));
+        match (arg, st) {
+            ("--ours", Some(('D', _) | ('U', 'A'))) | ("--theirs", Some((_, 'D') | ('A', 'U'))) => {
+                self.git.git_interactive(&["rm", "--", file])
+            }
+            ("--merge", _) => self.git.git_interactive(&["checkout", "--merge", "--", file]),
+            _ => {
+                self.git.git_interactive(&["checkout", arg, "--", file])?;
+                self.git.git_interactive(&["add", "-u", "--", file])
+            }
+        }
+    }
+
+    /// magit-discard-files--delete of FILES of a TYP section (STATUS
+    /// their magit-file-status): confirmed as `trash` (moved to the
+    /// trash, magit-delete-by-moving-to-trash) or `delete`. Untracked
+    /// and unstaged files are deleted, non-empty directories confirmed
+    /// recursively (dired-delete-file with dired-recursive-deletes
+    /// `top`); new staged files are also removed from the index. False
+    /// when declined or failed.
+    fn discard_files_delete(&mut self, files: &[String], typ: &str, status: &[FileStatus]) -> Result<bool> {
         let trash = self.options.delete_by_moving_to_trash;
         let (action, prompt) = if trash { ("trash", "Trash") } else { ("delete", "Delete") };
         if !self.confirm_files(action, prompt, files)? {
-            return Ok(());
+            return Ok(false);
         }
         let top = self.git.toplevel.clone();
         let mut always = false;
         for file in files {
             if file.starts_with('~') || file.starts_with("\\~") {
                 self.set_msg(&format!("Refusing to delete \"{file}\", too dangerous"));
-                return Ok(());
+                return Ok(false);
             }
             let path = top.join(file);
-            let nonempty_dir = !path.is_symlink()
-                && path.is_dir()
-                && std::fs::read_dir(&path).map(|mut d| d.next().is_some()).unwrap_or(false);
-            let mut recursive = true;
-            if nonempty_dir && !always {
-                let verb = if trash { "trash" } else { "delete" };
-                let answers = ["yes", "no", "all", "quit"];
-                match self.read_answer(&format!("Recursively {verb} {file}?"), &answers)?.as_deref() {
-                    Some("yes") => {}
-                    Some("all") => always = true,
-                    Some("no") => recursive = false,
-                    _ => {
-                        self.set_msg("Quit");
-                        return Ok(());
-                    }
-                }
-            }
-            let res = if nonempty_dir && !recursive {
-                Err(if trash {
-                    "Directory is not empty, not moving to trash".to_string()
-                } else {
-                    format!("Removing directory: Directory not empty, {}", path.display())
-                })
-            } else {
-                self.delete_file(&path, trash)
+            let y = status.iter().find(|s| s.file == *file).map(|s| s.y);
+            let res = match y {
+                _ if matches!(typ, "unstaged" | "untracked") => self.dired_delete_file(file, &path, trash, &mut always)?,
+                Some(' ') => self.delete_file(&path, trash).and_then(|()| self.git_call(&["rm", "--cached", "--", file])),
+                Some('M') => self.trash_index_version(file, trash),
+                Some('D') => self
+                    .git_call(&["checkout", "--", file])
+                    .and_then(|()| self.delete_file(&path, trash))
+                    .and_then(|()| self.git_call(&["rm", "--cached", "--force", "--", file])),
+                _ => Ok(()),
             };
             if let Err(e) = res {
                 self.set_msg(&e);
-                return Ok(());
+                return Ok(false);
             }
         }
-        self.set_msg("");
-        Ok(())
+        Ok(true)
+    }
+
+    /// The version of the new FILE in the index moved to the trash as
+    /// FILE.~{index}~ (or deleted), FILE removed from the index.
+    fn trash_index_version(&self, file: &str, trash: bool) -> std::result::Result<(), String> {
+        let out = self.git.git_string(&["checkout-index", "--temp", "--", file]).map_err(|e| e.to_string())?;
+        let temp = out.split('\t').next().unwrap_or_default().to_string();
+        let top = &self.git.toplevel;
+        let saved = top.join(format!("{file}.~{{index}}~"));
+        std::fs::rename(top.join(temp), &saved).map_err(|e| e.to_string())?;
+        self.delete_file(&saved, trash)?;
+        self.git_call(&["rm", "--cached", "--force", "--", file])
+    }
+
+    /// magit-call-git with the error as a message.
+    fn git_call(&self, args: &[&str]) -> std::result::Result<(), String> {
+        self.git.git_interactive(args).map_err(|e| e.to_string())
+    }
+
+    /// dired-delete-file of FILE (at PATH): a non-empty directory is
+    /// deleted recursively if confirmed (yes, no, all: ALWAYS from now
+    /// on, quit). Err for the message of a failure or quit.
+    fn dired_delete_file(
+        &mut self,
+        file: &str,
+        path: &std::path::Path,
+        trash: bool,
+        always: &mut bool,
+    ) -> Result<std::result::Result<(), String>> {
+        let nonempty_dir = !path.is_symlink()
+            && path.is_dir()
+            && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false);
+        if nonempty_dir && !*always {
+            let verb = if trash { "trash" } else { "delete" };
+            let answers = ["yes", "no", "all", "quit"];
+            match self.read_answer(&format!("Recursively {verb} {file}?"), &answers)?.as_deref() {
+                Some("yes") => {}
+                Some("all") => *always = true,
+                Some("no") => {
+                    return Ok(Err(if trash {
+                        "Directory is not empty, not moving to trash".to_string()
+                    } else {
+                        format!("Removing directory: Directory not empty, {}", path.display())
+                    }))
+                }
+                _ => return Ok(Err("Quit".into())),
+            }
+        }
+        Ok(self.delete_file(path, trash))
     }
 
     /// delete-file / delete-directory (recursive) of PATH, moving it to

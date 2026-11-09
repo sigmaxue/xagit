@@ -48,6 +48,50 @@ fn is_unmerged(x: char, y: char) -> bool {
     )
 }
 
+/// An entry of magit-file-status: (file orig X Y).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStatus {
+    pub file: String,
+    /// the source of a rename or copy
+    pub orig: Option<String>,
+    pub x: char,
+    pub y: char,
+}
+
+/// magit-file-status: the entries of `git status -z ARGS`.
+pub fn file_status(g: &Git, args: &[&str]) -> Vec<FileStatus> {
+    let mut a = vec!["status", "-z"];
+    a.extend_from_slice(args);
+    parse_file_status(&g.git_string(&a).unwrap_or_default())
+}
+
+fn parse_file_status(out: &str) -> Vec<FileStatus> {
+    let mut v = Vec::new();
+    let mut chunks = out.split('\0');
+    while let Some(chunk) = chunks.next() {
+        let mut cs = chunk.chars();
+        let (Some(x), Some(y), Some(_)) = (cs.next(), cs.next(), cs.next()) else { continue };
+        let file = cs.as_str().to_string();
+        let orig = if matches!(x, 'R' | 'C') { chunks.next().map(str::to_string) } else { None };
+        v.push(FileStatus { file, orig, x, y });
+    }
+    v
+}
+
+#[cfg(test)]
+mod file_status_tests {
+    use super::*;
+
+    #[test]
+    fn parse() {
+        let v = parse_file_status("R  new\0old\0 M a b\0?? dir/\0");
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], FileStatus { file: "new".into(), orig: Some("old".into()), x: 'R', y: ' ' });
+        assert_eq!((v[1].file.as_str(), v[1].x, v[1].y), ("a b", ' ', 'M'));
+        assert_eq!((v[2].file.as_str(), v[2].x), ("dir/", '?'));
+    }
+}
+
 /// Parsed `## ...` header of `git status --porcelain=v1 --branch`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BranchHeader {

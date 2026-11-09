@@ -447,27 +447,25 @@ fn discard_untracked_delete() {
     assert_eq!(app.prompts(), ["a.txt\nb.txt\n\nDelete 2 files? (y/n)"]);
     assert!(!exists(&g, "a.txt") && !exists(&g, "b.txt"));
     assert!(names(&trash).is_empty(), "deleted, not trashed");
-    // the untracked section: all untracked files
+    // the untracked section: magit-list-untracked-files, directories
+    // deleted recursively if confirmed
     std::fs::create_dir(g.toplevel.join("dir")).unwrap();
     write(&g, "dir/c.txt", "c\n");
     write(&g, "d.txt", "d\n");
     app.refresh();
     goto(&mut app, |t| t.starts_with("Untracked files"));
-    app.script_answers(&["y"]);
-    app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "d.txt\ndir/c.txt\n\nDelete 2 files? (y/n)");
-    assert!(!exists(&g, "dir/c.txt") && !exists(&g, "d.txt"));
-    // a directory: quit, or all
-    write(&g, "dir/e.txt", "e\n");
-    app.refresh();
-    goto(&mut app, |t| t.trim() == "dir/");
     app.script_answers(&["y", "quit"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "Recursively delete dir/? (yes, no, all, quit, help)");
+    let n = app.prompts().len();
+    assert_eq!(
+        app.prompts()[n - 2..],
+        ["d.txt\ndir/\n\nDelete 2 files? (y/n)", "Recursively delete dir/? (yes, no, all, quit, help)"]
+    );
     assert_eq!(app.message(), "Quit");
-    assert!(exists(&g, "dir/e.txt"));
+    assert!(!exists(&g, "d.txt") && exists(&g, "dir/c.txt"));
     app.script_answers(&["y", "all"]);
     app.press("k").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Recursively delete dir/? (yes, no, all, quit, help)");
     assert!(!exists(&g, "dir"), "{}", app.message());
 }
 
