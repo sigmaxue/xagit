@@ -16,16 +16,17 @@ const PROCESS_LOG_MAX: usize = 200;
 
 pub(crate) fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
     let mut entry = format!(
-        "{} git {}  [{}]",
+        "{} {}  [{}]",
         if ok { " " } else { "!" },
-        args.join(" "),
+        command_label(args),
         match code {
             Some(c) => format!("exit {c}"),
             None => "signal".into(),
         }
     );
-    entry.push_str(&format!("\n    in {}", dir.display()));
-    for l in stderr.lines().filter(|l| !l.trim().is_empty()).take(8) {
+    entry.push_str(&format!("\n    in {}", sanitize(&dir.display().to_string())));
+    let stderr = sanitize(stderr);
+    for l in stderr.lines().filter(|l| !l.trim().is_empty()) {
         entry.push_str(&format!("\n    {l}"));
     }
     if let Ok(mut log) = PROCESS_LOG.lock() {
@@ -67,6 +68,82 @@ fn env_git() -> &'static str {
     "git"
 }
 
+/// Sanitize diagnostics, including URLs echoed by Git. Never inspect the environment.
+pub fn sanitize(text: &str) -> String {
+    let mut out = String::new();
+    let mut hide_next = false;
+    let mut hide_line = false;
+    for part in text.split_inclusive(char::is_whitespace) {
+        let end = part.trim_end_matches(char::is_whitespace).len();
+        let (word, space) = part.split_at(end);
+        let lower = word.to_ascii_lowercase();
+        let sensitive = ["password", "passwd", "token", "secret", "authorization", "credential", "extraheader", "api_key", "apikey", "private_key"];
+        let sensitive_word = sensitive.iter().any(|key| lower.contains(key));
+        if sensitive_word || hide_next || hide_line {
+            out.push_str("[redacted]");
+            hide_next = sensitive_word && !word.contains('=');
+            hide_line = hide_line || lower.contains("authorization") || lower.contains("private_key");
+        } else if let Some(start) = word.find("://") {
+            let authority = start + 3;
+            let tail = &word[authority..];
+            let stop = tail.find(['/','?','#']).unwrap_or(tail.len());
+            out.push_str(&word[..authority]);
+            if let Some(at) = tail[..stop].rfind('@') {
+                out.push_str("[redacted]@");
+                out.push_str(&tail[at + 1..stop]);
+            } else {
+                out.push_str(&tail[..stop]);
+            }
+            let rest = &tail[stop..];
+            out.push_str(rest.split(['?', '#']).next().unwrap_or(""));
+            if rest.contains(['?', '#']) { out.push_str("?[redacted]"); }
+        } else {
+            out.extend(word.chars().filter(|c| !c.is_control()));
+        }
+        out.extend(space.chars().filter(|c| matches!(c, '\n' | '\t' | ' ')));
+        if space.contains('\n') { hide_next = false; hide_line = false; }
+    }
+    out
+}
+
+pub(crate) fn command_label(args: &[&str]) -> String {
+    let mut hide_next = false;
+    let mut parts = vec!["git".to_string()];
+    for arg in args {
+        let hidden = hide_next || arg.starts_with("--message=") || arg.starts_with("--config-env=");
+        hide_next = matches!(*arg, "-c" | "-m" | "--message" | "--config-env");
+        parts.push(if hidden { "[redacted]".into() } else { format!("{:?}", sanitize(arg)) });
+    }
+    parts.join(" ")
+}
+
+pub(crate) fn failure(dir: &Path, args: &[&str], out: &std::process::Output) -> String {
+    let stderr = sanitize(&String::from_utf8_lossy(&out.stderr));
+    let stdout = sanitize(&String::from_utf8_lossy(&out.stdout));
+    let mut text = format!("{} failed ({})\nin {}\nstderr:\n{}", command_label(args), out.status, sanitize(&dir.display().to_string()), if stderr.trim().is_empty() { "(empty)" } else { stderr.trim() });
+    if !stdout.trim().is_empty() { text.push_str(&format!("\nstdout:\n{}", stdout.trim())); }
+    let lower = stderr.to_ascii_lowercase();
+    let hint = if lower.contains("non-fast-forward") || lower.contains("fetch first") {
+        Some("Review remote changes with fetch and compare histories before retrying; do not force-push blindly.")
+    } else if lower.contains("authentication failed") || lower.contains("permission denied (publickey)") {
+        Some("Check remote access and your credential/SSH configuration; do not paste credentials into diagnostics.")
+    } else if lower.contains("would be overwritten") {
+        Some("Review local changes; commit or stash the changes you want to keep before retrying.")
+    } else if lower.contains("index.lock") && lower.contains("file exists") {
+        Some("Check for another running Git process. Only inspect a stale lock after confirming no Git process is using it.")
+    } else if lower.contains("conflict") {
+        Some("Inspect git status and conflicting files, resolve them, then explicitly continue or abort the operation.")
+    } else if lower.contains("could not resolve host") {
+        Some("Check the remote hostname, network and DNS settings before retrying.")
+    } else { None };
+    if let Some(hint) = hint { text.push_str(&format!("\nHint: {hint}")); }
+    text
+}
+
+pub(crate) fn spawn_failure(dir: &Path, args: &[&str], e: std::io::Error) -> anyhow::Error {
+    anyhow!("{} could not start/wait\nin {}\n{}", command_label(args), sanitize(&dir.display().to_string()), sanitize(&e.to_string()))
+}
+
 impl Git {
     /// Find the toplevel of the repository containing `dir` (like magit-toplevel).
     pub fn discover(dir: &Path) -> Result<Git> {
@@ -74,9 +151,9 @@ impl Git {
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(dir)
             .output()
-            .context("failed to run git")?;
+            .map_err(|e| spawn_failure(dir, &["rev-parse", "--show-toplevel"], e))?;
         if !out.status.success() {
-            bail!("not inside a git repository: {}", dir.display());
+            bail!("{}", failure(dir, &["rev-parse", "--show-toplevel"], &out));
         }
         let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if top.is_empty() {
@@ -235,11 +312,7 @@ impl Git {
     pub fn git_string(&self, args: &[&str]) -> Result<String> {
         let out = self.git_output(args)?;
         if !out.status.success() {
-            bail!(
-                "git {} failed: {}",
-                args.first().unwrap_or(&""),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            bail!("{}", failure(&self.toplevel, args, &out));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
@@ -291,7 +364,7 @@ impl Git {
             .envs(env.iter().copied())
             .current_dir(&self.toplevel)
             .output()
-            .map_err(|e| anyhow!("failed to spawn git: {e}"))
+            .map_err(|e| spawn_failure(&self.toplevel, args, e))
     }
 
     /// Like `git_string`, but run in `dir` instead of the toplevel
@@ -302,15 +375,11 @@ impl Git {
             .args(args)
             .current_dir(dir)
             .output()
-            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+            .map_err(|e| spawn_failure(dir, args, e))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         record(dir, args, out.status.success(), out.status.code(), &stderr);
         if !out.status.success() {
-            bail!(
-                "git {} failed: {}",
-                args.first().unwrap_or(&""),
-                stderr.trim()
-            );
+            bail!("{}", failure(dir, args, &out));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
@@ -327,22 +396,15 @@ impl Git {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
-        child
-            .stdin
-            .take()
-            .context("git stdin unavailable")?
-            .write_all(input)?;
-        let out = child.wait_with_output()?;
+            .map_err(|e| spawn_failure(&self.toplevel, args, e))?;
+        let input_result = child.stdin.take().context("git stdin unavailable")?.write_all(input);
+        let out = child.wait_with_output().map_err(|e| spawn_failure(&self.toplevel, args, e))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         record(&self.toplevel, args, out.status.success(), out.status.code(), &stderr);
         if !out.status.success() {
-            bail!(
-                "git {} failed: {}",
-                args.first().unwrap_or(&""),
-                stderr.trim()
-            );
+            bail!("{}", failure(&self.toplevel, args, &out));
         }
+        input_result.with_context(|| format!("{}: failed to write Git stdin", command_label(args)))?;
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
 
@@ -354,21 +416,79 @@ impl Git {
     /// git_interactive with the environment variables ENV set
     /// (with-environment-variables).
     pub fn git_interactive_env(&self, env: &[(&str, &str)], args: &[&str]) -> Result<()> {
-        let st = Command::new(env_git())
-            .args(GLOBAL_ARGS)
-            .args(args)
-            .envs(env.iter().copied())
-            .current_dir(&self.toplevel)
-            .status()
-            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        let mut cmd = Command::new(env_git());
+        cmd.args(GLOBAL_ARGS).args(args).envs(env.iter().copied()).current_dir(&self.toplevel);
+        if args.first() == Some(&"checkout") {
+            return self.checkout_with_diagnostics(&mut cmd, args);
+        }
+        let st = cmd.status()
+            .map_err(|e| spawn_failure(&self.toplevel, args, e))?;
         record(&self.toplevel, args, st.success(), st.code(), "");
         if !st.success() {
-            bail!(
-                "git {} failed: {}",
-                args.first().unwrap_or(&""),
-                st
-            );
+            bail!("{} failed ({st})\nin {}\nOutput was shown in the terminal (interactive editor/hooks).", command_label(args), sanitize(&self.toplevel.display().to_string()));
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn checkout_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
+        use std::fs::File;
+        use std::io::{Read, Write};
+        use std::os::fd::FromRawFd;
+        use std::process::Stdio;
+
+        let (mut master, mut slave) = (-1, -1);
+        if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) } != 0 {
+            return Err(spawn_failure(&self.toplevel, args, std::io::Error::last_os_error()));
+        }
+        let mut reader = unsafe { File::from_raw_fd(master) };
+        let terminal = unsafe { File::from_raw_fd(slave) };
+        unsafe {
+            libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+            let mut size: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) == 0 {
+                libc::ioctl(slave, libc::TIOCSWINSZ, &size);
+            }
+        }
+        cmd.stderr(Stdio::from(terminal));
+        let child = cmd.spawn();
+        cmd.stderr(Stdio::inherit());
+        let mut child = child.map_err(|e| spawn_failure(&self.toplevel, args, e))?;
+        let capture = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            let mut buf = [0; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        bytes.extend_from_slice(&buf[..n]);
+                        let _ = std::io::stderr().write_all(&buf[..n]);
+                    }
+                    Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(bytes)
+        });
+        let status = child.wait().map_err(|e| spawn_failure(&self.toplevel, args, e))?;
+        let stderr = capture.join().map_err(|_| anyhow!("checkout diagnostic reader panicked"))?
+            .map_err(|e| spawn_failure(&self.toplevel, args, e))?;
+        let out = std::process::Output { status, stdout: Vec::new(), stderr };
+        record(&self.toplevel, args, status.success(), status.code(), &String::from_utf8_lossy(&out.stderr));
+        if !status.success() {
+            bail!("{}", failure(&self.toplevel, args, &out));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn checkout_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
+        cmd.stdin(std::process::Stdio::inherit()).stdout(std::process::Stdio::inherit());
+        let out = cmd.output().map_err(|e| spawn_failure(&self.toplevel, args, e))?;
+        record(&self.toplevel, args, out.status.success(), out.status.code(), &String::from_utf8_lossy(&out.stderr));
+        if !out.status.success() { bail!("{}", failure(&self.toplevel, args, &out)); }
         Ok(())
     }
 
@@ -402,13 +522,15 @@ impl Git {
             }
             Editor::User => {}
         }
-        let st = cmd
-            .args(args)
-            .status()
-            .map_err(|e| anyhow!("failed to spawn git: {e}"))?;
+        cmd.args(args);
+        if args.first() == Some(&"checkout") {
+            return self.checkout_with_diagnostics(&mut cmd, args);
+        }
+        let st = cmd.status()
+            .map_err(|e| spawn_failure(&self.toplevel, args, e))?;
         record(&self.toplevel, args, st.success(), st.code(), "");
         if !st.success() {
-            bail!("git {} failed: {}", args.first().unwrap_or(&""), st);
+            bail!("{} failed ({st})\nin {}\nOutput was shown in the terminal (interactive editor/hooks).", command_label(args), sanitize(&self.toplevel.display().to_string()));
         }
         Ok(())
     }
@@ -421,11 +543,7 @@ impl Git {
         let stderr = String::from_utf8_lossy(&out.stderr);
         record(&self.toplevel, &refs, out.status.success(), out.status.code(), &stderr);
         if !out.status.success() {
-            bail!(
-                "git {} failed: {}",
-                refs.first().unwrap_or(&""),
-                stderr.trim()
-            );
+            bail!("{}", failure(&self.toplevel, &refs, &out));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
     }
@@ -478,5 +596,46 @@ impl Git {
             || self.rebase_in_progress()
             || self.revert_in_progress()
             || self.cherry_in_progress()
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn empty_stderr_keeps_exit_and_stdout() {
+        let out = std::process::Output { status: std::process::ExitStatus::from_raw(7 << 8), stdout: b"hook explanation\nsecond line".to_vec(), stderr: vec![] };
+        let text = failure(Path::new("/repo"), &["commit", "-m", "private message"], &out);
+        assert!(text.contains("exit status: 7"));
+        assert!(text.contains("stderr:\n(empty)"));
+        assert!(text.contains("stdout:\nhook explanation\nsecond line"));
+        assert!(!text.contains("private message"));
+    }
+
+    #[test]
+    fn secrets_are_redacted_in_output_and_arguments() {
+        let text = sanitize("fatal: https://alice:fakepass@example.com/repo?access=abc\nAuthorization: Bearer fakebearer\ntoken=othersecret\npassword: separatedsecret");
+        for secret in ["alice", "fakepass", "access=abc", "fakebearer", "othersecret", "separatedsecret"] { assert!(!text.contains(secret), "{secret}"); }
+        assert!(text.contains("example.com/repo"));
+        let label = command_label(&["-c", "http.extraHeader=Bearer hidden", "push", "https://u:p@example.com/r"]);
+        assert!(!label.contains("hidden"));
+        assert!(!label.contains("u:p"));
+    }
+
+    #[test]
+    fn long_errors_and_original_stderr_survive_with_targeted_hint() {
+        let stderr = format!("rejected: non-fast-forward\n{}", "detail\n".repeat(100));
+        let out = std::process::Output { status: std::process::ExitStatus::from_raw(1 << 8), stdout: vec![], stderr: stderr.as_bytes().to_vec() };
+        let text = failure(Path::new("/repo"), &["push", "origin", "main"], &out);
+        assert!(text.contains(stderr.trim()));
+        assert!(text.contains("Hint: Review remote changes"));
+    }
+
+    #[test]
+    fn signal_is_reported() {
+        let out = std::process::Output { status: std::process::ExitStatus::from_raw(15), stdout: vec![], stderr: vec![] };
+        assert!(failure(Path::new("/repo"), &["fetch"], &out).contains("signal: 15"));
     }
 }

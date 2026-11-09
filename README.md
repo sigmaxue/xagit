@@ -1,16 +1,77 @@
 # ngit — Magit-style git TUI in Rust
 
-参考 [magit/magit](https://github.com/magit/magit) 实现的 git 命令行操作与快捷键操作，行为保持一致，Rust 实现，全部命令有测试验收。
+ngit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com/magit/magit) 的操作流程、快捷键和 transient 菜单。它结合 Git 命令行操作与 libgit2 只读后端，无需 Emacs 即可查看仓库状态并执行常用 Git 操作。
+
+项目仓库：[sigmaxue/ngit](https://github.com/sigmaxue/ngit)。本项目不是 Magit 的完整替代，兼容范围与限制见下文。
+
+## 目录
+
+- [特性](#特性)
+- [要求](#要求)
+- [安装与构建](#安装与构建)
+- [快速开始](#快速开始)
+- [常用快捷键与多键解释](#常用快捷键与多键解释)
+- [测试与开发](#测试与开发)
+- [Magit 兼容范围与已知限制](#magit-兼容范围与已知限制)
+- [贡献](#贡献)
+- [致谢](#致谢)
+- [许可证](#许可证)
+
+## 特性
+
+- 状态视图支持 section（章节）、文件、hunk（差异块）及 region（选中区域）操作，包括暂存、取消暂存、丢弃、应用与反向应用。可用操作取决于当前视图及变更类型。
+- 提供分支、提交、远端、fetch/pull/push、merge/rebase、tag、stash、reset、cherry-pick 与 revert 菜单；进行中操作按仓库状态提供 continue/skip/abort 等入口。
+- 支持 diff、log、refs、blame、补全、历史选择及 transient 参数；支持多键序列与 Ctrl/Meta 按键。
+- 包含 bisect、worktree、submodule、subtree、notes、patch/am 与分支配置功能，以及进程日志视图。
+
+## 要求
+
+- Rust 工具链与 Cargo：项目使用 Rust 2021 edition，未声明最低 Rust 版本（MSRV）。建议使用当前稳定版。
+- Git 命令行程序需位于 `PATH`；提交前需配置 Git 用户身份，远端操作需自行配置认证。
+- 支持交互式终端的环境；本文不声明已验证的平台列表。
+- `git2` 依赖涉及本地 C 代码构建，需要可用的 C 编译工具链；当前配置关闭默认特性，不要求系统安装 libgit2/OpenSSL。
+- 需要手动编辑 rebase todo 或提交消息时，配置可用的外部编辑器；Git 按 `GIT_SEQUENCE_EDITOR`、`GIT_EDITOR`、`core.editor` 等规则选择编辑器。
+- `r m`、`r k` 及部分 cherry 搬移操作使用 Perl 脚本改写 todo，需要 `perl`。
+
+## 安装与构建
 
 ## 构建
 
+从源码构建：
+
 ```bash
+git clone https://github.com/sigmaxue/ngit.git
+cd ngit
 cargo build --release
-./target/release/ngit          # 当前目录
-./target/release/ngit /path    # 指定仓库
 ```
 
-## 快捷键（与 Magit 一致）
+构建产物为 `target/release/ngit`（Windows 通常为 `ngit.exe`）。如需安装到 Cargo 的可执行文件目录：
+
+```bash
+cargo install --path .
+```
+
+确保 Cargo 的可执行文件目录在 `PATH` 中后，可直接运行 `ngit`。
+
+## 快速开始
+
+在源码目录构建后：
+
+```bash
+./target/release/ngit                 # 查看当前仓库
+./target/release/ngit /path/to/repo   # 查看指定仓库
+```
+
+安装后也可在任意 Git 仓库内运行 `ngit`，或运行 `ngit /path/to/repo`。CLI 只读取第一个位置参数作为路径，省略时使用当前目录；没有专用的 `--help`/`--version` 参数解析。
+
+1. 按 `h` 或 `?` 查看总菜单，按 `n`/`p` 在章节间移动，方向键在行间移动。
+2. 按 `TAB` 展开变更；在文件或 hunk 上按 `s` 暂存，按 `u` 取消暂存。
+3. 依次按 `c c` 创建提交并在提示行输入消息；按 `g` 刷新。
+4. 按 `q` 返回上一视图；顶层状态视图中按 `q` 退出。
+
+注意：`k` 是丢弃变更，不是向上移动。hard reset、强制推送、删除与历史改写等操作可能丢失数据，请检查目标、提示和参数，必要时先备份。
+
+## 常用快捷键与多键解释
 
 ### 全局按键（magit-mode-map）
 
@@ -21,10 +82,10 @@ cargo build --release
 | `q` / `Esc` | bury-buffer | 退出文本视图 / 退出程序 |
 | `TAB` | toggle-section | 折叠/展开 section |
 | `RET` | visit-thing | 查看光标处内容（diff / stash / 文件） |
-| `n` / `p` / `C-n` / `C-p` / 方向键 | 移动 | 上下移动（Magit 没有 vi 式移动：`k` 是 discard，`j` 是跳转） |
+| `n` / `p`；`C-n` / `C-p` / 方向键 | 移动 | 前者按 section 移动，后者按行移动（Magit 没有 vi 式移动：`k` 是 discard，`j` 是跳转） |
 | `j` | status-jump | 跳转到指定 section |
 | `^` | section-up | 跳到所在 section 的标题行 |
-| `s` / `u` | stage / unstage | 暂存 / 取消暂存光标处文件 |
+| `s` / `u` | stage / unstage | 暂存 / 取消暂存光标处 section、文件、hunk 或选中 region |
 | `S` / `U` | stage-modified / unstage-all | 全部暂存 / 全部取消暂存 |
 | `k` | discard | 丢弃光标处变更（带确认） |
 | `a` / `v` | apply / reverse | 把光标处变更（或 stash）应用到工作区 / 在工作区反向应用 |
@@ -41,7 +102,7 @@ cargo build --release
 | `w` / `W` | am / patch 菜单 | `git am` 菜单；patch 菜单（format-patch、保存 patch、request-pull） |
 | `b C` / `l r` | branch configure / reflog | 分支配置菜单与 reflog 视图 |
 
-### 总菜单（dispatch popup，与 magit.el:330-403 一致）
+### 总菜单与主要子菜单
 
 | 键 | 菜单 | 键 | 菜单 |
 |----|------|----|------|
@@ -56,14 +117,14 @@ cargo build --release
 | `w` / `W` | Apply patches / Patch | `y` | Show refs |
 | `I` / `C` | Init / Clone | `!` | Run |
 
-每个子菜单的键位与参数开关均按 Magit transient 定义实现。merge / rebase / cherry-pick / revert / am / bisect 菜单与 Magit 的 `:if` 谓词一致：操作进行中时显示 continue / skip / abort 等后缀，平时显示发起操作的后缀。例如：
+子菜单参考 Magit transient 定义实现键位与参数开关。merge / rebase / cherry-pick / revert / am / bisect 菜单按仓库状态选择入口：操作进行中时显示 continue / skip / abort 等后缀，平时显示发起操作的后缀。例如：
 
 - **Commit (`c`)**：`-a/-e/-v/-n/-R` 参数；`c` 提交、`e` Extend（--amend --no-edit）、`a` Amend、`w` Reword、`f` Fixup、`s` Squash、`F` Instant fixup、`S` Instant squash
 - **Stash (`z`)**：`z/i/w/x` stash both/index/worktree/keep-index；`a/p/k` apply/pop/drop；`l/v` list/show；`Z/I/W` snapshot；`-u/-a` 包含未跟踪/忽略文件
 - **Reset (`X`)**：`m/s/h/k/i/w` mixed/soft/hard/keep/index/worktree
 - **Push (`P`)**：`-f` force-with-lease、`-F` force、`-h` no-verify、`-n` dry-run、`-u` set-upstream、`-T` 全部 tag、`-t` follow-tags；`p` 推到 pushRemote（`branch.<b>.pushRemote`，回退到 `remote.pushDefault`）、`u` upstream、`e` 其他、`o` 其他分支、`r` 显式 refspec、`m` matching、`T` 推一个 tag、`t` 推全部 tag、`C` 配置
 - **Merge (`m`)**：`m` merge、`e` 编辑消息后合并（`--no-ff`）、`n` 不提交、`a` absorb（若 push 目标存在先 `--force-with-lease` 推送，再 `merge --no-edit`，然后删除分支；对主分支会先确认）、`p` 预览（`git merge-tree`，不改动工作区）、`s` squash、`d` dissolve（切到目标分支并 absorb 原分支）；合并进行中：`m` 提交合并、`a` 放弃
-- **Rebase (`r`)**：`p` onto pushRemote、`u` onto upstream、`e` elsewhere、`i` interactive、`s` subset（`rebase --onto <新基> <起点>^`）、`m` 修改某个提交（todo 中改为 `edit`）、`w` reword、`k` 删除某个提交、`f` autosquash；会改写已发布提交（`origin/master`）或范围内含 merge 时，与 Magit 一样先确认；rebase 进行中：`r` continue、`s` skip、`e` 编辑 todo（`rebase --edit-todo`）、`a` abort
+- **Rebase (`r`)**：`p` onto pushRemote、`u` onto upstream、`e` elsewhere、`i` interactive、`s` subset（`rebase --onto <新基> <起点>^`）、`m` 修改某个提交（todo 中改为 `edit`）、`w` reword、`k` 删除某个提交、`f` autosquash；会改写已发布提交（`origin/master`）或范围内含 merge 时，按当前实现先确认；rebase 进行中：`r` continue、`s` skip、`e` 编辑 todo（`rebase --edit-todo`）、`a` abort
 - **Cherry-pick (`A`)**：`h` harvest（把其他分支上的提交搬到当前分支，并从原分支移除）、`m` squash 合并、`d` donate（把当前分支上的提交搬到其他分支）、`n` spinout / `s` spinoff（用这些提交新建分支；spinoff 会切换过去）。被移走的提交是源分支 tip 时用 `update-ref` 回退源分支，否则用 `rebase -i` 删掉；进行中时 `A` continue、`s` skip、`a` abort
 - **Revert (`V`)**：进行中时 `V` continue、`s` skip、`a` abort
 - **Apply patches (`w`)**：`m` 应用 mbox / maildir（`git am <路径>`）、`w` 应用 patch 文件、`a` 应用普通 patch 到工作区
@@ -71,11 +132,22 @@ cargo build --release
 - **Submodule (`o`)**：`a` 添加、`r` 注册（`git submodule init`，不删除任何东西）、`p` populate（`update --init`）、`u` 更新、`s` 同步、`d` unpopulate（`deinit`）、`k` 删除（带确认）、`l` 列表、`f` fetch modules
 - **Branch (`b`)**：`b/l/c` checkout、`s` spin-off、`S` spin-out、`n` create、`m` rename、`k` delete；与 Magit 默认的 `magit-branch-direct-configure` 一致，菜单里直接提供 `d/u/r/p/R/P/B` 配置键；`C` 配置菜单：`d` description、`u` upstream、`r` 循环切换 `branch.<b>.rebase`（true/merges/interactive/false/未设置）、`p` pushRemote、`R` 循环切换 `pull.rebase`、`P` `remote.pushDefault`、`B` 更新默认分支（fetch 主远端并 `remote set-head --auto`，把本地旧默认分支改名，同时修改跟踪它的分支的 upstream）、`a m` 循环切换 `branch.autoSetupMerge`（always/true/false）、`a r` 循环切换 `branch.autoSetupRebase`（always/local/remote/never）
 
-菜单键按 Emacs `kbd` 的写法逐键输入：`-f` 是先按 `-` 再按 `f`，`a m` 是先按 `a` 再按 `m`。只按了前缀时菜单会保持打开，等待后续按键；键序列没有定义时提示 `<键> is undefined`；`q` / `C-g` 退出菜单。
+菜单键按 Emacs `kbd` 的写法逐键输入：`-f` 是先按 `-` 再按 `f`，`a m` 是先按 `a` 再按 `m`。只按了前缀时菜单会保持打开，等待后续按键；键序列没有定义时显示未绑定提示；`q` / `C-g` 退出菜单。
 
-`r i`、`r w`、进行中的 `r e` 会暂时离开 TUI，打开 git 配置的编辑器（`GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` / `core.editor`）编辑 todo 或提交消息，编辑器退出后回到 TUI。`r m`、`r k` 和 cherry 搬移与 Magit 一样，用 perl 脚本改写 todo，不需要手动编辑，所以系统里要有 `perl`。
+`r i`、`r w`、进行中的 `r e` 会暂时离开 TUI，打开 git 配置的编辑器（`GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` / `core.editor`）编辑 todo 或提交消息，编辑器退出后回到 TUI。`r m`、`r k` 和 cherry 搬移按当前实现，用 perl 脚本改写 todo，不需要手动编辑，所以系统里要有 `perl`。
 
-## 架构
+### 按键记法与区域选择
+
+- `RET` 是 Enter，`TAB` 是 Tab；大写字母与小写字母不同。`C-n` 表示同时按 Ctrl+n，`M-n` 表示 Alt/Meta+n。
+- `c c`、`b C a m` 均逐键输入，不输入空格；`P - f` 表示打开 Push 菜单后依次按 `-`、`f`，切换 `--force-with-lease`，再次输入可关闭。
+- `C-u` 是前缀参数，可接数字或重复输入；例如 `C-u x` 使用 quick reset 的 hard 模式，风险高于默认 mixed 模式。前缀参数并非每条命令都支持。
+- `C-SPC`（或 `C-@`）设置 mark，再移动光标选择 region；`C-g` 取消选区或当前交互。在展开的 diff 中可选择部分变更行，再执行适用的 `s`、`u`、`k` 等操作。
+- `TAB` 切换当前 section；`Shift+TAB` 全局循环折叠层级，`1`–`4` 设置显示层级；`M-n`/`M-p` 移动到同级 section。
+- 文本、log、diff 等视图有各自上下文键位；以上主要描述状态视图，操作前可查看菜单。
+
+## 测试与开发
+
+### 架构
 
 ```
 src/
@@ -84,7 +156,7 @@ src/
 ├── git/
 │   ├── exec.rs        # git 进程封装（rev-parse/status 解析/全局参数）
 │   ├── libgit2.rs     # libgit2 只读后端（git2 crate：仓库发现/HEAD/status/refs）
-│   ├── ops.rs         # 全部 Magit 风格操作（stage/commit/branch/... + 附加功能）
+│   ├── ops.rs         # Magit 风格操作（stage/commit/branch/... + 附加功能）
 │   └── status.rs      # magit-status 缓冲区模型（porcelain -z 解析）
 └── ui/
     ├── keys.rs        # 按键解析（Emacs 标记 ↔ 事件）
@@ -93,35 +165,44 @@ src/
     └── app.rs         # 事件循环 + 命令分发 + 提示交互
 ```
 
-行为一致性来源：每个操作的 git 参数与 Magit Elisp docstring 中记录的一致（如 `magit-unstage-1` 无初始提交时用 `git rm --cached`、否则 `git reset HEAD --`；`magit-reset-index` 用 `git reset <commit> -- .` 等）。
-
-## 测试验收（155 项全部通过）
+### 测试
 
 ```bash
 cargo test
 ```
 
-- `tests/keymaps.rs`（31 项）：逐一比对 Magit lisp 源码中每个 transient 的键位与动作定义，含附加功能菜单断言、「无 `unsupported` 占位」全量校验、状态缓冲区直接按键断言、进行中菜单（`@progress`，按 Magit 谓词判断：`rebase-merge/` 或 `rebase-apply/onto`）的选择逻辑、多键序列解析（所有菜单无重复键、无前缀冲突，`P - f`、`b C a m` 等实际按键），以及通过 `App::press` 实际按键验证打开的菜单
-- `tests/git_ops.rs`（124 项）：每个命令在临时仓库中执行后断言真实仓库状态，另含 4 项 libgit2 后端一致性、11 项附加功能行为测试、8 项 Magit 差异回归测试（ahead/behind、重命名、冲突、upstream、reverse、gitignore 子目录、工作目录命令）、11 项按键语义回归测试（submodule 注册/populate/unpopulate、配置循环切换、pushRemote/tags/matching/refspecs 推送、merge 预览与编辑消息、合并中提交、sequencer continue/skip/abort、am 与 rebase 区分、bisect 状态、autosquash、进程日志、diff/log 参数），以及 20 项新增后缀行为测试（rebase interactive/edit/reword/remove/subset/edit-todo/root，merge absorb（含 force-with-lease 推送与 unset pushRemote）/dissolve，cherry harvest（tip 与非 tip）/donate/spinout/spinoff，am mbox，main branch / primary remote，更新默认分支）：
-  - stage/unstage/discard × 9（含无初始提交场景）
-  - commit 系列 × 9（create/extend/amend/reword/fixup/squash/instant-fixup/instant-squash/-a）
-  - branch × 8（checkout/create/delete/rename/spinoff/spinout）
-  - remote × 3、fetch/pull/push × 3、tag × 2
-  - merge × 4（ff/no-commit/squash/abort 冲突恢复）
-  - rebase × 2、reset × 6、revert × 2、cherry-pick × 2
-  - stash × 10（both/index/worktree/keep-index/snapshot/pop/drop/clear/show/branch）
-  - ignore/untrack/log/diff/show 等
-  - 附加功能 × 11（bisect/worktree/submodule/notes/ediff 6 项，reflog/branch config/cherries/patches/subtree 5 项）
+测试位于 `tests/`，通过临时 Git 仓库、命令结果与应用按键断言覆盖行为，例如：
 
-## 与 Magit 的差异说明
+- `keymaps.rs`、`sequence.rs`、`prefix_arg.rs`：菜单定义、多键序列、Ctrl 与前缀参数。
+- `git_ops.rs`、`branch_delete.rs`、`discard_files.rs`：Git 操作及仓库状态变化。
+- `status_buffer.rs`、`diff_buffer.rs`：章节、hunk、region、暂存/取消暂存、apply/reverse 与 diff 参数作用域。
+- `log_buffer.rs`、`log_select.rs`、`refs_buffer.rs`、`blame.rs`、`smerge.rs`：日志、选择、引用、blame 与冲突交互。
+- `completion.rs`、`history.rs`、`transient_args.rs`、`transient_values.rs`、`options.rs`、`wip.rs`：补全、历史、参数持久化、配置及 WIP 行为。
 
-- 提交消息通过提示行输入（`-m`）而非弹出 Emacs 编辑器
-- bisect / worktree / submodule / notes 已支持：`B` / `Z`（或 `%`）/ `o` / `T` 打开对应菜单，底层分别调用 `git bisect`、`git worktree`、`git submodule`、`git notes`
-- ediff 没有 Emacs 会话：`e` / `E` 改为在文本视图显示对应 diff（光标处文件、暂存/未暂存、两个 rev 区间、单个 commit、stash）；Magit ediff 菜单中依赖 ediff 会话的 stage / resolve 未提供
-- `D` / `L` 修改的参数在本次运行内对所有 diff / log 视图生效（Magit 为每个 buffer 单独保存）
-- `m e` 的合并消息在提示行输入，而不是打开编辑器
-- 需要编辑 todo 或提交消息时，打开的是外部编辑器，而不是 Emacs 的 `git-rebase-mode` / with-editor buffer
-- `r i/m/w/k/s` 从最近 30 个提交的列表中选择提交（Magit 用 log buffer 选择）；cherry 搬移在提示行输入 commit 或 `A..B` 区间
-- dispatch 与所有子菜单命令均已支持，无 `unsupported` 占位：`H`/`J` 输出当前行信息与状态缓冲区文本，`l r`/`l O`/`l H` 显示 reflog，`l f` 显示光标处文件的日志（ngit 附加），`O` subtree，`Y` cherries，`b C` 分支配置
-- subtree / cherries / patches / 分支配置没有独立 Magit buffer，结果统一显示在文本视图
-- stash 实现采用 `git stash` 原生命令（Magit 自建 stash commit），净效果一致
+这里描述的是现有测试覆盖范围，不是本次运行结果，也不保证与 Magit 全等。本次仅修改文档，未运行测试，不提供测试通过数量或覆盖率声明。
+
+## Magit 兼容范围与已知限制
+
+ngit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
+
+- 提交消息及 `m e` 的合并消息主要通过提示行输入；需要编辑 todo 或提交消息时使用外部编辑器，替代 Emacs 的 `git-rebase-mode`/with-editor 会话。编辑器退出后返回 TUI。
+- `e`/`E` 用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；依赖 Ediff 会话的 stage/resolve 入口仍未提供。普通暂存和冲突相关功能不因此全部缺失。
+- 部分命令用统一文本视图替代 Magit 专用 buffer，不能据此推断完全没有结构化视图：项目已有专门的 status、diff、log、refs、blame 等模块。
+- refs 候选、最近提交列表及提示行输入与 Magit 的历史/log 选择交互不同。例如部分 rebase 操作从最近 30 个提交中选择，cherry 搬移可输入 commit 或 `A..B` 区间。
+- `D`/`L` 用于当前视图参数调整，按 `g` 刷新；现有测试断言 diff/log 参数修改只影响所显示的 buffer，新视图仍使用默认参数。旧的“运行内所有 diff/log 共享参数”说明不适用于当前实现。
+- stash 采用原生 `git stash`，而 Magit 有自己的 stash 构造逻辑；现有测试不能证明所有场景的净效果一致，尚未通过全面的真实差分验证。
+- 测试中的键位与仓库状态断言只是兼容性证据，不等于与 Magit 全等，也不代表所有平台已经验证。
+
+## 贡献
+
+欢迎在 [Issues](https://github.com/sigmaxue/ngit/issues) 提交问题或通过 Pull Request 改进代码和文档。报告问题时请提供复现步骤、Git/Rust 版本、终端环境以及相关错误输出；不要附带凭据或私有仓库敏感信息。
+
+代码改动请补充对应的 `tests/` 回归用例并运行 `cargo test`；涉及键位或行为的变更请同步更新 README。提交前可用 `git diff --check` 检查空白问题。
+
+## 致谢
+
+感谢 [Magit](https://github.com/magit/magit) 提供的操作设计与键位参考，以及 Rust、[crossterm](https://github.com/crossterm-rs/crossterm)、[git2-rs](https://github.com/rust-lang/git2-rs) 和 libgit2 社区。ngit 是独立实现，不是 Magit 官方项目。
+
+## 许可证
+
+`Cargo.toml` 声明许可证为 `GPL-3.0-or-later`（GNU GPL v3.0 或更高版本）。当前仓库未包含独立的 `LICENSE`/`COPYING` 许可证全文文件；此处记录已声明的元数据，不补造许可证文件。

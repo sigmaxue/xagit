@@ -160,8 +160,7 @@ pub fn run_blame_parsed(
     a.extend(["--", file]);
     let out = g.git_output(&a)?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("{}", err.lines().next().unwrap_or("git blame failed"));
+        bail!("{}", crate::git::exec::failure(&g.toplevel, &a, &out));
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut cache: HashMap<String, HashMap<String, String>> = HashMap::new();

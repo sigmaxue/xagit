@@ -364,15 +364,20 @@ pub fn build_log(g: &Git, revs: &[String], args: &[String], files: &[String], ma
     let mut b = Builder::new();
     let mut diffs = Vec::new();
     let out = match g.git_output(&a) {
-        Ok(o) if !o.status.success() && o.stdout.is_empty() => {
+        Ok(o) if !o.status.success() => {
             // keep-error: show what git said
-            for l in String::from_utf8_lossy(&o.stderr).lines() {
+            for l in crate::git::exec::failure(&g.toplevel, &a, &o).lines() {
                 b.line(l.to_string(), LineKind::Info, "error", false, 0);
             }
             String::new()
         }
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Err(_) => String::new(),
+        Err(e) => {
+            for l in crate::git::exec::sanitize(&format!("{e:#}")).lines() {
+                b.line(l.to_string(), LineKind::Info, "error", false, 0);
+            }
+            String::new()
+        },
     };
     let count = wash_log(&mut b, g, &out, align, &mut diffs, margin, &LogSection::LOG);
     if count > 0 && Some(count) == commit_limit(args) {

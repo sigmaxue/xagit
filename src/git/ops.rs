@@ -114,7 +114,7 @@ impl Git {
         a.extend(files.iter().map(|s| s.as_str()));
         let patch = self.git_output(&a)?;
         if !patch.status.success() {
-            bail!("git diff failed: {}", String::from_utf8_lossy(&patch.stderr).trim());
+            bail!("{}", super::exec::failure(&self.toplevel, &a, &patch));
         }
         if patch.stdout.is_empty() {
             bail!("nothing staged to reverse");

@@ -1939,3 +1939,57 @@ fn update_default_branch_follows_remote_rename() {
     assert_eq!(up("newmain"), "origin/newmain");
     assert_eq!(up("topic"), "newmain");
 }
+
+#[test]
+fn failing_git_command_explains_command_status_and_stderr() {
+    let (_td, g, _head) = repo_with_commit();
+    let error = g.git_string(&["rev-parse", "--verify", "missing-ref-for-error-test"]).unwrap_err().to_string();
+    assert!(error.contains("rev-parse"));
+    assert!(error.contains("missing-ref-for-error-test"));
+    assert!(error.contains("exit status:"));
+    assert!(error.contains("stderr:"));
+    assert!(!error.contains("stderr:\n(empty)"));
+}
+
+#[test]
+fn checkout_failure_preserves_local_changes_and_git_diagnostics() {
+    let (_td, g, _) = repo_with_commit();
+    let main = g.current_branch().unwrap();
+    g.branch_and_checkout("checkout-side", None).unwrap();
+    write(&g, "file.txt", "side version\n");
+    g.stage("file.txt").unwrap();
+    g.commit(Some("side"), &[]).unwrap();
+    g.checkout(&main).unwrap();
+    write(&g, "file.txt", "keep my local changes\n");
+    let text = format!("{:#}", g.checkout("checkout-side").unwrap_err());
+    assert!((text.contains("would be overwritten by checkout") || text.contains("本地修改将被检出操作覆盖")), "{text}");
+    assert!(text.contains("file.txt") && text.contains("checkout-side"));
+    assert!(text.contains(&g.toplevel.display().to_string()));
+    assert_eq!(read(&g, "file.txt"), "keep my local changes\n");
+    assert_eq!(g.current_branch().unwrap(), main);
+    assert!(ngit_lib::git::exec::process_log().iter().any(|entry| (entry.contains("would be overwritten") || entry.contains("本地修改将被检出操作覆盖")) && entry.contains("file.txt")));
+}
+
+#[test]
+fn checkout_unknown_branch_keeps_diagnostics_in_both_execution_paths() {
+    let (_td, g, _) = repo_with_commit();
+    for result in [g.checkout("checkout-missing-ref"), g.git_with_editors_env(ngit_lib::git::exec::Editor::User, ngit_lib::git::exec::Editor::User, &[], &["checkout", "checkout-missing-ref"])] {
+        let text = format!("{:#}", result.unwrap_err());
+        assert!(((text.contains("pathspec") && text.contains("did not match")) || text.contains("路径规格")), "{text}");
+        assert!(text.contains("checkout-missing-ref") && text.contains(&g.toplevel.display().to_string()));
+        assert!(!text.contains("Output was shown"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_hook_retains_stderr_tty() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_td, g, _) = repo_with_commit();
+    let hook = g.gitdir.join("hooks/post-checkout");
+    std::fs::write(&hook, "#!/bin/sh\nif test -t 2; then echo hook-stderr-is-tty >&2; else echo hook-lost-tty >&2; fi\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let text = format!("{:#}", g.checkout("HEAD").unwrap_err());
+    assert!(text.contains("hook-stderr-is-tty"), "{text}");
+    assert!(!text.contains("hook-lost-tty"));
+}

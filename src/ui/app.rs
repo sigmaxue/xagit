@@ -879,9 +879,15 @@ impl App {
 
         if let Some((title, content)) = &self.view_text {
             rows.push(format!("--- {title} ---"));
-            let total = content.lines().count();
+            let wrapped: Vec<String> = content.lines().flat_map(|line| {
+                let chars: Vec<char> = line.chars().collect();
+                if chars.is_empty() { vec![String::new()] } else {
+                    chars.chunks(w.max(1)).map(|chunk| chunk.iter().collect()).collect()
+                }
+            }).collect();
+            let total = wrapped.len();
             self.view_scroll = self.view_scroll.min(total.saturating_sub(1));
-            rows.extend(content.lines().skip(self.view_scroll).take(body.saturating_sub(1)).map(str::to_string));
+            rows.extend(wrapped.into_iter().skip(self.view_scroll).take(body.saturating_sub(1)));
         } else {
             let mut body = body;
             if self.mode != BufferMode::Status {
@@ -1133,8 +1139,9 @@ impl App {
             );
             let _ = out.flush();
             let mut buf = String::new();
-            let n = std::io::stdin().read_line(&mut buf)?;
+            let result = std::io::stdin().read_line(&mut buf);
             let _ = enable_raw_mode();
+            let n = result.map_err(|e| anyhow::anyhow!("Failed to read prompt input: {e}"))?;
             if n == 0 {
                 return Ok(None); // EOF / C-d
             }
@@ -1272,7 +1279,7 @@ impl App {
                     continue;
                 }
             };
-            self.set_msg(&format!("{prompt}{}", if yes { 'y' } else { 'n' }));
+            self.message = crate::git::exec::sanitize(&format!("{prompt}{}", if yes { 'y' } else { 'n' }));
             return Ok(yes);
         }
     }
@@ -1347,7 +1354,13 @@ impl App {
     }
 
     fn set_msg(&mut self, m: &str) {
-        self.message = m.to_string();
+        let text = crate::git::exec::sanitize(m);
+        self.message = text.lines().next().unwrap_or("").to_string();
+        if text.contains('\n') || text.chars().count() > 200 {
+            if text.contains('\n') { self.message.push_str(" (details: n/p scroll, q close)"); }
+            self.view_text = Some(("Operation details (n/p scroll, q close)".into(), text));
+            self.view_scroll = 0;
+        }
     }
 
     // ------------------------------------------------------------ selection helpers
@@ -1428,7 +1441,7 @@ impl App {
                     }
                     let key = Key::from_event(&ev);
                     if let Err(e) = self.handle_key(key) {
-                        self.set_msg(&format!("{e}"));
+                        self.set_msg(&format!("{e:#}"));
                     }
                 }
                 _ => {}
@@ -2818,7 +2831,7 @@ impl App {
             "fetch-upstream" => {
                 match g!().fetch_upstream(&args) {
                     Ok(r) => self.set_msg(&format!("fetched {r}")),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -2848,7 +2861,7 @@ impl App {
             "pull-upstream" => {
                 match g!().pull_upstream(&args) {
                     Ok(()) => self.set_msg("pulled"),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -2866,7 +2879,7 @@ impl App {
             "push-upstream" => {
                 match g!().push_upstream(&args) {
                     Ok(()) => self.set_msg("pushed"),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -2916,7 +2929,7 @@ impl App {
             "push-pushremote" => {
                 match g!().push_pushremote(&args) {
                     Ok(r) => self.set_msg(&format!("pushed to {r}")),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -2943,7 +2956,7 @@ impl App {
                 };
                 match res {
                     Ok(()) => self.set_msg(&format!("pushed to {remote}")),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -2971,7 +2984,7 @@ impl App {
                         match g!().merge_preview(&rev) {
                             Ok(p) if p.trim().is_empty() => self.set_msg("merge would not change anything"),
                             Ok(p) => self.view_text = Some((format!("preview merge of {rev}"), p)),
-                            Err(e) => self.set_msg(&format!("{e}")),
+                            Err(e) => self.set_msg(&format!("{e:#}")),
                         }
                         return Ok(());
                     }
@@ -2982,7 +2995,7 @@ impl App {
             "merge-commit" => {
                 match g!().merge_commit() {
                     Ok(()) => self.set_msg("merge committed"),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -3002,7 +3015,7 @@ impl App {
             "rebase-pushremote" => {
                 match g!().rebase_pushremote(&args) {
                     Ok(t) => self.set_msg(&format!("rebased onto {t}")),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -3177,7 +3190,7 @@ impl App {
                 }
                 match g!().sequencer(action) {
                     Ok(()) => self.set_msg(&format!("sequencer {action}")),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -3304,7 +3317,7 @@ impl App {
                 };
                 match out {
                     Ok(o) => self.view_text = Some((format!("git {}", line), o)),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
                 self.refresh();
             }
@@ -3442,7 +3455,7 @@ impl App {
                 a.push(&rev);
                 match g!().git_string(&a) {
                     Ok(o) => self.view_text = Some(("*magit-shortlog*".into(), o)),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
             }
             "diff-unstaged" | "diff-staged" | "diff-worktree" | "diff-dwim" | "diff-range"
@@ -3879,7 +3892,7 @@ impl App {
         let res = self.with_terminal(|g| g.sequencer_run(command, &args, &commits));
         match res {
             Ok(()) => self.set_msg(command),
-            Err(e) => self.set_msg(&format!("{e}")),
+            Err(e) => self.set_msg(&format!("{e:#}")),
         }
         self.refresh();
         Ok(())
@@ -4046,7 +4059,7 @@ impl App {
             self.git.commit(None, &a)
         };
         if let Err(e) = res {
-            self.set_msg(&format!("{e}"));
+            self.set_msg(&format!("{e:#}"));
             self.refresh();
             return Ok(());
         }
@@ -4709,7 +4722,7 @@ impl App {
         for s in stashes.iter().rev() {
             msg = format!("Deleted refs/{s} (was {})", self.git.rev_short(s));
             if let Err(e) = self.git.stash_drop(s) {
-                msg = format!("{e}");
+                msg = format!("{e:#}");
                 break;
             }
         }
@@ -5763,7 +5776,7 @@ impl App {
             rev
         };
         if let Err(e) = super::blame::file_contents(&self.git, &rev, &file) {
-            self.set_msg(&format!("{e}"));
+            self.set_msg(&format!("{e:#}"));
             return;
         }
         self.find_file(&rev, &file, line.unwrap_or(1));
@@ -6309,7 +6322,7 @@ impl App {
                     _ => 1,
                 };
                 if let Err(e) = super::blame::file_contents(&self.git, &rev, &file) {
-                    self.set_msg(&format!("{e}"));
+                    self.set_msg(&format!("{e:#}"));
                     return Ok(());
                 }
                 self.find_file(&rev, &file, line);
@@ -6681,13 +6694,13 @@ impl App {
             }
             if let Err(e) = self.git.reset_hard(&to) {
                 self.refresh();
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(());
             }
         } else {
             let msg = format!("reset: moving to {to}");
             if let Err(e) = self.git.git_interactive(&["update-ref", "-m", &msg, &format!("refs/heads/{branch}"), &to]) {
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(());
             }
         }
@@ -6844,7 +6857,7 @@ impl App {
             }
             app.refresh();
             if let Err(e) = res {
-                app.set_msg(&format!("{e}"));
+                app.set_msg(&format!("{e:#}"));
             }
             Ok(())
         };
@@ -6994,7 +7007,7 @@ impl App {
                 .map(|(f, _)| f)
                 .collect();
             if gone.is_empty() {
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(());
             }
             let mut res = Ok(());
@@ -7490,9 +7503,9 @@ impl Git {
         let st = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
-            .status()?;
+            .status().map_err(|e| crate::git::exec::spawn_failure(dir, args, e))?;
         if !st.success() {
-            anyhow::bail!("git {} failed: {}", args.first().unwrap_or(&""), st);
+            anyhow::bail!("{} failed ({st})\nin {}\nOutput was shown in the terminal (interactive command).", crate::git::exec::command_label(args), crate::git::exec::sanitize(&dir.display().to_string()));
         }
         Ok(())
     }
@@ -7505,7 +7518,7 @@ impl App {
         match res {
             Ok(out) if out.trim().is_empty() => self.set_msg("(no output)"),
             Ok(out) => self.view_text = Some((title.into(), out)),
-            Err(e) => self.set_msg(&format!("{e}")),
+            Err(e) => self.set_msg(&format!("{e:#}")),
         }
     }
 
@@ -7516,7 +7529,7 @@ impl App {
                 self.set_msg(if first.is_empty() { ok_msg } else { first });
                 self.refresh();
             }
-            Err(e) => self.set_msg(&format!("{e}")),
+            Err(e) => self.set_msg(&format!("{e:#}")),
         }
     }
 
@@ -7569,7 +7582,7 @@ impl App {
                         return Ok(());
                     };
                     if let Err(e) = self.git.bisect_start(Some(&bad), &[good]) {
-                        self.set_msg(&format!("{e}"));
+                        self.set_msg(&format!("{e:#}"));
                         return Ok(());
                     }
                 }
@@ -7903,7 +7916,7 @@ impl App {
                 };
                 match self.git.cycle_config(&key, REBASE_CHOICES) {
                     Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
             }
             // magit-branch.autoSetupMerge / magit-branch.autoSetupRebase ("b C a m" / "a r")
@@ -7915,7 +7928,7 @@ impl App {
                 };
                 match self.git.cycle_config(key, choices) {
                     Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
             }
             "update-default-branch" => self.update_default_branch()?,
@@ -7969,7 +7982,7 @@ impl App {
                 let value = (r != "(unset)").then_some(r.as_str());
                 match self.git.set_config("remote.pushDefault", value) {
                     Ok(()) => self.set_msg(&format!("remote.pushDefault = {}", value.unwrap_or("(unset)"))),
-                    Err(e) => self.set_msg(&format!("{e}")),
+                    Err(e) => self.set_msg(&format!("{e:#}")),
                 }
             }
             "branch-config-description" | "branch-config-pushremote" => {
@@ -8014,7 +8027,7 @@ impl App {
                 self.set_msg("rebase stopped (r r continue, r s skip, r a abort)")
             }
             Ok(()) => self.set_msg("rebased"),
-            Err(e) => self.set_msg(&format!("{e}")),
+            Err(e) => self.set_msg(&format!("{e:#}")),
         }
         self.refresh();
     }
@@ -8026,7 +8039,7 @@ impl App {
         let since = match self.git.rebase_since(commit) {
             Ok(s) => s,
             Err(e) => {
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(false);
             }
         };
@@ -8093,7 +8106,7 @@ impl App {
         };
         match res {
             Ok(()) => self.set_msg(&format!("merged and removed {absorbed}")),
-            Err(e) => self.set_msg(&format!("{e}")),
+            Err(e) => self.set_msg(&format!("{e:#}")),
         }
         self.refresh();
         Ok(())
@@ -8128,7 +8141,7 @@ impl App {
         let commits = match self.git.resolve_cherries(&spec) {
             Ok(c) => c,
             Err(e) => {
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(());
             }
         };
@@ -8196,7 +8209,7 @@ impl App {
         let old = match self.git.default_branch(false) {
             Ok((_, o)) => o,
             Err(e) => {
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(());
             }
         };
@@ -8207,7 +8220,7 @@ impl App {
                 return Ok(());
             }
             Err(e) => {
-                self.set_msg(&format!("{e}"));
+                self.set_msg(&format!("{e:#}"));
                 return Ok(());
             }
         };
@@ -8247,7 +8260,7 @@ impl App {
         };
         match self.git.set_default_branch(&new, &old) {
             Ok(()) => self.set_msg(&format!("default branch is now {new}")),
-            Err(e) => self.set_msg(&format!("{e}")),
+            Err(e) => self.set_msg(&format!("{e:#}")),
         }
         self.refresh();
         Ok(())
@@ -8292,5 +8305,52 @@ fn padded(prompt: &str) -> String {
         prompt.to_string()
     } else {
         format!("{prompt} ")
+    }
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::*;
+
+    #[test]
+    fn multiline_errors_open_complete_scrollable_details() {
+        let td = tempfile::tempdir().unwrap();
+        let git = Git { toplevel: td.path().into(), gitdir: td.path().join(".git") };
+        let mut app = App::new(git);
+        let text = format!("git push failed (exit status: 1)\n{}", "detail\n".repeat(100));
+        app.set_msg(&text);
+        assert!(!app.message().contains('\n'));
+        assert!(app.message().contains("details"));
+        assert_eq!(app.text_view().unwrap().1, text);
+        assert_eq!(app.text_view_scroll(), 0);
+        app.handle_key(super::super::keys::key_from_label("n")).unwrap();
+        assert_eq!(app.text_view_scroll(), 1);
+        app.handle_key(super::super::keys::key_from_label("q")).unwrap();
+        assert!(app.text_view().is_none());
+    }
+
+    #[test]
+    fn checkout_failure_opens_git_diagnostics_not_only_exit_code() {
+        let td = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(td.path()).status().unwrap().success());
+        let git = Git::discover(td.path()).unwrap();
+        let error = git.checkout("ui-missing-branch").unwrap_err();
+        let mut app = App::new(git);
+        app.done("checked out", Err(error));
+        let details = &app.text_view().unwrap().1;
+        assert!((details.contains("pathspec") || details.contains("路径规格")) && details.contains("ui-missing-branch"));
+        assert!(details.contains(&td.path().display().to_string()));
+        assert!(app.message().contains("details"));
+    }
+
+    #[test]
+    fn long_line_and_credentials_are_handled() {
+        let td = tempfile::tempdir().unwrap();
+        let mut app = App::new(Git { toplevel: td.path().into(), gitdir: td.path().join(".git") });
+        app.set_msg(&format!("failure https://user:fakepass@example.com/r {}", "x".repeat(300)));
+        assert!(!app.message().contains("fakepass"));
+        assert!(!app.text_view().unwrap().1.contains("fakepass"));
+        app.set_msg("short notification");
+        assert_eq!(app.message(), "short notification");
     }
 }
