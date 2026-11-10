@@ -74,7 +74,11 @@ impl App {
         let mut a: Vec<String> = vec!["bisect".into()];
         a.extend(args.iter().cloned());
         let refs: Vec<&str> = a.iter().map(String::as_str).collect();
-        match self.git.git_output(&refs) {
+        // Force an English locale: `magit-insert-bisect-output` detects the
+        // "Bisecting:" line and the "<hash> is the first bad commit" line,
+        // both of which are localized by git otherwise (breaking parsing and
+        // the status-buffer heading in non-English environments).
+        match self.git.git_output_env(&[("LC_ALL", "C")], &refs) {
             Ok(out) if out.status.success() => {
                 let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
                 text.push_str(&String::from_utf8_lossy(&out.stderr));

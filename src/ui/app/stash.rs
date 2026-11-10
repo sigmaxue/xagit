@@ -317,17 +317,26 @@ impl App {
     }
 
     /// magit--run-git-stash: whether `git stash ARGS` succeeded (or
-    /// installed conflicts).
+    /// installed conflicts).  Magit binds `LC_ALL` to an English locale so
+    /// that the "error: " prefix can be detected regardless of the user's
+    /// language, and checks the beginning of the combined process output.
+    /// Git writes that prefix to stderr while the status text goes to stdout,
+    /// so we must look at stderr first (a plain stdout+stderr concatenation
+    /// would put "On branch ..." first and hide a genuine failure).
     fn run_git_stash(&mut self, args: &[&str]) -> bool {
         let mut a = vec!["stash"];
         a.extend(args);
-        match self.git.git_output_env(&[("LC_ALL", "en_US.utf8")], &a) {
+        match self.git.git_output_env(&[("LC_ALL", "C")], &a) {
             Ok(o) => {
-                let out = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
-                crate::git::exec::record(&self.git.toplevel, &a, o.status.success(), o.status.code(), &out);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // `magit-process-file` with DESTINATION=t merges both streams
+                // into one buffer; git emits the "error: " line first.
+                let combined = format!("{stderr}{stdout}");
+                crate::git::exec::record(&self.git.toplevel, &a, o.status.success(), o.status.code(), &combined);
                 match o.status.code() {
                     Some(0) => true,
-                    Some(1) => !out.starts_with("error: "),
+                    Some(1) => !combined.starts_with("error: "),
                     _ => false,
                 }
             }
