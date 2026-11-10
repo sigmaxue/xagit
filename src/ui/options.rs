@@ -27,6 +27,7 @@
 //! magit-branch-name-suggestions feature/ fix/
 //! magit-push-options skip-ci ci.skip
 //! magit-openpgp-default-signing-key 0123ABCD...
+//! magit-remote-add-set-remote.pushDefault ask-if-unset
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -130,6 +131,21 @@ pub struct Options {
     pub push_options: Vec<String>,
     /// magit-openpgp-default-signing-key (a fingerprint)
     pub openpgp_default_signing_key: Option<String>,
+    /// magit-remote-add-set-remote.pushDefault
+    pub remote_add_set_push_default: SetPushDefault,
+}
+
+/// The values of magit-remote-add-set-remote.pushDefault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetPushDefault {
+    /// `ask`: always ask
+    Ask,
+    /// `ask-if-unset` (the default): ask unless it is set
+    AskIfUnset,
+    /// a string: set without asking
+    Named(String),
+    /// nil: never set
+    Never,
 }
 
 /// The RULE of an entry of magit-branch-adjust-remote-upstream-alist.
@@ -174,6 +190,7 @@ impl Default for Options {
             branch_name_suggestions: Vec::new(),
             push_options: vec!["skip-ci".into(), "ci.skip".into()],
             openpgp_default_signing_key: None,
+            remote_add_set_push_default: SetPushDefault::AskIfUnset,
         }
     }
 }
@@ -312,6 +329,15 @@ impl Options {
                 }
                 "magit-push-options" => {
                     o.push_options = list(&values);
+                    None
+                }
+                "magit-remote-add-set-remote.pushDefault" => {
+                    o.remote_add_set_push_default = match values.first().copied() {
+                        Some("ask") => SetPushDefault::Ask,
+                        Some("ask-if-unset") => SetPushDefault::AskIfUnset,
+                        None | Some("nil") => SetPushDefault::Never,
+                        Some(v) => SetPushDefault::Named(v.trim_matches('"').to_string()),
+                    };
                     None
                 }
                 "magit-openpgp-default-signing-key" => {

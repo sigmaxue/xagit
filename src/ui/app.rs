@@ -33,6 +33,9 @@ use crossterm::terminal::{
 use std::collections::{BTreeMap, HashMap};
 use std::io::{stdout, Write};
 
+mod gitvar;
+mod remote;
+
 pub struct App {
     pub git: Git,
     menus: BTreeMap<String, Menu>,
@@ -120,6 +123,11 @@ pub struct App {
     instant_keys: std::cell::RefCell<Vec<(String, String)>>,
     /// the INITIAL-INPUT of the next question read
     initial_input: std::cell::RefCell<Option<String>>,
+    /// the scopes read by magit-branch-configure and
+    /// magit-remote-configure (transient-scope)
+    var_scopes: HashMap<String, Option<String>>,
+    /// the transient a suffix is invoked from (transient-current-command)
+    invoking_menu: Option<String>,
     /// the rows of a help window shown above the minibuffer while a
     /// question is read (read-multiple-choice's help)
     minibuffer_above: std::cell::RefCell<Vec<String>>,
@@ -322,13 +330,6 @@ impl Binding {
         )
     }
 }
-
-/// Choices cycled by `b C r` / `b C R` (magit-branch.<branch>.rebase, magit-pull.rebase).
-pub const REBASE_CHOICES: &[&str] = &["true", "merges", "interactive", "false"];
-/// Choices cycled by `b C a m` (magit-branch.autoSetupMerge).
-pub const AUTOSETUP_MERGE_CHOICES: &[&str] = &["always", "true", "false"];
-/// Choices cycled by `b C a r` (magit-branch.autoSetupRebase).
-pub const AUTOSETUP_REBASE_CHOICES: &[&str] = &["always", "local", "remote", "never"];
 
 /// The history list of a minibuffer read (its HIST argument).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,6 +568,8 @@ impl App {
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
             instant_keys: std::cell::RefCell::new(Vec::new()),
             initial_input: std::cell::RefCell::new(None),
+            var_scopes: HashMap::new(),
+            invoking_menu: None,
             minibuffer_above: std::cell::RefCell::new(Vec::new()),
             user_init_file: None,
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
@@ -1837,7 +1840,10 @@ impl App {
         let level = self.options.prefix_level(&prefix);
         let no_levels = BTreeMap::new();
         let levels = self.options.suffix_levels.get(&prefix).unwrap_or(&no_levels);
-        let dynamic = self.menu_suffix_states(&name);
+        if matches!(name.as_str(), "branch-menu" | "pull-menu" | "remote-menu") {
+            self.var_scopes.remove(&name);
+        }
+        let dynamic = self.menu_states(&name);
         let gpg_format = self.config("gpg.format");
         let preset: Vec<String> = match self.menus.get_mut(&name) {
             Some(m) => {
@@ -2297,6 +2303,13 @@ impl App {
             // the margin commands are transient: the menu stays
             Action::Command(cmd) if cmd.starts_with("margin-") => self.margin_command(&cmd),
             Action::Command(cmd) if cmd == "blame-cycle-style" => self.blame_cycle_style(),
+            // the git variable infixes set the variable, the transient
+            // stays (but magit-branch.<branch>.description)
+            Action::Command(cmd) if gitvar::lookup(&cmd).is_some_and(|v| !matches!(v.kind, gitvar::VarKind::Description)) => {
+                let v = gitvar::lookup(&cmd).unwrap_or_else(|| unreachable!());
+                self.git_var_command(v, Some(&menu.name))?;
+                self.refresh_menu_states(&menu.name);
+            }
             // magit-diff-refresh / magit-log-refresh "s" and "w": refresh
             // the buffer and set or save the defaults
             Action::Command(cmd) if cmd == "transient-set-and-exit" || cmd == "transient-save-and-exit" => {
@@ -2322,7 +2335,9 @@ impl App {
                 } else {
                     active
                 };
+                self.invoking_menu = Some(menu.name.clone());
                 let r = self.run_command(&cmd, &active);
+                self.invoking_menu = None;
                 self.transient_diff_args = None;
                 self.transient_log_args = None;
                 r?;
@@ -2858,6 +2873,37 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn run_command(&mut self, cmd: &str, active: &BTreeMap<String, bool>) -> Result<()> {
+        // magit-branch-configure / magit-remote-configure: the scope the
+        // current branch or remote, unless with a prefix argument or
+        // invoked from magit-branch / magit-remote, then the one read
+        if cmd == "branch-config-menu" || cmd == "remote-configure-menu" {
+            let branch = cmd == "branch-config-menu";
+            let from = if branch { "branch-menu" } else { "remote-menu" };
+            let current = if branch { self.git.current_branch() } else { self.current_remote() };
+            let direct = self.prefix_arg.is_none() && self.invoking_menu.as_deref() != Some(from);
+            let scope = match current.filter(|_| direct) {
+                Some(s) => s,
+                None => {
+                    let read = if branch {
+                        self.read_local_branch("Configure branch")?
+                    } else {
+                        self.read_remote("Configure remote")?
+                    };
+                    let Some(s) = read else {
+                        return Ok(());
+                    };
+                    s
+                }
+            };
+            self.var_scopes.insert(cmd.to_string(), Some(scope));
+            self.open_menu(cmd);
+            return Ok(());
+        }
+        // the git variable infixes (from M-x: the scope read)
+        if let Some(v) = gitvar::lookup(cmd) {
+            let menu = self.invoking_menu.clone();
+            return self.git_var_command(v, menu.as_deref());
+        }
         // a menu used as a command (e.g. dispatch "b Branch") opens that menu
         if self.menus.contains_key(cmd) {
             self.open_menu(cmd);
@@ -3109,52 +3155,8 @@ impl App {
             "branch-delete" => self.branch_delete()?,
 
             // -------- remote menu
-            "remote-add" => {
-                let Some(name) = self.read_line_prompt("Remote name", None)? else {
-                    return Ok(());
-                };
-                let Some(url) = self.read_line_prompt("Remote url", None)? else {
-                    return Ok(());
-                };
-                let fetch = *active.get("-f").unwrap_or(&false);
-                g!().remote_add(&name, &url, fetch)?;
-                self.set_msg(&format!("added remote {name}"));
-                self.refresh();
-            }
-            // magit-remote-rename
-            "remote-rename" => {
-                let rs = g!().remotes();
-                let default = self.remote_default();
-                if let Some(old) = self.pick("Rename remote", &rs, default.as_deref())?.cloned() {
-                    if let Some(new) = self.read_line_prompt(&format!("Rename {old} to"), None)? {
-                        if new != old {
-                            g!().remote_rename(&old, &new)?;
-                            self.remote_cleanup_push_variables(&old, Some(&new));
-                            self.set_msg("renamed remote");
-                        }
-                        self.refresh();
-                    }
-                }
-            }
-            // magit-remote-remove
-            "remote-remove" => {
-                let rs = g!().remotes();
-                let default = self.remote_default();
-                if let Some(r) = self.pick("Delete remote", &rs, default.as_deref())?.cloned() {
-                    g!().remote_remove(&r)?;
-                    self.remote_cleanup_push_variables(&r, None);
-                    self.set_msg("removed remote");
-                    self.refresh();
-                }
-            }
-            "remote-prune" => {
-                let rs = g!().remotes();
-                if let Some(r) = self.pick("Prune remote", &rs, None)? {
-                    g!().remote_prune(r)?;
-                    self.set_msg("pruned");
-                    self.refresh();
-                }
-            }
+            "remote-add" | "remote-rename" | "remote-remove" | "remote-prune" | "remote-prune-refspecs"
+            | "remote-unshallow" => self.remote_command(cmd, &args)?,
 
             // -------- fetch/pull/push (upstream = branch.<b>.remote / branch.<b>.merge)
             "fetch-from-pushremote" | "fetch-from-upstream" | "fetch-other" | "fetch-branch" | "fetch-refspec"
@@ -7338,6 +7340,28 @@ impl App {
         }
     }
 
+    /// The descriptions and `:if` of the suffixes of the menu NAME that
+    /// depend on the repository, the git variable infixes included.
+    fn menu_states(&self, name: &str) -> Vec<(String, String, bool)> {
+        let mut states: Vec<(String, String, bool)> =
+            self.menu_suffix_states(name).into_iter().map(|(k, d, s)| (k.to_string(), d, s)).collect();
+        states.extend(self.var_suffix_states(name));
+        states
+    }
+
+    /// Update the descriptions of the menu NAME shown (transient
+    /// :refresh-suffixes after an infix set a git variable).
+    fn refresh_menu_states(&mut self, name: &str) {
+        let states = self.menu_states(name);
+        if let Some(m) = self.menus.get_mut(name) {
+            for e in m.groups.iter_mut().flatten() {
+                if let Some((_, desc, _)) = states.iter().find(|(k, _, _)| *k == e.key) {
+                    e.desc.clone_from(desc);
+                }
+            }
+        }
+    }
+
     /// The descriptions and `:if` of the suffixes of NAME that depend on
     /// the repository: (key, description, shown).
     fn menu_suffix_states(&self, name: &str) -> Vec<(&'static str, String, bool)> {
@@ -7358,7 +7382,7 @@ impl App {
             }
             "pull-menu" => {
                 let Some(b) = branch else {
-                    return ["p", "u", "r"].map(|k| (k, String::new(), false)).into_iter().chain([("U", String::new(), false)]).collect();
+                    return ["p", "u", "U"].map(|k| (k, String::new(), false)).into();
                 };
                 let p = self.pull_pushbranch_description(&b, &remotes);
                 // magit-pull--upstream-description
@@ -7380,7 +7404,6 @@ impl App {
                     ("p", p, true),
                     ("u", u, true),
                     ("U", ups.clone().map(|(_, u)| u).unwrap_or_default(), ups.is_some()),
-                    ("r", "branch.<branch>.rebase".into(), true),
                 ]
             }
             "rebase-menu" => {
@@ -9349,53 +9372,6 @@ impl App {
             }
 
             // ---- branch configuration
-            "branch-config-show" => {
-                let res = self.git.branch_config();
-                self.show("branch configuration", res);
-            }
-            "branch-config-upstream" => {
-                let default = self.git.upstream_shortname();
-                let Some(up) = self.read_rev("Upstream branch", default.as_deref())? else {
-                    return Ok(());
-                };
-                let res = self.git.branch_set_upstream(&up);
-                self.done("upstream set", res);
-            }
-            "branch-config-unset-upstream" => {
-                let res = self.git.branch_unset_upstream();
-                self.done("upstream unset", res);
-            }
-            // magit-branch.<branch>.rebase / magit-pull.rebase:
-            // cycle true -> merges -> interactive -> false -> unset
-            "branch-config-rebase" | "pull-rebase" => {
-                let key = if cmd == "pull-rebase" {
-                    "pull.rebase".to_string()
-                } else {
-                    match self.git.current_branch() {
-                        Some(b) => format!("branch.{b}.rebase"),
-                        None => {
-                            self.set_msg("cannot configure a branch on detached HEAD");
-                            return Ok(());
-                        }
-                    }
-                };
-                match self.git.cycle_config(&key, REBASE_CHOICES) {
-                    Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-            }
-            // magit-branch.autoSetupMerge / magit-branch.autoSetupRebase ("b C a m" / "a r")
-            "branch-autosetup-merge" | "branch-autosetup-rebase" => {
-                let (key, choices): (&str, &[&str]) = if cmd == "branch-autosetup-merge" {
-                    ("branch.autoSetupMerge", AUTOSETUP_MERGE_CHOICES)
-                } else {
-                    ("branch.autoSetupRebase", AUTOSETUP_REBASE_CHOICES)
-                };
-                match self.git.cycle_config(key, choices) {
-                    Ok(v) => self.set_msg(&format!("{key} = {}", v.as_deref().unwrap_or("(unset)"))),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-            }
             "update-default-branch" => self.update_default_branch()?,
             "patches-apply-maildir" => {
                 let Some(p) = self.read_line_prompt("Apply mbox or Maildir", None)? else {
@@ -9437,30 +9413,6 @@ impl App {
             "rebase-edit-todo" => {
                 let res = self.with_terminal(|g| g.rebase_edit_todo(Editor::User));
                 self.after_rebase(res);
-            }
-            "remote-pushdefault" => {
-                let mut choices = self.git.remotes();
-                choices.push("(unset)".into());
-                let Some(r) = self.pick("remote.pushDefault", &choices, None)?.cloned() else {
-                    return Ok(());
-                };
-                let value = (r != "(unset)").then_some(r.as_str());
-                match self.git.set_config("remote.pushDefault", value) {
-                    Ok(()) => self.set_msg(&format!("remote.pushDefault = {}", value.unwrap_or("(unset)"))),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-            }
-            "branch-config-description" | "branch-config-pushremote" => {
-                let (key, prompt) = if cmd == "branch-config-description" {
-                    ("description", "Branch description")
-                } else {
-                    ("pushRemote", "pushRemote")
-                };
-                let Some(value) = self.read_line_prompt(prompt, None)? else {
-                    return Ok(());
-                };
-                let res = self.git.branch_set_config(key, &value);
-                self.done("branch configured", res);
             }
 
             _ => self.set_msg(&format!("unknown command: {cmd}")),

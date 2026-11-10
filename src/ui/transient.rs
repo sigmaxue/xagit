@@ -199,7 +199,12 @@ impl Menu {
         let cells: Vec<Vec<String>> = self
             .groups
             .iter()
-            .map(|g| g.iter().filter(|e| !e.hidden).map(|e| display(e, active)).collect::<Vec<_>>())
+            .map(|g| {
+                g.iter()
+                    .filter(|e| !e.hidden)
+                    .flat_map(|e| display(e, active).split('\n').map(str::to_string).collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            })
             .filter(|g| !g.is_empty())
             .collect();
         let ncols = cells.len();
@@ -262,6 +267,18 @@ fn gpg_sign() -> MenuEntry {
 /// magit:--signoff (level 6)
 fn signoff() -> MenuEntry {
     sw("+s", "Add Signed-off-by trailer", "--signoff").level(6)
+}
+/// The git variables of a remote (magit-remote.<remote>.*), shown by
+/// magit-remote and magit-remote-configure.
+fn remote_variables() -> Vec<MenuEntry> {
+    vec![
+        cmd("u", "remote.<remote>.url", "remote.<remote>.url"),
+        cmd("U", "remote.<remote>.fetch", "remote.<remote>.fetch"),
+        cmd("s", "remote.<remote>.pushurl", "remote.<remote>.pushurl"),
+        cmd("S", "remote.<remote>.push", "remote.<remote>.push"),
+        cmd("O", "remote.<remote>.tagOpt", "remote.<remote>.tagopt"),
+        cmd("h", "remote.<remote>.followRemoteHEAD", "remote.<remote>.followremotehead"),
+    ]
 }
 /// magit-cherry-pick:--mainline
 fn mainline() -> MenuEntry {
@@ -859,14 +876,19 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "branch-menu".into(),
             title: "Add, configure or remove a branch".into(),
             groups: vec![
-                // magit-branch-direct-configure (Magit's default)
+                // magit-branch-direct-configure (Magit's default): the
+                // variables of the current branch (the descriptions of the
+                // git variable infixes are set when the menu is shown)
                 vec![
-                    cmd("d", "branch.<branch>.description", "branch-config-description"),
-                    cmd("u", "branch.<branch>.merge/remote", "branch-config-upstream"),
-                    cmd("r", "branch.<branch>.rebase", "branch-config-rebase"),
-                    cmd("p", "branch.<branch>.pushRemote", "branch-config-pushremote"),
-                    cmd("R", "pull.rebase", "pull-rebase"),
-                    cmd("P", "remote.pushDefault", "remote-pushdefault"),
+                    cmd("d", "branch.<branch>.description", "branch.<branch>.description"),
+                    cmd("u", "branch.<branch>.merge/remote", "branch.<branch>.merge/remote"),
+                    cmd("r", "branch.<branch>.rebase", "branch.<branch>.rebase"),
+                    cmd("p", "branch.<branch>.pushRemote", "branch.<branch>.pushRemote"),
+                ],
+                // Configure repository defaults
+                vec![
+                    cmd("R", "pull.rebase", "pull.rebase"),
+                    cmd("P", "remote.pushDefault", "remote.pushDefault"),
                     cmd("B", "Update default branch", "update-default-branch"),
                 ],
                 // Arguments
@@ -902,16 +924,34 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "remote-menu".into(),
             title: "Add, configure or remove a remote".into(),
             groups: vec![
-                vec![
-                    sw("-f", "Fetch after add", "-f"),
-                ],
+                // Variables (:if magit-remote-direct-configure and the
+                // current remote)
+                remote_variables(),
+                // Arguments for add
+                vec![sw("-f", "Fetch after add", "-f")],
+                // Actions
                 vec![
                     cmd("a", "Add", "remote-add"),
                     cmd("r", "Rename", "remote-rename"),
                     cmd("k", "Remove", "remote-remove"),
-                    cmd("p", "Prune stale branches", "remote-prune"),
                 ],
+                vec![
+                    cmd("C", "Configure...", "remote-configure-menu"),
+                    cmd("p", "Prune stale branches", "remote-prune"),
+                    cmd("P", "Prune stale refspecs", "remote-prune-refspecs"),
+                    cmd("z", "Unshallow remote", "remote-unshallow").level(7),
+                ],
+                vec![cmd("d u", "Update default branch", "update-default-branch")],
             ],
+        },
+    );
+    // magit-remote-configure (with the scope of the remote read)
+    m.insert(
+        "remote-configure-menu".into(),
+        Menu {
+            name: "remote-configure-menu".into(),
+            title: "Configure a remote".into(),
+            groups: vec![remote_variables()],
         },
     );
 
@@ -984,7 +1024,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 // Pull into UPSTREAM from
                 vec![cmd("U", "upstream's upstream", "pull-into-upstream").level(7)],
                 vec![
-                    cmd("r", "branch.<branch>.rebase", "branch-config-rebase"),
+                    cmd("r", "branch.<branch>.rebase", "branch.<branch>.rebase"),
                     cmd("C", "variables...", "branch-config-menu"),
                 ],
             ],
@@ -1620,22 +1660,21 @@ pub fn registry() -> BTreeMap<String, Menu> {
             title: "Configure branch".into(),
             groups: vec![
                 vec![
-                    cmd("d", "branch.<branch>.description", "branch-config-description"),
-                    cmd("u", "branch.<branch>.merge/remote", "branch-config-upstream"),
-                    cmd("r", "branch.<branch>.rebase (cycle)", "branch-config-rebase"),
-                    cmd("p", "branch.<branch>.pushRemote", "branch-config-pushremote"),
+                    cmd("d", "branch.<branch>.description", "branch.<branch>.description"),
+                    cmd("u", "branch.<branch>.merge/remote", "branch.<branch>.merge/remote"),
+                    cmd("r", "branch.<branch>.rebase", "branch.<branch>.rebase"),
+                    cmd("p", "branch.<branch>.pushRemote", "branch.<branch>.pushRemote"),
                 ],
+                // Configure repository defaults
                 vec![
-                    cmd("R", "pull.rebase (cycle)", "pull-rebase"),
-                    cmd("P", "remote.pushDefault", "remote-pushdefault"),
+                    cmd("R", "pull.rebase", "pull.rebase"),
+                    cmd("P", "remote.pushDefault", "remote.pushDefault"),
                     cmd("B", "Update default branch", "update-default-branch"),
-                    cmd("a m", "branch.autoSetupMerge (cycle)", "branch-autosetup-merge"),
-                    cmd("a r", "branch.autoSetupRebase (cycle)", "branch-autosetup-rebase"),
                 ],
-                // xagit extras
+                // Configure branch creation
                 vec![
-                    cmd("s", "Show settings", "branch-config-show"),
-                    cmd("U", "Unset upstream", "branch-config-unset-upstream"),
+                    cmd("a m", "branch.autoSetupMerge", "branch.autoSetupMerge"),
+                    cmd("a r", "branch.autoSetupRebase", "branch.autoSetupRebase"),
                 ],
             ],
         },

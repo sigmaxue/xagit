@@ -152,27 +152,43 @@ fn branch_popup_layout() {
     assert!(matches!(action_of(&m, "k"), Action::Command(c) if c == "branch-delete"));
     // magit-branch-direct-configure (default t): configuration suffixes
     for (key, target) in [
-        ("d", "branch-config-description"),
-        ("u", "branch-config-upstream"),
-        ("r", "branch-config-rebase"),
-        ("p", "branch-config-pushremote"),
-        ("R", "pull-rebase"),
-        ("P", "remote-pushdefault"),
+        ("d", "branch.<branch>.description"),
+        ("u", "branch.<branch>.merge/remote"),
+        ("r", "branch.<branch>.rebase"),
+        ("p", "branch.<branch>.pushRemote"),
+        ("R", "pull.rebase"),
+        ("P", "remote.pushDefault"),
         ("B", "update-default-branch"),
     ] {
         assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "b {key}");
     }
 }
 
-/// magit-remote.el:66 magit-remote prefix
+/// magit-remote.el magit-remote prefix
 #[test]
 fn remote_popup_layout() {
     let m = menu("remote-menu");
     assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "-f"));
-    assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "remote-add"));
-    assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "remote-rename"));
-    assert!(matches!(action_of(&m, "k"), Action::Command(c) if c == "remote-remove"));
-    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "remote-prune"));
+    for (key, target) in [
+        ("u", "remote.<remote>.url"),
+        ("U", "remote.<remote>.fetch"),
+        ("s", "remote.<remote>.pushurl"),
+        ("S", "remote.<remote>.push"),
+        ("O", "remote.<remote>.tagopt"),
+        ("h", "remote.<remote>.followremotehead"),
+        ("a", "remote-add"),
+        ("r", "remote-rename"),
+        ("k", "remote-remove"),
+        ("C", "remote-configure-menu"),
+        ("p", "remote-prune"),
+        ("P", "remote-prune-refspecs"),
+        ("z", "remote-unshallow"),
+        ("d u", "update-default-branch"),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "M {key}");
+    }
+    let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
+    assert_eq!(level("z"), 7);
 }
 
 /// magit-fetch.el:34 magit-fetch prefix
@@ -219,7 +235,7 @@ fn pull_popup_layout() {
         ("u", "pull-from-upstream"),
         ("e", "pull-branch"),
         ("U", "pull-into-upstream"),
-        ("r", "branch-config-rebase"),
+        ("r", "branch.<branch>.rebase"),
         ("C", "branch-config-menu"),
     ] {
         assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "F {key}");
@@ -701,22 +717,36 @@ fn remaining_extras_popup_layout() {
     assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "patch-save"));
     assert!(matches!(action_of(&p, "r"), Action::Command(c) if c == "request-pull"));
 
-    // magit-branch-configure: "r" cycles branch.<b>.rebase, "R" pull.rebase,
-    // "P" remote.pushDefault
+    // magit-branch-configure (magit-branch.el)
     let c = menu("branch-config-menu");
     for (key, target) in [
-        ("d", "branch-config-description"),
-        ("u", "branch-config-upstream"),
-        ("r", "branch-config-rebase"),
-        ("p", "branch-config-pushremote"),
-        ("R", "pull-rebase"),
-        ("P", "remote-pushdefault"),
+        ("d", "branch.<branch>.description"),
+        ("u", "branch.<branch>.merge/remote"),
+        ("r", "branch.<branch>.rebase"),
+        ("p", "branch.<branch>.pushRemote"),
+        ("R", "pull.rebase"),
+        ("P", "remote.pushDefault"),
         ("B", "update-default-branch"),
-        ("a m", "branch-autosetup-merge"),
-        ("a r", "branch-autosetup-rebase"),
+        ("a m", "branch.autoSetupMerge"),
+        ("a r", "branch.autoSetupRebase"),
     ] {
         assert!(matches!(action_of(&c, key), Action::Command(x) if x == target), "b C {key}");
     }
+    assert_eq!(c.keys(), ["d", "u", "r", "p", "R", "P", "B", "a m", "a r"]);
+
+    // magit-remote-configure (magit-remote.el)
+    let c = menu("remote-configure-menu");
+    for (key, target) in [
+        ("u", "remote.<remote>.url"),
+        ("U", "remote.<remote>.fetch"),
+        ("s", "remote.<remote>.pushurl"),
+        ("S", "remote.<remote>.push"),
+        ("O", "remote.<remote>.tagopt"),
+        ("h", "remote.<remote>.followremotehead"),
+    ] {
+        assert!(matches!(action_of(&c, key), Action::Command(x) if x == target), "M C {key}");
+    }
+    assert_eq!(c.keys(), ["u", "U", "s", "S", "O", "h"]);
 }
 
 /// Transient keys are key sequences, as in Emacs `kbd`.
@@ -801,42 +831,34 @@ fn app_reads_multi_key_bindings() {
             .ok()
             .filter(|s| !s.is_empty())
     };
+    // "b C" reads the branch to configure; the variables are set without
+    // leaving the transient
+    let branch = g.current_branch().unwrap();
+    app.script_answers(&[&branch]);
     app.press("b").unwrap();
     app.press("C").unwrap();
     assert_eq!(app.current_menu(), Some("branch-config-menu"));
-    app.press("a").unwrap();
-    app.press("m").unwrap();
-    assert_eq!(app.current_menu(), None);
-    assert_eq!(local("branch.autoSetupMerge").as_deref(), Some("always"));
-    for want in ["true", "false"] {
-        app.press("b").unwrap();
-        app.press("C").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Configure branch");
+    for want in [Some("always"), Some("true"), Some("false"), None] {
         app.press("a").unwrap();
         app.press("m").unwrap();
-        assert_eq!(local("branch.autoSetupMerge").as_deref(), Some(want));
+        assert_eq!(app.current_menu(), Some("branch-config-menu"));
+        assert_eq!(local("branch.autoSetupMerge").as_deref(), want);
     }
-    app.press("b").unwrap();
-    app.press("C").unwrap();
     app.press("a").unwrap();
     app.press("r").unwrap();
     assert_eq!(local("branch.autoSetupRebase").as_deref(), Some("always"));
+    app.press("C-g").unwrap();
 
     // "b r" (direct configure) cycles branch.<b>.rebase through Magit's choices
-    let key = format!("branch.{}.rebase", g.current_branch().unwrap());
+    let key = format!("branch.{branch}.rebase");
+    app.press("b").unwrap();
     for want in [Some("true"), Some("merges"), Some("interactive"), Some("false"), None] {
-        app.press("b").unwrap();
         app.press("r").unwrap();
+        assert_eq!(app.current_menu(), Some("branch-menu"));
         assert_eq!(local(&key).as_deref(), want);
     }
-}
-
-#[test]
-fn config_choices_match_magit() {
-    use xagit_lib::ui::app::{AUTOSETUP_MERGE_CHOICES, AUTOSETUP_REBASE_CHOICES, REBASE_CHOICES};
-    // magit-branch.el: magit-branch.<branch>.rebase / magit-pull.rebase
-    assert_eq!(REBASE_CHOICES, &["true", "merges", "interactive", "false"]);
-    assert_eq!(AUTOSETUP_MERGE_CHOICES, &["always", "true", "false"]);
-    assert_eq!(AUTOSETUP_REBASE_CHOICES, &["always", "local", "remote", "never"]);
+    app.press("C-g").unwrap();
 }
 
 /// magit-status-mode-map: `k` is magit-discard, `j` is magit-status-jump;

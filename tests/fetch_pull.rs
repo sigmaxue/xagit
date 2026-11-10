@@ -182,7 +182,7 @@ fn pull_descriptions() {
     let p = popup(&app);
     assert!(p.contains("u origin/master"), "{p}");
     assert!(p.contains("p pushRemote, setting that"), "{p}");
-    assert!(p.contains("r branch.<branch>.rebase"), "{p}");
+    assert!(p.contains("r branch.master.rebase [true|merges|interactive|false|("), "{p}");
     assert!(!p.contains("Autostash"), "-A is at level 7");
     assert!(!app.menu_keys().contains(&"U".to_string()));
     app.press("C-g").unwrap();

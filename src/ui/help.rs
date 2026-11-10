@@ -9,7 +9,7 @@ pub fn man_page(name: &str) -> Option<&'static str> {
     Some(match name {
         "commit-menu" => "git-commit",
         "branch-menu" | "branch-config-menu" | "show-refs-menu" => "git-branch",
-        "remote-menu" => "git-remote",
+        "remote-menu" | "remote-configure-menu" => "git-remote",
         "fetch-menu" => "git-fetch",
         "pull-menu" => "git-pull",
         "push-menu" => "git-push",
