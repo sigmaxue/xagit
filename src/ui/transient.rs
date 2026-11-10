@@ -788,6 +788,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     cmd("b", "branch/revision", "checkout"),
                     cmd("l", "local branch", "branch-checkout"),
+                    cmd("o", "new orphan", "branch-orphan").level(6),
                     cmd("c", "new branch", "branch-and-checkout"),
                     cmd("s", "new spin-off", "branch-spinoff"),
                     cmd("w", "new worktree", "worktree-checkout").level(5),
@@ -798,6 +799,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("x", "reset", "branch-reset"),
                     cmd("k", "delete", "branch-delete"),
                     cmd("C", "configure...", "branch-config-menu"),
+                    cmd("h", "shelve", "branch-shelve").level(7),
+                    cmd("H", "unshelve", "branch-unshelve").level(7),
                 ],
             ],
         },

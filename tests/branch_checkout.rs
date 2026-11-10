@@ -300,6 +300,11 @@ fn adjust_remote_upstream() {
 #[test]
 fn prefer_remote_upstream() {
     let (_u, _td, g) = with_remote();
+    // master ahead of origin/master (the repositories' root commits only
+    // agree when made within the same second)
+    git(&g, &["reset", "-q", "--hard", "origin/master"]);
+    write(&g, "file.txt", "ahead\n");
+    git(&g, &["commit", "-qam", "ahead"]);
     git(&g, &["branch", "-q", "-u", "origin/master", "master"]);
     git(&g, &["config", "branch.autoSetupMerge", "always"]);
     // not opted in: the local branch is the upstream

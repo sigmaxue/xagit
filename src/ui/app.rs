@@ -2292,6 +2292,10 @@ impl App {
             "magit-wip-log-index",
             "magit-wip-log-worktree",
             "magit-wip-purge",
+            "magit-branch-orphan",
+            "magit-branch-shelve",
+            "magit-branch-unshelve",
+            "magit-delete-shelved-branch",
         ]
         .map(String::from)
         .to_vec();
@@ -2322,7 +2326,10 @@ impl App {
             self.wip_mode_command();
         } else if cmd == "magit-wip-purge" {
             self.wip_purge()?;
-        } else if let Some(c) = cmd.strip_prefix("magit-").filter(|c| c.starts_with("wip-")) {
+        } else if let Some(c) = cmd
+            .strip_prefix("magit-")
+            .filter(|c| c.starts_with("wip-") || c.starts_with("branch-") || *c == "delete-shelved-branch")
+        {
             self.run_command(c, &BTreeMap::new())?;
         } else if let Some(name) = self.menus.keys().find(|n| help::prefix_command(n) == cmd).cloned() {
             self.open_menu(&name);
@@ -2955,21 +2962,32 @@ impl App {
                 self.branch_maybe_adjust_upstream(&name, &start);
                 self.done("", res.map(|_| String::new()));
             }
-            "branch-spinoff" => {
-                let Some(name) = self.read_line_prompt("Spin off to branch", None)? else {
+            // magit-branch-spinoff / -spinout: FROM the last (oldest)
+            // commit selected
+            // magit-branch-orphan
+            "branch-orphan" => {
+                let Some((name, start)) = self.branch_read_args("Create and checkout orphan branch")? else {
                     return Ok(());
                 };
-                g!().branch_spinoff(&name)?;
-                self.set_msg(&format!("spin-off {name}"));
-                self.refresh();
+                let res = g!().git_interactive(&["checkout", "--orphan", &name, &start]);
+                self.done_keep_msg(res);
             }
-            "branch-spinout" => {
-                let Some(name) = self.read_line_prompt("Spin out branch", None)? else {
+            "branch-shelve" => self.branch_shelve()?,
+            "branch-unshelve" => self.branch_unshelve()?,
+            "delete-shelved-branch" => {
+                if let Some(b) = self.read_shelved_branch("Delete shelved branch")? {
+                    let res = g!().git_interactive(&["update-ref", "-d", &format!("refs/shelved/{b}")]);
+                    self.done_keep_msg(res);
+                }
+            }
+            "branch-spinoff" | "branch-spinout" => {
+                let checkout = cmd == "branch-spinoff";
+                let from = self.region_commit_values().and_then(|v| v.last().cloned());
+                let prompt = if checkout { "Spin off branch" } else { "Spin out branch" };
+                let Some(name) = self.read_string_ns(prompt)? else {
                     return Ok(());
                 };
-                g!().branch_spinout(&name)?;
-                self.set_msg(&format!("spin-out {name}"));
-                self.refresh();
+                self.branch_spinoff(&name, from.as_deref(), checkout);
             }
             // magit-branch-rename
             "branch-rename" => {
@@ -4089,6 +4107,112 @@ impl App {
                 _ => None,
             })
             .collect()
+    }
+
+    /// magit-region-values 'commit: the commits of the selected sibling
+    /// sections (one if the region is within a commit's heading), top to
+    /// bottom, abbreviated.
+    fn region_commit_values(&self) -> Option<Vec<String>> {
+        let secs = self.region_sections(false)?;
+        secs.iter()
+            .map(|&s| match &self.buf.all[self.sec(s).start].kind {
+                LineKind::Commit { hash, .. } => Some(self.git.rev_short(hash)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// magit-read-string-ns: a string read with minibuffer-history,
+    /// trimmed; "Need non-empty input" and "Input contains whitespace"
+    /// refuse it.
+    fn read_string_ns(&mut self, prompt: &str) -> Result<Option<String>> {
+        let Some(v) = self.read_line_raw(prompt, None)? else {
+            return Ok(None);
+        };
+        let v = v.trim_matches([' ', '\t', '\n', '\r']);
+        if v.is_empty() {
+            self.set_msg("Need non-empty input");
+            return Ok(None);
+        }
+        if v.contains([' ', '\t', '\n']) {
+            self.set_msg("Input contains whitespace");
+            return Ok(None);
+        }
+        Ok(Some(v.to_string()))
+    }
+
+    /// magit--branch-spinoff: create BRANCH at the current branch (and
+    /// with CHECKOUT, or uncommitted changes, check it out), its upstream
+    /// the current branch's indirect upstream if opted in; the current
+    /// branch is reset to where it meets its upstream (FROM^ with FROM),
+    /// with update-ref when checking out, else with a hard reset.
+    fn branch_spinoff(&mut self, branch: &str, from: Option<&str>, mut checkout: bool) {
+        if self.is_branch(branch) {
+            self.set_msg(&format!("Cannot spin off {branch}.  It already exists"));
+            return;
+        }
+        if !checkout && (!self.git.staged_files().is_empty() || !self.git.unstaged_files().is_empty()) {
+            self.set_msg("Staying on HEAD due to uncommitted changes");
+            checkout = true;
+        }
+        let Some(current) = self.git.current_branch() else {
+            let res = if checkout {
+                self.git.git_interactive(&["checkout", "-b", branch])
+            } else {
+                self.git.git_interactive(&["branch", branch])
+            };
+            self.done_keep_msg(res);
+            return;
+        };
+        let tracked = self.upstream_branch(&current);
+        if let Some(from) = from {
+            if !self.git.is_ancestor(from, &current) {
+                self.set_msg(&format!("Cannot spin off {branch}.  {from} is not reachable from {current}"));
+                return;
+            }
+            if let Some(t) = tracked.as_ref().filter(|t| self.git.is_ancestor(from, t)) {
+                self.set_msg(&format!("Cannot spin off {branch}.  {from} is ancestor of upstream {t}"));
+                return;
+            }
+        }
+        let res = if checkout {
+            self.git.git_interactive(&["checkout", "-b", branch, &current])
+        } else {
+            self.git.git_interactive(&["branch", branch, &current])
+        };
+        if let Err(e) = res {
+            self.refresh();
+            self.set_msg(&format!("{e:#}"));
+            return;
+        }
+        if let Some(u) = self.indirect_upstream_branch(&current, false) {
+            let _ = self.git.git_interactive(&["branch", "--set-upstream-to", &u, branch]);
+        }
+        let base = tracked.and_then(|t| match from {
+            Some(f) => Some(format!("{f}^")),
+            None => self.git.git_string(&["merge-base", &current, &t]).ok().map(|b| b.trim().to_string()),
+        });
+        let rev = |r: &str| self.git.git_string(&["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")]).ok();
+        if let Some(base) = base.filter(|b| !b.is_empty() && rev(b) != rev(&current)) {
+            let res = if checkout {
+                let msg = format!("reset: moving to {base}");
+                self.git.git_interactive(&["update-ref", "-m", &msg, &format!("refs/heads/{current}"), &base])
+            } else {
+                self.git.git_interactive(&["reset", "--hard", &base])
+            };
+            if let Err(e) = res {
+                self.set_msg(&format!("{e:#}"));
+            }
+        }
+        self.refresh();
+    }
+
+    /// Refresh after RES, its error the message (else the message kept).
+    fn done_keep_msg(&mut self, res: Result<()>) {
+        self.refresh();
+        if let Err(e) = res {
+            self.set_msg(&format!("{e:#}"));
+        }
     }
 
     /// The previously checked out branch (`@{-1}`), if any.
@@ -6910,12 +7034,94 @@ impl App {
         }
     }
 
-    /// magit-local-branch-at-point
+    /// magit-local-branch-at-point: the local branch at point, or at the
+    /// commit at point.
     fn local_branch_at_point(&self) -> Option<String> {
         match self.current_line().map(|l| &l.kind) {
             Some(LineKind::Ref { kind: RefKind::Local, name }) => Some(name.clone()),
+            Some(LineKind::Commit { hash, .. }) => self.name_local_branch(hash),
             _ => None,
         }
+    }
+
+    /// magit-read-other-local-branch: a local branch but the current
+    /// one, the default the one at point, else the previous branch.
+    fn read_other_local_branch(&mut self, prompt: &str) -> Result<Option<String>> {
+        let current = self.git.current_branch();
+        let default = self.local_branch_at_point().filter(|b| Some(b) != current.as_ref()).or_else(|| self.previous_branch());
+        let mut candidates = self.git.branches();
+        candidates.retain(|b| Some(b) != current.as_ref());
+        let table = Completion { candidates, require_match: true, multiple: false };
+        Ok(self.completing_read(prompt, default.as_deref(), Hist::Revision, Some(table))?.filter(|b| !b.is_empty()))
+    }
+
+    /// magit-read-shelved-branch: a shelved branch (the newest last).
+    fn read_shelved_branch(&mut self, prompt: &str) -> Result<Option<String>> {
+        let mut candidates: Vec<String> = self
+            .git
+            .git_lines(&["for-each-ref", "--format=%(refname)", "refs/shelved"])
+            .into_iter()
+            .filter_map(|r| r.strip_prefix("refs/shelved/").map(str::to_string))
+            .collect();
+        candidates.reverse();
+        let table = Completion { candidates, require_match: true, multiple: false };
+        Ok(self.completing_read(prompt, None, Hist::Minibuffer, Some(table))?.filter(|b| !b.is_empty()))
+    }
+
+    /// magit--rename-reflog-file OLD NEW (full refnames).
+    fn rename_reflog_file(&self, old: &str, new: &str) {
+        let old = self.git.gitdir.join("logs").join(old);
+        let new = self.git.gitdir.join("logs").join(new);
+        if old.exists() {
+            if let Some(dir) = new.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::rename(old, new);
+        }
+    }
+
+    /// magit-branch-shelve: refs/heads/BRANCH becomes
+    /// refs/shelved/YYYY-MM-DD-BRANCH (its committer date), with its
+    /// reflog; its push-remote is unset.
+    fn branch_shelve(&mut self) -> Result<()> {
+        let Some(branch) = self.read_other_local_branch("Shelve branch")? else {
+            return Ok(());
+        };
+        let old = format!("refs/heads/{branch}");
+        let date = self.git.git_string(&["log", "-1", "--format=%cs", &old]).unwrap_or_default();
+        let new = format!("refs/shelved/{}-{branch}", date.trim());
+        if let Err(e) = self.git.git_interactive(&["update-ref", &new, &old, ""]) {
+            self.set_msg(&format!("{e:#}"));
+            return Ok(());
+        }
+        self.rename_reflog_file(&old, &new);
+        let _ = self.git.git_interactive(&["config", "--unset", &format!("branch.{branch}.pushRemote")]);
+        let res = self.git.git_interactive(&["branch", "-D", &branch]);
+        self.done_keep_msg(res);
+        Ok(())
+    }
+
+    /// magit-branch-unshelve: refs/shelved/BRANCH becomes
+    /// refs/heads/BRANCH (a leading YYYY-MM-DD- dropped), with its
+    /// reflog.
+    fn branch_unshelve(&mut self) -> Result<()> {
+        let Some(branch) = self.read_shelved_branch("Unshelve branch")? else {
+            return Ok(());
+        };
+        let old = format!("refs/shelved/{branch}");
+        let b = branch.as_bytes();
+        let dated = b.len() > 11
+            && b[..10].iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() })
+            && b[10] == b'-';
+        let new = format!("refs/heads/{}", if dated { &branch[11..] } else { &branch[..] });
+        if let Err(e) = self.git.git_interactive(&["update-ref", &new, &old, ""]) {
+            self.set_msg(&format!("{e:#}"));
+            return Ok(());
+        }
+        self.rename_reflog_file(&old, &new);
+        let res = self.git.git_interactive(&["update-ref", "-d", &old]);
+        self.done_keep_msg(res);
+        Ok(())
     }
 
     /// magit-tag-at-point

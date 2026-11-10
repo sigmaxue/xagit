@@ -262,44 +262,6 @@ impl Git {
         self.git_interactive(&["branch", "-m", old, new])
     }
 
-    /// magit-branch-spinoff ("b s"): create branch at HEAD tracking current;
-    /// reset current to its upstream if it has unpushed commits.
-    pub fn branch_spinoff(&self, new: &str) -> Result<()> {
-        let cur = self
-            .current_branch()
-            .ok_or_else(|| anyhow::anyhow!("cannot spin off: detached HEAD"))?;
-        // create + checkout new branch at current HEAD
-        self.git_interactive(&["checkout", "-b", new, &cur])?;
-        // reset old branch to its upstream if configured
-        if let Ok(_up) = self.git_string(&[
-            "rev-parse",
-            "--abbrev-ref",
-            &format!("{cur}@{{u}}"),
-        ]) {
-            let target = format!("{cur}@{{u}}");
-            let _ = Command_proxy::run(self, &["branch", "-f", &cur, &target]);
-        }
-        Ok(())
-    }
-
-    /// magit-branch-spinout ("b S"): like spinoff but stays on current branch.
-    pub fn branch_spinout(&self, new: &str) -> Result<()> {
-        let cur = self
-            .current_branch()
-            .ok_or_else(|| anyhow::anyhow!("cannot spin out: detached HEAD"))?;
-        self.git_interactive(&["branch", new, &cur])?;
-        if let Ok(_) = self.git_string(&[
-            "rev-parse",
-            "--abbrev-ref",
-            &format!("{cur}@{{u}}"),
-        ]) {
-            let target = format!("{cur}@{{u}}");
-            let _ = self.git_interactive(&["branch", "-f", &cur, &target]);
-            let _ = self.git_interactive(&["reset", "--keep", &target]);
-        }
-        Ok(())
-    }
-
     // ---------------------------------------------------------------- remote
 
     /// magit-remote-add ("M a"): `git remote add <name> <url>` (+ -f when fetch arg set)
@@ -887,15 +849,6 @@ fn env_vars(kv: &str) -> std::collections::HashMap<String, String> {
         m.insert(k.to_string(), v.to_string());
     }
     m
-}
-
-/// small helper shim used inside branch_spinoff
-#[allow(non_snake_case, dead_code)]
-struct Command_proxy;
-impl Command_proxy {
-    fn run(g: &Git, args: &[&str]) -> Result<()> {
-        g.git_interactive(args)
-    }
 }
 
 // ---------------------------------------------------------------------------

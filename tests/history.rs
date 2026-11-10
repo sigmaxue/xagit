@@ -94,7 +94,7 @@ fn prompts_share_minibuffer_history() {
     // M-p gives the inputs of earlier prompts
     app.script_keys(&["M-p", "-", "2", "RET"]);
     press_all(&mut app, &["b", "s"]);
-    assert_eq!(app.prompts().last().unwrap(), "Spin off to branch");
+    assert_eq!(app.prompts().last().unwrap(), "Spin off branch");
     assert!(g.branches().contains(&"foo-2".to_string()), "{}", app.message());
     assert_eq!(app.minibuffer_history(), ["foo-2", "foo"]);
 }

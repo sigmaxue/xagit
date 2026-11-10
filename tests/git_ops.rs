@@ -431,51 +431,6 @@ fn branch_rename() {
     assert_eq!(g.current_branch().as_deref(), Some("renamed"));
 }
 
-#[test]
-fn branch_spinoff_resets_old_branch() {
-    let (td, g, _head) = repo_with_commit();
-    // upstream = bare clone
-    let bare = td.path().join("upstream.git");
-    assert!(
-        std::process::Command::new("git")
-            .args(["clone", "-q", "--bare", ".", "upstream.git"])
-            .current_dir(&g.toplevel)
-            .status()
-            .unwrap()
-            .success()
-    );
-    g.git_interactive(&["remote", "add", "origin", bare.to_str().unwrap()])
-        .unwrap();
-    g.git_interactive(&["fetch", "origin"]).unwrap();
-    let cur = g.current_branch().unwrap();
-    g.git_interactive(&[
-        "branch",
-        "--set-upstream-to",
-        &format!("origin/{cur}"),
-        &cur,
-    ])
-    .unwrap();
-    // commit ahead of upstream
-    write(&g, "file.txt", "ahead\n");
-    g.stage("file.txt").unwrap();
-    g.commit(Some("ahead"), &[]).unwrap();
-    // spinoff: new branch keeps the ahead commit; old branch resets to upstream
-    g.branch_spinoff("spinoff").unwrap();
-    assert_eq!(g.current_branch().as_deref(), Some("spinoff"));
-    let old_head = g.git_string(&["rev-parse", &cur]).unwrap();
-    let up_head = g.git_string(&["rev-parse", &format!("origin/{cur}")]).unwrap();
-    assert_eq!(old_head, up_head, "old branch reset to upstream");
-}
-
-#[test]
-fn branch_spinout_stays_on_branch() {
-    let (_td, g, _head) = repo_with_commit();
-    let cur = g.current_branch().unwrap();
-    g.branch_spinout("spinout").unwrap();
-    assert_eq!(g.current_branch().as_deref(), Some(cur.as_str()));
-    assert!(g.branches().contains(&"spinout".to_string()));
-}
-
 // =============================================================== remote
 
 #[test]
