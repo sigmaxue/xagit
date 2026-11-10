@@ -2269,7 +2269,19 @@ impl App {
     /// through disabled-command-function. The commands are
     /// transient-resume, magit-clean and the transient prefixes.
     fn execute_extended_command(&mut self) -> Result<()> {
-        let mut commands: Vec<String> = vec!["transient-resume".into(), "magit-clean".into()];
+        let mut commands: Vec<String> = [
+            "transient-resume",
+            "magit-clean",
+            "magit-wip-mode",
+            "magit-wip-commit",
+            "magit-wip-log",
+            "magit-wip-log-current",
+            "magit-wip-log-index",
+            "magit-wip-log-worktree",
+            "magit-wip-purge",
+        ]
+        .map(String::from)
+        .to_vec();
         for name in self.menus.keys() {
             let cmd = help::prefix_command(name);
             if !commands.contains(&cmd) {
@@ -2293,6 +2305,12 @@ impl App {
             self.transient_resume();
         } else if cmd == "magit-clean" {
             self.magit_clean()?;
+        } else if cmd == "magit-wip-mode" {
+            self.wip_mode_command();
+        } else if cmd == "magit-wip-purge" {
+            self.wip_purge()?;
+        } else if let Some(c) = cmd.strip_prefix("magit-").filter(|c| c.starts_with("wip-")) {
+            self.run_command(c, &BTreeMap::new())?;
         } else if let Some(name) = self.menus.keys().find(|n| help::prefix_command(n) == cmd).cloned() {
             self.open_menu(&name);
         }
@@ -2369,6 +2387,45 @@ impl App {
         };
         self.minibuffer_above.borrow_mut().clear();
         Ok(answer)
+    }
+
+    /// magit-wip-mode as a command: toggled, or enabled by a positive
+    /// prefix argument (disabled by another one).
+    fn wip_mode_command(&mut self) {
+        self.options.wip_mode = match self.prefix_arg {
+            None => !self.options.wip_mode,
+            Some(a) => a.numeric() >= 1,
+        };
+        self.set_msg(&format!("Magit-Wip mode {}abled", if self.options.wip_mode { "en" } else { "dis" }));
+    }
+
+    /// magit-wip-purge: delete the wip refs (refs/wip/index/REF and
+    /// refs/wip/wtree/REF) whose REF (a branch, remote branch or tag)
+    /// no longer exists, those of HEAD kept, after confirmation.
+    fn wip_purge(&mut self) -> Result<()> {
+        let refs = self.git.git_lines(&["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"]);
+        let wiprefs: Vec<String> = self
+            .git
+            .git_lines(&["for-each-ref", "--format=%(refname)", "refs/wip/"])
+            .into_iter()
+            .filter(|w| !refs.iter().any(|r| w.get(15..) == Some(r.as_str())))
+            .filter(|w| w != "refs/wip/index/HEAD" && w != "refs/wip/wtree/HEAD")
+            .collect();
+        if wiprefs.is_empty() {
+            self.set_msg("All wip-refs have a corresponding ref");
+            return Ok(());
+        }
+        let one = "Delete wip-ref %s without corresponding ref";
+        let many = "Delete %d wip-refs without corresponding ref";
+        if !self.confirm_items("purge-dangling-wiprefs", one, many, &wiprefs)? {
+            return Ok(());
+        }
+        for w in &wiprefs {
+            let _ = self.git.git_ok(&["update-ref", "-d", w]);
+        }
+        self.set_msg("Deleting wip-refs...done");
+        self.refresh();
+        Ok(())
     }
 
     /// magit-clean: remove the untracked files (prefix argument: and
@@ -3512,7 +3569,9 @@ impl App {
 
             // -------- log / diff / show (arguments come from the l/d menus)
             "log-current" | "log-head" | "log-other" | "log-related" | "log-branches" | "log-all-branches"
-            | "log-all" | "log-change" | "wip-log-index" | "wip-log-worktree" => self.log_view(cmd)?,
+            | "log-all" | "log-change" | "wip-log-index" | "wip-log-worktree" | "wip-log" | "wip-log-current" => {
+                self.log_view(cmd)?
+            }
             // magit-wip-commit: with a prefix argument the message is read
             "wip-commit" => {
                 let msg = if self.prefix_arg.is_some() {
@@ -3894,6 +3953,35 @@ impl App {
             // magit-wip-log-index / -worktree
             "wip-log-index" => vec![self.options.wip.wip_ref(&self.git, "index/", None)],
             "wip-log-worktree" => vec![self.options.wip.wip_ref(&self.git, "wtree/", None)],
+            // magit-wip-log / -current: the branch and its wip refs, with
+            // the tips of as many previous "branches" of them as the
+            // prefix argument (negative: just the worktree wip ref)
+            "wip-log" | "wip-log-current" => {
+                let branch = if cmd == "wip-log" {
+                    let mut choices = self.git.branches();
+                    choices.push("HEAD".into());
+                    let default = self.branch_at_point().or(current).unwrap_or_else(|| "HEAD".into());
+                    let table = Completion { candidates: choices, require_match: true, multiple: false };
+                    let Some(b) = self
+                        .completing_read("Log branch and its wip refs", Some(&default), Hist::Revision, Some(table))?
+                        .filter(|b| !b.is_empty())
+                    else {
+                        return Ok(());
+                    };
+                    b
+                } else {
+                    current.unwrap_or_else(|| "HEAD".into())
+                };
+                let count = self.prefix_numeric();
+                let n = count.unsigned_abs() as usize;
+                let wip = &self.options.wip;
+                let mut v = vec![branch.clone()];
+                v.extend(crate::git::wip::Wip::log_tips(&self.git, &wip.wip_ref(&self.git, "wtree/", Some(&branch)), n));
+                if count >= 0 {
+                    v.extend(crate::git::wip::Wip::log_tips(&self.git, &wip.wip_ref(&self.git, "index/", Some(&branch)), n));
+                }
+                v
+            }
             "log-change" => {
                 let path = match self.current_file() {
                     Some((_, p)) => p,
