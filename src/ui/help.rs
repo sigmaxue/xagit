@@ -17,7 +17,7 @@ pub fn man_page(name: &str) -> Option<&'static str> {
         "rebase-menu" => "git-rebase",
         "reset-menu" => "git-reset",
         "tag-menu" => "git-tag",
-        "stash-menu" => "git-stash",
+        "stash-menu" | "stash-push-menu" => "git-stash",
         "gitignore-menu" => "gitignore",
         "diff-menu" | "diff-refresh-menu" => "git-diff",
         "log-menu" | "log-refresh-menu" => "git-log",

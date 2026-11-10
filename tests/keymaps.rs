@@ -361,6 +361,9 @@ fn rebase_popup_layout() {
 #[test]
 fn reset_popup_layout() {
     let m = menu("reset-menu");
+    assert_eq!(m.keys(), ["b", "f", "m", "s", "h", "k", "i", "w"]);
+    assert!(matches!(action_of(&m, "b"), Action::Command(c) if c == "branch-reset"));
+    assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "file-checkout"));
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "reset-mixed"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "reset-soft"));
     assert!(matches!(action_of(&m, "h"), Action::Command(c) if c == "reset-hard"));
@@ -378,6 +381,8 @@ fn tag_popup_layout() {
     assert!(matches!(action_of(&m, "-s"), Action::Switch(s) if s == "--sign"));
     assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "tag-create"));
     assert!(matches!(action_of(&m, "k"), Action::Command(c) if c == "tag-delete"));
+    assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "tag-release"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "tag-prune"));
 }
 
 /// magit-stash.el:90 magit-stash prefix
@@ -399,6 +404,18 @@ fn stash_popup_layout() {
     assert!(matches!(action_of(&m, "l"), Action::Command(c) if c == "stash-list"));
     assert!(matches!(action_of(&m, "v"), Action::Command(c) if c == "stash-show"));
     assert!(matches!(action_of(&m, "b"), Action::Command(c) if c == "stash-branch"));
+    assert!(matches!(action_of(&m, "B"), Action::Command(c) if c == "stash-branch-here"));
+    assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "stash-format-patch"));
+    assert!(matches!(action_of(&m, "P"), Action::Command(c) if c == "stash-push-menu"));
+    let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
+    assert_eq!(level("P"), 5);
+    // magit-stash-push
+    let m = menu("stash-push-menu");
+    assert!(matches!(action_of(&m, "--"), Action::Option { arg, .. } if arg == "-- "));
+    for (key, arg) in [("-u", "--include-untracked"), ("-a", "--all"), ("-k", "--keep-index"), ("-K", "--no-keep-index")] {
+        assert!(matches!(action_of(&m, key), Action::Switch(s) if s == arg), "{key}");
+    }
+    assert!(matches!(action_of(&m, "P"), Action::Command(c) if c == "stash-push"));
 }
 
 /// magit-gitignore.el magit-gitignore prefix
@@ -407,6 +424,12 @@ fn gitignore_popup_layout() {
     let m = menu("gitignore-menu");
     assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "ignore"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "ignore-subdir"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "ignore-gitdir"));
+    assert!(matches!(action_of(&m, "g"), Action::Command(c) if c == "ignore-system"));
+    for (key, target) in [("w", "skip-worktree"), ("W", "no-skip-worktree"), ("u", "assume-unchanged"), ("U", "no-assume-unchanged")] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "{key}");
+        assert_eq!(m.groups.iter().flatten().find(|e| e.key == key).unwrap().level, 7);
+    }
 }
 
 /// magit-diff.el magit-diff prefix

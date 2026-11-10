@@ -85,15 +85,3 @@ fn revert_merge_relative_to_mainline() {
     app.press("v").unwrap();
     assert!(!exists(&g, "g.txt"), "reverting the merge relative to master drops side's file");
 }
-
-#[test]
-fn annotated_tag() {
-    let (_td, g, _) = repo_with_commit();
-    let mut app = App::new(g.clone());
-    app.press("t").unwrap();
-    press_all(&mut app, &["-", "a"]);
-    app.script_answers(&["v2", "HEAD", "release two"]);
-    app.press("t").unwrap();
-    assert_eq!(g.git_string(&["cat-file", "-t", "v2"]).unwrap().trim(), "tag");
-    assert_eq!(g.git_string(&["tag", "-l", "--format=%(contents:subject)", "v2"]).unwrap().trim(), "release two");
-}

@@ -80,6 +80,10 @@ pub enum Reader {
     /// values separated by commas (any value), the argument repeated for
     /// each ("--push-option=a --push-option=b")
     Multi(Vec<String>),
+    /// transient-files with magit-read-files of magit-modified-files
+    /// (magit-stash-push's magit:--): files separated by commas, the
+    /// value "-- FILE..."
+    Files,
 }
 
 impl Action {
@@ -1183,6 +1187,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "reset-menu".into(),
             title: "Reset the HEAD, index and/or worktree to a previous state".into(),
             groups: vec![
+                // "Reset"
+                vec![cmd("b", "branch", "branch-reset"), cmd("f", "file", "file-checkout")],
+                // "Reset this"
                 vec![
                     cmd("m", "mixed    (HEAD and index)", "reset-mixed"),
                     cmd("s", "soft     (HEAD only)", "reset-soft"),
@@ -1209,10 +1216,10 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-s", "Sign", "--sign"),
                     opt("-u", "Sign as", "--local-user=", Reader::GpgKey),
                 ],
-                vec![
-                    cmd("t", "tag", "tag-create"),
-                    cmd("k", "delete", "tag-delete"),
-                ],
+                // "Create"
+                vec![cmd("t", "tag", "tag-create"), cmd("r", "release", "tag-release")],
+                // "Do"
+                vec![cmd("k", "delete", "tag-delete"), cmd("p", "prune", "tag-prune")],
             ],
         },
     );
@@ -1228,24 +1235,50 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-u", "Also save untracked files", "--include-untracked"),
                     sw("-a", "Also save untracked and ignored files", "--all"),
                 ],
+                // "Stash"
                 vec![
                     cmd("z", "both", "stash-both"),
                     cmd("i", "index", "stash-index"),
                     cmd("w", "worktree", "stash-worktree"),
                     cmd("x", "keeping index", "stash-keep-index"),
-                    cmd("a", "Apply", "stash-apply"),
-                    cmd("p", "Pop", "stash-pop"),
-                    cmd("k", "Drop", "stash-drop"),
-                    cmd("l", "List", "stash-list"),
-                    cmd("v", "Show", "stash-show"),
-                    cmd("b", "Branch", "stash-branch"),
+                    cmd("P", "push", "stash-push-menu").level(5),
                 ],
+                // "Snapshot"
                 vec![
-                    cmd("Z", "snapshot both", "snapshot-both"),
-                    cmd("I", "snapshot index", "snapshot-index"),
-                    cmd("W", "snapshot worktree", "snapshot-worktree"),
+                    cmd("Z", "both", "snapshot-both"),
+                    cmd("I", "index", "snapshot-index"),
+                    cmd("W", "worktree", "snapshot-worktree"),
                     cmd("r", "to wip ref", "wip-commit"),
                 ],
+                // "Use"
+                vec![cmd("a", "Apply", "stash-apply"), cmd("p", "Pop", "stash-pop"), cmd("k", "Drop", "stash-drop")],
+                // "Inspect"
+                vec![cmd("l", "List", "stash-list"), cmd("v", "Show", "stash-show")],
+                // "Transform"
+                vec![
+                    cmd("b", "Branch", "stash-branch"),
+                    cmd("B", "Branch here", "stash-branch-here"),
+                    cmd("f", "Format patch", "stash-format-patch"),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-stash-push (z P)
+    m.insert(
+        "stash-push-menu".into(),
+        Menu {
+            name: "stash-push-menu".into(),
+            title: "Create stash using \"git stash push\"".into(),
+            groups: vec![
+                vec![
+                    opt("--", "Limit to files", "-- ", Reader::Files),
+                    sw("-u", "Also save untracked files", "--include-untracked"),
+                    sw("-a", "Also save untracked and ignored files", "--all"),
+                    sw("-k", "Keep index", "--keep-index"),
+                    sw("-K", "Don't keep index", "--no-keep-index"),
+                ],
+                vec![cmd("P", "push", "stash-push")],
             ],
         },
     );
@@ -1256,10 +1289,25 @@ pub fn registry() -> BTreeMap<String, Menu> {
         Menu {
             name: "gitignore-menu".into(),
             title: "Instruct Git to ignore a file or pattern".into(),
-            groups: vec![vec![
-                cmd("t", "in top dir", "ignore"),
-                cmd("s", "in subdirectory", "ignore-subdir"),
-            ]],
+            groups: vec![
+                // "Gitignore"
+                vec![
+                    cmd("t", "shared at toplevel (.gitignore)", "ignore"),
+                    cmd("s", "shared in subdirectory (path/to/.gitignore)", "ignore-subdir"),
+                    cmd("p", "privately (.git/info/exclude)", "ignore-gitdir"),
+                    cmd("g", "privately for all repositories (core.excludesfile is not set)", "ignore-system"),
+                ],
+                // "Skip worktree"
+                vec![
+                    cmd("w", "do skip worktree", "skip-worktree").level(7),
+                    cmd("W", "do not skip worktree", "no-skip-worktree").level(7),
+                ],
+                // "Assume unchanged"
+                vec![
+                    cmd("u", "do assume unchanged", "assume-unchanged").level(7),
+                    cmd("U", "do not assume unchanged", "no-assume-unchanged").level(7),
+                ],
+            ],
         },
     );
 

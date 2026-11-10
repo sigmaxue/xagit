@@ -35,6 +35,9 @@ use std::io::{stdout, Write};
 
 mod gitvar;
 mod remote;
+mod gitignore;
+mod stash;
+mod tag;
 
 pub struct App {
     pub git: Git,
@@ -2810,6 +2813,21 @@ impl App {
                 };
                 v
             }
+            // magit-read-files of magit-modified-files, the file at point
+            // the initial input
+            Reader::Files => {
+                let candidates = self.git.git_lines(&["diff-index", "-z", "--name-only", "--submodule=short", "HEAD", "--"]);
+                *self.initial_input.borrow_mut() = self.current_file_name();
+                let table = Completion { candidates, require_match: false, multiple: true };
+                let Some(input) = self.read_line_hist("Limit to file,s: ", None, Hist::Infix(arg), Some(table))? else {
+                    return Ok(None);
+                };
+                let files: Vec<&str> = input.split(',').map(str::trim).filter(|f| !f.is_empty()).collect();
+                if files.is_empty() {
+                    return Ok(None);
+                }
+                files.join(" ")
+            }
             Reader::FileTrace => {
                 let Some(file) = self.read_line_prompt("File", self.current_file().map(|(_, p)| p).as_deref())? else {
                     return Ok(None);
@@ -3315,36 +3333,12 @@ impl App {
             }
 
             // -------- tag
-            "tag-create" => {
-                // a message is needed for annotated and signed tags
-                let annotate = args
-                    .iter()
-                    .any(|a| a == "--annotate" || a == "--sign" || a.starts_with("--local-user="));
-                let Some(name) = self.read_line_prompt("Tag name", None)? else {
-                    return Ok(());
-                };
-                let rev = self
-                    .read_rev("Place tag on", Some("HEAD"))?
-                    .unwrap_or_else(|| "HEAD".into());
-                let edit = args.iter().any(|a| a == "--edit");
-                let msg = if annotate && !edit {
-                    self.read_line_prompt("Tag message", Some(&name))?
-                } else {
-                    None
-                };
-                if edit {
-                    self.with_terminal(|g| g.tag_create(&name, &rev, &args, None))?;
-                } else {
-                    g!().tag_create(&name, &rev, &args, msg.as_deref())?;
-                }
-                self.set_msg(&format!("tagged {name}"));
-                self.refresh();
-            }
+            "tag-create" | "tag-release" | "tag-prune" => self.tag_command(cmd, &args)?,
             // magit-tag-delete: the selected tags, else one read
             "tag-delete" => {
                 let tags = match self.region_refs(&[RefKind::Tag], false) {
                     Some(tags) => {
-                        if !self.confirm("t", &format!("Delete {} tags", tags.len()))? {
+                        if !self.confirm_items("t", "Delete %s", "Delete %d tags", &tags)? {
                             return Ok(());
                         }
                         tags
@@ -3445,79 +3439,16 @@ impl App {
             }
 
             // -------- stash
-            "stash-both" | "stash-index" | "stash-worktree" | "stash-keep-index" => {
-                let untracked = self.untracked_from(active);
-                let msg = self.read_line_prompt("Stash message", Some("xagit stash"))?;
-                match cmd {
-                    "stash-both" => g!().stash_both(msg.as_deref(), untracked)?,
-                    "stash-index" => g!().stash_index(msg.as_deref())?,
-                    "stash-worktree" => g!().stash_worktree(msg.as_deref(), untracked)?,
-                    "stash-keep-index" => g!().stash_keep_index(msg.as_deref(), untracked)?,
-                    _ => unreachable!(),
-                }
-                self.set_msg("stashed");
-                self.refresh();
-            }
-            "snapshot-both" | "snapshot-index" | "snapshot-worktree" => {
-                let untracked = self.untracked_from(active);
-                match cmd {
-                    "snapshot-both" => g!().snapshot(crate::git::ops::SnapshotScope::Both, untracked)?,
-                    "snapshot-index" => {
-                        g!().snapshot(crate::git::ops::SnapshotScope::Index, untracked)?
-                    }
-                    _ => g!().snapshot(crate::git::ops::SnapshotScope::Worktree, untracked)?,
-                }
-                self.set_msg("snapshot saved");
-                self.refresh();
-            }
+            "stash-both" | "stash-index" | "stash-worktree" | "stash-keep-index" | "snapshot-both" | "snapshot-index"
+            | "snapshot-worktree" | "stash-push" | "stash-apply" | "stash-pop" | "stash-branch" | "stash-branch-here"
+            | "stash-format-patch" => self.stash_command(cmd, &args)?,
             "stash-show" => self.diff_view("stash")?,
             "stash-drop" => self.stash_drop()?,
-            "stash-apply" | "stash-pop" | "stash-branch" => {
-                let prompt = match cmd {
-                    "stash-apply" => "Apply stash",
-                    "stash-pop" => "Pop stash",
-                    _ => "Branch stash",
-                };
-                let Some(s) = self.read_stash(prompt)? else { return Ok(()) };
-                match cmd {
-                    "stash-apply" => g!().stash_apply(&s, true)?,
-                    "stash-pop" => g!().stash_pop(&s, true)?,
-                    _ => {
-                        let Some(name) = self.read_line_prompt("Branch name", None)? else {
-                            return Ok(());
-                        };
-                        g!().stash_branch(&name, &s)?;
-                    }
-                }
-                self.set_msg("done");
-                self.refresh();
-            }
             "stash-list" => self.setup_buffer(BufferMode::Stashes { refname: "refs/stash".into() }, Vec::new()),
 
             // -------- ignore / misc
-            "ignore" => {
-                let Some(pattern) = self.read_line_prompt("Pattern to ignore (top dir)", None)? else {
-                    return Ok(());
-                };
-                g!().ignore(&pattern)?;
-                self.set_msg("added to .gitignore");
-                self.refresh();
-            }
-            "ignore-subdir" => {
-                let default = self
-                    .current_file()
-                    .and_then(|(_, p)| std::path::Path::new(&p).parent().map(|d| d.display().to_string()))
-                    .filter(|d| !d.is_empty());
-                let Some(dir) = self.read_line_prompt("Subdirectory", default.as_deref())? else {
-                    return Ok(());
-                };
-                let Some(pattern) = self.read_line_prompt(&format!("Pattern to ignore in {dir}"), None)? else {
-                    return Ok(());
-                };
-                g!().ignore_in_subdir(&dir, &pattern)?;
-                self.set_msg(&format!("added to {}/.gitignore", dir.trim_end_matches('/')));
-                self.refresh();
-            }
+            "ignore" | "ignore-subdir" | "ignore-gitdir" | "ignore-system" | "skip-worktree" | "no-skip-worktree"
+            | "assume-unchanged" | "no-assume-unchanged" => self.gitignore_command(cmd)?,
             "git-command" | "git-command-cwd" => {
                 let Some(line) = self.read_line_prompt("git command (args after 'git')", Some("status"))? else {
                     return Ok(());
@@ -6179,11 +6110,8 @@ impl App {
     /// `a`: magit-apply on changes, magit-stash-apply on a stash,
     /// magit-cherry-apply elsewhere (default: the commit at point).
     fn apply_cmd(&mut self, args: &[String]) -> Result<()> {
-        if let Some(LineKind::Stash { name, .. }) = self.current_line().map(|l| l.kind.clone()) {
-            self.git.stash_apply(&name, true)?;
-            self.set_msg(&format!("applied {name}"));
-            self.refresh();
-            return Ok(());
+        if let Some(LineKind::Stash { .. }) = self.current_line().map(|l| l.kind.clone()) {
+            return self.stash_command("stash-apply", &[]);
         }
         let Some(sel) = self.diff_selection() else {
             let Some(r) = self.read_commit("Apply changes from commit")? else { return Ok(()) };
@@ -6645,8 +6573,14 @@ impl App {
     }
 
     /// magit-read-file-from-rev
-    fn read_file_from_rev(&mut self, rev: &str, prompt: &str) -> Result<Option<String>> {
-        let choices = self.git.git_lines(&["ls-tree", "-r", "--full-tree", "--name-only", "-z", rev]);
+    fn read_file_from_rev(&mut self, rev: &str, prompt: &str, include_dirs: bool) -> Result<Option<String>> {
+        let mut choices = self.git.git_lines(&["ls-tree", "-r", "--full-tree", "--name-only", "-z", rev]);
+        // magit-revision-directories
+        if include_dirs {
+            let dirs = self.git.git_lines(&["ls-tree", "-z", "--full-tree", "-r", "-d", "--name-only", rev]);
+            choices.extend(dirs.into_iter().map(|d| format!("{d}/")));
+            choices.sort();
+        }
         let default = self.current_file_name().filter(|f| choices.contains(f));
         self.read_choice(prompt, &choices, default.as_deref())
     }
@@ -6843,7 +6777,7 @@ impl App {
                 let Some(rev) = self.read_rev("Checkout from revision", default.as_deref())? else {
                     return Ok(());
                 };
-                let Some(file) = self.read_file_from_rev(&rev, "Checkout file")? else {
+                let Some(file) = self.read_file_from_rev(&rev, "Checkout file", true)? else {
                     return Ok(());
                 };
                 let res = self.git.git_interactive(&["checkout", &rev, "--", &file]);
@@ -6920,7 +6854,7 @@ impl App {
                     return Ok(());
                 };
                 let from = if rev == "{worktree}" || rev == "{index}" { "HEAD" } else { rev.as_str() };
-                let Some(file) = self.read_file_from_rev(from, "Find file")? else {
+                let Some(file) = self.read_file_from_rev(from, "Find file", false)? else {
                     return Ok(());
                 };
                 let line = match self.visited_file() {
@@ -7368,6 +7302,12 @@ impl App {
         let branch = self.git.current_branch();
         let remotes = self.git.remotes();
         match name {
+            // magit-gitignore-on-system's description
+            "gitignore-menu" => {
+                let file = self.config("core.excludesfile");
+                let file = file.as_deref().unwrap_or("core.excludesfile is not set");
+                vec![("g", format!("privately for all repositories ({file})"), true)]
+            }
             "fetch-menu" => {
                 // magit-fetch--pushremote-description
                 let remote = self.get_push_remote(branch.as_deref());
