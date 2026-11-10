@@ -37,6 +37,7 @@ mod gitvar;
 mod remote;
 mod reshelve;
 mod spread;
+mod submodule;
 mod gitignore;
 mod stash;
 mod tag;
@@ -4067,7 +4068,12 @@ impl App {
     /// trimmed; "Need non-empty input" and "Input contains whitespace"
     /// refuse it.
     fn read_string_ns(&mut self, prompt: &str) -> Result<Option<String>> {
-        let Some(v) = self.read_line_raw(prompt, None)? else {
+        self.read_string_ns_default(prompt, None)
+    }
+
+    /// magit-read-string-ns with DEFAULT (the value of an empty input).
+    fn read_string_ns_default(&mut self, prompt: &str, default: Option<&str>) -> Result<Option<String>> {
+        let Some(v) = self.read_line_raw(prompt, default)? else {
             return Ok(None);
         };
         let v = v.trim_matches([' ', '\t', '\n', '\r']);
@@ -9057,49 +9063,8 @@ impl App {
             }
 
             // ---- submodule
-            "submodule-list" => {
-                let res = self.git.submodule_list();
-                self.show("submodules", res);
-            }
-            "submodule-add" => {
-                let Some(url) = self.read_line_prompt("Submodule url", None)? else {
-                    return Ok(());
-                };
-                let Some(path) = self.read_line_prompt("Submodule path", None)? else {
-                    return Ok(());
-                };
-                let res = self.git.submodule_add(&url, &path);
-                self.done("submodule added", res);
-            }
-            // magit-submodule-register / populate / update / unpopulate:
-            // act on one module or on all of them ("(all)")
-            "submodule-register" | "submodule-populate" | "submodule-update" | "submodule-unpopulate" => {
-                let Some(modules) = self.pick_submodules(cmd != "submodule-unpopulate")? else {
-                    return Ok(());
-                };
-                let res = match cmd {
-                    "submodule-register" => self.git.submodule_register(&modules),
-                    "submodule-populate" => self.git.submodule_populate(args, &modules),
-                    "submodule-update" => self.git.submodule_update_with(args, &modules),
-                    _ => self.git.submodule_unpopulate(args, &modules),
-                };
-                self.done(&cmd.replace('-', " "), res);
-            }
-            "submodule-sync" => {
-                let res = self.git.submodule_sync();
-                self.done("submodules synced", res);
-            }
-            "submodule-remove" => {
-                let paths = self.git.submodule_paths();
-                let Some(path) = self.pick("Remove submodule", &paths, None)?.cloned() else {
-                    return Ok(());
-                };
-                if !self.confirm("remove-modules", &format!("Remove submodule {path}"))? {
-                    return Ok(());
-                }
-                let res = self.git.submodule_remove(&path);
-                self.done("submodule removed", res);
-            }
+            "submodule-list" | "submodule-add" | "submodule-register" | "submodule-populate" | "submodule-update"
+            | "submodule-sync" | "submodule-unpopulate" | "submodule-remove" => self.submodule_command(cmd, args)?,
 
             // ---- notes
             "notes-list" => {
@@ -9354,23 +9319,6 @@ impl App {
             _ => self.set_msg(&format!("unknown command: {cmd}")),
         }
         Ok(())
-    }
-
-    /// Pick a submodule, or "(all)" (empty list = every module) when allowed.
-    fn pick_submodules(&mut self, allow_all: bool) -> Result<Option<Vec<String>>> {
-        let mut choices = Vec::new();
-        if allow_all {
-            choices.push("(all)".to_string());
-        }
-        choices.extend(self.git.submodule_paths());
-        if choices.is_empty() || (allow_all && choices.len() == 1) {
-            self.set_msg("no submodules");
-            return Ok(None);
-        }
-        Ok(self
-            .pick("Submodule", &choices, None)?
-            .cloned()
-            .map(|c| if c == "(all)" { vec![] } else { vec![c] }))
     }
 
     /// Report the outcome of a rebase that may stop half-way.

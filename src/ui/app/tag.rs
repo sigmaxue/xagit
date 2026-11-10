@@ -276,7 +276,7 @@ impl App {
 
     /// magit-confirm with ITEMS and NOABORT: none confirmed when there
     /// are none.
-    fn confirm_items_noabort(&mut self, action: &str, one: &str, many: &str, items: &[String]) -> Result<bool> {
+    pub(super) fn confirm_items_noabort(&mut self, action: &str, one: &str, many: &str, items: &[String]) -> Result<bool> {
         match items {
             [] => Ok(false),
             [i] => self.confirm_noabort(action, &one.replacen("%s", i, 1)),

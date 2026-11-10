@@ -1587,6 +1587,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "submodule-menu".into(),
             title: "Submodule".into(),
             groups: vec![
+                // "Arguments"
                 vec![
                     sw("-f", "Force", "--force"),
                     sw("-r", "Recursive", "--recursive"),
@@ -1596,15 +1597,21 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-M", "Merge tip", "--merge"),
                     sw("-U", "Use upstream tip", "--remote"),
                 ],
+                // "One module actions" (magit--git-submodule-suffix)
                 vec![
-                    cmd("a", "Add", "submodule-add"),
-                    cmd("r", "Register", "submodule-register"),
-                    cmd("p", "Populate", "submodule-populate"),
-                    cmd("u", "Update", "submodule-update"),
-                    cmd("s", "Synchronize", "submodule-sync"),
-                    cmd("d", "Unpopulate", "submodule-unpopulate"),
+                    cmd("a", "Add            git submodule add [--force]", "submodule-add"),
+                    cmd("r", "Register       git submodule init", "submodule-register"),
+                    cmd("p", "Populate       git submodule update --init [--recursive]", "submodule-populate"),
+                    cmd(
+                        "u",
+                        "Update         git submodule update [--force] [--no-fetch] [--remote] [--recursive] [--checkout|--rebase|--merge]",
+                        "submodule-update",
+                    ),
+                    cmd("s", "Synchronize    git submodule sync [--recursive]", "submodule-sync"),
+                    cmd("d", "Unpopulate     git submodule deinit [--force]", "submodule-unpopulate"),
                     cmd("k", "Remove", "submodule-remove"),
                 ],
+                // "Populated modules actions"
                 vec![
                     cmd("l", "List modules", "submodule-list"),
                     cmd("f", "Fetch modules", "fetch-modules"),

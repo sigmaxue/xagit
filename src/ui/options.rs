@@ -31,6 +31,7 @@
 //! magit-reshelve-since-committer-only nil
 //! magit-read-worktree-directory-function magit-read-worktree-directory-sibling
 //! magit-read-worktree-offsite-directory ~/.local/share/wtrees/
+//! magit-submodule-remove-trash-gitdirs nil
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -138,6 +139,8 @@ pub struct Options {
     pub remote_add_set_push_default: SetPushDefault,
     /// magit-reshelve-since-committer-only
     pub reshelve_since_committer_only: bool,
+    /// magit-submodule-remove-trash-gitdirs
+    pub submodule_remove_trash_gitdirs: bool,
     /// magit-read-worktree-directory-function
     pub read_worktree_directory: WorktreeDirectory,
     /// magit-read-worktree-offsite-directory
@@ -216,6 +219,7 @@ impl Default for Options {
             openpgp_default_signing_key: None,
             remote_add_set_push_default: SetPushDefault::AskIfUnset,
             reshelve_since_committer_only: false,
+            submodule_remove_trash_gitdirs: false,
             read_worktree_directory: WorktreeDirectory::Sibling,
             read_worktree_offsite_directory: match std::env::var_os("XDG_DATA_HOME") {
                 Some(d) => std::path::PathBuf::from(d).join("wtrees"),
@@ -359,6 +363,9 @@ impl Options {
                 },
                 "magit-reshelve-since-committer-only" => {
                     boolean(&values).map(|b| o.reshelve_since_committer_only = b).err()
+                }
+                "magit-submodule-remove-trash-gitdirs" => {
+                    boolean(&values).map(|b| o.submodule_remove_trash_gitdirs = b).err()
                 }
                 "enable-command" | "disable-command" => match values.as_slice() {
                     [c] => {

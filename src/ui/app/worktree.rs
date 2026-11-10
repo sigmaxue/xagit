@@ -98,7 +98,7 @@ impl App {
 
     /// read-directory-name in DIR with INITIAL (the minibuffer starts
     /// with DIR abbreviated and INITIAL).
-    fn read_directory_name(&mut self, prompt: &str, dir: &std::path::Path, initial: &str) -> Result<Option<std::path::PathBuf>> {
+    pub(super) fn read_directory_name(&mut self, prompt: &str, dir: &std::path::Path, initial: &str) -> Result<Option<std::path::PathBuf>> {
         let shown = format!("{}/{initial}", abbreviate(dir.to_string_lossy().trim_end_matches('/')));
         *self.initial_input.borrow_mut() = Some(shown);
         let Some(input) = self.read_line_hist(prompt, None, Hist::Minibuffer, None)? else {
