@@ -36,6 +36,8 @@ pub enum LineKind {
     Ref { kind: super::refs::RefKind, name: String },
     /// the heading of a remote's section in the refs buffer
     Remote { name: String },
+    /// a worktree section (magit-insert-worktrees): its directory
+    Worktree { path: String },
     Info,
 }
 
@@ -405,6 +407,18 @@ impl Builder {
 /// magit-status-margin (shown for the commits and stashes), LOG_ARGS the
 /// buffer's log arguments (magit-buffer-log-args).
 pub fn build_status(g: &Git, st: &Status, diff_args: &[String], log_args: &[String], margin: &Margin) -> StatusBuffer {
+    build_status_with(g, st, diff_args, log_args, margin, false)
+}
+
+/// build_status, with magit-insert-worktrees in the sections when WORKTREES.
+pub fn build_status_with(
+    g: &Git,
+    st: &Status,
+    diff_args: &[String],
+    log_args: &[String],
+    margin: &Margin,
+    worktrees: bool,
+) -> StatusBuffer {
     let mut b = Builder::new();
     b.log_margin = margin.clone();
     let unstaged = g.diff_sections(false, diff_args).unwrap_or_default();
@@ -420,6 +434,9 @@ pub fn build_status(g: &Git, st: &Status, diff_args: &[String], log_args: &[Stri
     insert_changes(&mut b, "unstaged", "Unstaged changes", &st.unstaged, &unstaged);
     insert_changes(&mut b, "staged", "Staged changes", &st.staged, &staged);
     insert_stashes(&mut b, g, &st.stashes);
+    if worktrees {
+        insert_worktrees(&mut b, g, false);
+    }
     insert_log_sections(&mut b, g, log_args);
 
     while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
@@ -1078,6 +1095,160 @@ fn insert_changes(b: &mut Builder, section: &str, title: &str, files: &[FileEntr
         }
     }
     b.blank();
+}
+
+/// An element of magit-list-worktrees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub path: String,
+    pub head: Option<String>,
+    /// the branch checked out (without refs/heads/)
+    pub branch: Option<String>,
+    pub bare: bool,
+    pub detached: bool,
+    /// Some reason (maybe empty) if locked
+    pub locked: Option<String>,
+    /// Some reason (maybe empty) if prunable
+    pub prunable: Option<String>,
+}
+
+/// magit-list-worktrees (`git worktree list --porcelain -z`): the main
+/// worktree first; a separate git directory is replaced by its worktree.
+pub fn list_worktrees(g: &Git) -> Vec<WorktreeInfo> {
+    let mut out: Vec<WorktreeInfo> = Vec::new();
+    for line in g.git_lines(&["worktree", "list", "--porcelain", "-z"]) {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            let top = std::path::Path::new(p)
+                .is_dir()
+                .then(|| g.git_string(&["-C", p, "rev-parse", "--show-toplevel"]).ok())
+                .flatten()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            out.push(WorktreeInfo { path: top.unwrap_or_else(|| p.to_string()), ..Default::default() });
+        } else if let Some(w) = out.last_mut() {
+            if let Some(h) = line.strip_prefix("HEAD ") {
+                w.head = Some(h.to_string());
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                w.branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+            } else if line == "bare" {
+                w.bare = true;
+            } else if line == "detached" {
+                w.detached = true;
+            } else if line == "locked" || line.starts_with("locked ") {
+                w.locked = Some(line.strip_prefix("locked").unwrap_or("").trim().to_string());
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                w.prunable = Some(line.strip_prefix("prunable").unwrap_or("").trim().to_string());
+            }
+        }
+    }
+    out
+}
+
+/// file-relative-name of PATH from DIR, or None if not below a common root.
+fn relative_name(path: &str, dir: &std::path::Path) -> String {
+    let p = std::path::Path::new(path);
+    let mut base: Vec<_> = dir.components().collect();
+    let target: Vec<_> = p.components().collect();
+    let common = base.iter().zip(&target).take_while(|(a, b)| a == b).count();
+    if common == 0 {
+        return path.to_string();
+    }
+    let ups = base.len() - common;
+    base.truncate(common);
+    let mut rel = std::path::PathBuf::new();
+    for _ in 0..ups {
+        rel.push("..");
+    }
+    for c in &target[common..] {
+        rel.push(c);
+    }
+    let s = rel.to_string_lossy().into_owned();
+    if s.is_empty() {
+        "./".into()
+    } else {
+        format!("{s}/")
+    }
+}
+
+/// abbreviate-file-name: the home directory as "~".
+fn abbreviate_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && (path == home || path.starts_with(&format!("{home}/"))) => {
+            format!("~{}/", &path[home.len()..])
+        }
+        _ => format!("{path}/"),
+    }
+}
+
+/// magit-insert-worktrees: a section for each worktree, its branch (the
+/// current one emphasized), else its abbreviated commit, else "(bare)",
+/// and its directory (relative unless the absolute name is shorter).
+/// Nothing when there is only one worktree, unless ALWAYS.
+pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git, always: bool) {
+    let worktrees = list_worktrees(g);
+    if worktrees.len() < 2 && !always {
+        return;
+    }
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let here = canon(&g.toplevel);
+    let current = g.current_branch();
+    let cols: Vec<(String, super::theme::Face, &WorktreeInfo)> = worktrees
+        .iter()
+        .map(|w| {
+            let this = canon(std::path::Path::new(&w.path)) == here;
+            match (&w.branch, &w.head) {
+                (Some(br), _) => {
+                    let face = if this && current.as_deref() == Some(br.as_str()) {
+                        super::theme::Face::BranchCurrent
+                    } else {
+                        super::theme::Face::BranchLocal
+                    };
+                    (br.clone(), face, w)
+                }
+                (None, Some(h)) if !w.bare => {
+                    let face = if this { super::theme::Face::BranchCurrent } else { super::theme::Face::Hash };
+                    (g.rev_short(h), face, w)
+                }
+                _ => ("(bare)".to_string(), super::theme::Face::Dim, w),
+            }
+        })
+        .collect();
+    let align = cols.iter().map(|(h, _, _)| super::width::str_width(h)).max().unwrap_or(0) + 1;
+    let n = cols.len();
+    let kind = LineKind::SectionHeader { section: "worktrees".into(), n };
+    if b.heading(format!("Worktrees ({n})"), kind, "worktrees", 0, true) {
+        for (head, face, w) in cols {
+            let rel = relative_name(&w.path, &here);
+            let abs = abbreviate_home(&w.path);
+            let shown = if super::width::str_width(&rel) > super::width::str_width(&abs) || rel == "./" { abs } else { rel };
+            let mut text = format!("{head}{}{shown}", " ".repeat(align.saturating_sub(super::width::str_width(&head))));
+            if let Some(r) = &w.locked {
+                text.push_str(if r.is_empty() { " (locked)" } else { " (locked: " });
+                if !r.is_empty() {
+                    text.push_str(r);
+                    text.push(')');
+                }
+            }
+            if w.prunable.is_some() {
+                text.push_str(" (prunable)");
+            }
+            let id = format!("worktrees/{}", w.path);
+            b.line(text, LineKind::Worktree { path: w.path.clone() }, &id, true, 1);
+            b.faces(vec![(0, head.len(), face)]);
+        }
+    }
+    b.blank();
+}
+
+/// The worktrees buffer of `Z l` (an xagit addition): the worktree
+/// sections, also when there is only one.
+pub fn build_worktrees(g: &Git) -> StatusBuffer {
+    let mut b = Builder::new();
+    insert_worktrees(&mut b, g, true);
+    while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
+        b.lines.pop();
+    }
+    StatusBuffer::new(b.lines, Vec::new(), "Worktrees".into())
 }
 
 /// magit-insert-stashes ("Stashes (N)", hidden by default)

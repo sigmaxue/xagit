@@ -49,7 +49,7 @@ fn layout() {
     let (_td, g, _) = repo();
     let mut app = App::new(g.clone());
     app.press("Z").unwrap();
-    assert_eq!(app.menu_keys(), ["b", "c", "m", "k", "g"]);
+    assert_eq!(app.menu_keys(), ["b", "c", "m", "k", "g", "l"]);
     let p = app.transient_popup().join("\n");
     assert!(p.contains("b worktree") && p.contains("c branch and worktree") && p.contains("g Visit worktree"), "{p}");
 }
@@ -123,4 +123,117 @@ fn move_worktree() {
     app.script_answers(&[&new.to_string_lossy(), &into.to_string_lossy()]);
     press(&mut app, &["Z", "m"]);
     assert_eq!(canon(app.toplevel()), into.join("new"));
+}
+
+/// TEXT of the visible lines.
+fn texts(app: &App) -> Vec<String> {
+    app.visible_lines().iter().map(|l| l.text.clone()).collect()
+}
+
+/// Point on the first visible line containing TEXT.
+fn goto(app: &mut App, text: &str) {
+    let n = app.visible_lines().len();
+    for _ in 0..n {
+        app.press("C-p").unwrap();
+    }
+    for _ in 0..n {
+        if app.point_text().contains(text) {
+            return;
+        }
+        app.press("C-n").unwrap();
+    }
+    panic!("no line {text:?}: {:?}", texts(app));
+}
+
+/// repo plus the worktrees TMP/wt-topic (topic) and TMP/wt-detached.
+fn three_worktrees() -> (TempDir, Git, std::path::PathBuf) {
+    let (td, g, base) = repo();
+    git(&g, &["worktree", "add", "-q", &base.join("wt-topic").to_string_lossy(), "topic"]);
+    git(&g, &["worktree", "add", "-q", "--detach", &base.join("wt-detached").to_string_lossy(), "HEAD"]);
+    (td, g, base)
+}
+
+#[test]
+fn list_buffer() {
+    let (_td, g, base) = three_worktrees();
+    let mut app = App::new(g.clone());
+    press(&mut app, &["Z", "l"]);
+    assert_eq!(app.mode(), &BufferMode::Worktrees);
+    let t = texts(&app);
+    assert_eq!(t[0], "Worktrees (3)", "{t:?}");
+    // the branch (else the abbreviated commit), aligned, then the
+    // directory relative to this worktree
+    let short = g.rev_short("HEAD");
+    let width = short.len().max("master".len()).max("topic".len()) + 1;
+    // the current worktree by its absolute name (its relative name is "./")
+    assert_eq!(t[1], format!("{:<width$}{}/", "master", base.join("repo").display()), "{t:?}");
+    // the others in git's order
+    let mut rest = t[2..4].to_vec();
+    rest.sort();
+    let mut want = vec![format!("{:<width$}../wt-topic/", "topic"), format!("{:<width$}../wt-detached/", short)];
+    want.sort();
+    assert_eq!(rest, want, "{t:?}");
+    // a single worktree is listed too
+    let (_td2, g2, _) = repo();
+    let mut app2 = App::new(g2);
+    press(&mut app2, &["Z", "l"]);
+    assert_eq!(texts(&app2)[..2].len(), 2);
+    assert_eq!(texts(&app2)[0], "Worktrees (1)");
+}
+
+#[test]
+fn list_buffer_locked_and_keys() {
+    let (_td, g, base) = three_worktrees();
+    git(&g, &["worktree", "lock", "--reason", "usb", &base.join("wt-topic").to_string_lossy()]);
+    let mut app = App::new(g.clone());
+    press(&mut app, &["Z", "l"]);
+    assert!(texts(&app).iter().any(|l| l.ends_with("../wt-topic/ (locked: usb)")), "{:?}", texts(&app));
+    // k on a locked worktree refuses
+    goto(&mut app, "wt-topic");
+    app.script_answers(&[""]);
+    app.press("k").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Delete worktree");
+    assert!(app.message().starts_with("Cannot delete locked"), "{}", app.message());
+    // k on another: the one at point is the default; confirmed
+    goto(&mut app, "wt-detached");
+    app.script_answers(&["", "y"]);
+    app.press("k").unwrap();
+    assert!(!base.join("wt-detached").exists(), "{}", app.message());
+    assert_eq!(worktrees(&g).len(), 2);
+    // the list was refreshed
+    assert!(!texts(&app).iter().any(|l| l.contains("wt-detached")), "{:?}", texts(&app));
+    // RET: the status of the worktree at point, without asking
+    goto(&mut app, "wt-topic");
+    let n = app.prompts().len();
+    app.press("RET").unwrap();
+    assert_eq!(app.prompts().len(), n);
+    assert_eq!(app.mode(), &BufferMode::Status);
+    assert_eq!(canon(app.toplevel()), base.join("wt-topic"));
+}
+
+#[test]
+fn status_section_when_enabled() {
+    let (_td, g, base) = three_worktrees();
+    // not inserted by default (magit-status-sections-hook)
+    let mut app = App::new(g.clone());
+    assert!(!texts(&app).iter().any(|l| l.starts_with("Worktrees")));
+    let (o, e) = Options::parse("magit-insert-worktrees t");
+    assert!(e.is_empty(), "{e:?}");
+    app.set_options(o.clone());
+    app.refresh();
+    assert!(texts(&app).iter().any(|l| l == "Worktrees (3)"), "{:?}", texts(&app));
+    // only one worktree: nothing, like magit-insert-worktrees
+    let (_td2, g2, _) = repo();
+    let mut app2 = App::new(g2);
+    app2.set_options(o);
+    app2.refresh();
+    assert!(!texts(&app2).iter().any(|l| l.starts_with("Worktrees")));
+    // RET on the heading opens the list buffer, g on a worktree there
+    goto(&mut app, "Worktrees (3)");
+    app.press("RET").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Worktrees);
+    // Z g / m default to the worktree at point
+    goto(&mut app, "wt-topic");
+    press(&mut app, &["Z", "g"]);
+    assert_eq!(canon(app.toplevel()), base.join("wt-topic"));
 }

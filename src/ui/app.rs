@@ -18,7 +18,7 @@ use super::paint::{self, Row};
 use super::theme::{Face, Style, Theme};
 use super::refs::{build_refs, deferred_ref, CommitCount, RefKind};
 use super::smerge::{self, Keep};
-use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
+use super::view::{status_log_args, BufferLine, LineKind, Section, StatusBuffer, Visibility};
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
 use crate::git::exec::Editor;
@@ -233,6 +233,8 @@ pub enum BufferMode {
     /// git-rebase-mode: the todo list of an interactive rebase edited in
     /// xagit (the list itself is App::rebase_todo)
     RebaseTodo,
+    /// the worktrees of the repository (`Z l`, `git worktree list`)
+    Worktrees,
 }
 
 /// An interactive rebase whose todo list is being edited in xagit.
@@ -4231,7 +4233,7 @@ impl App {
                 Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
                 _ => Dwim::None,
             },
-            BufferMode::File { .. } | BufferMode::RebaseTodo => Dwim::None,
+            BufferMode::File { .. } | BufferMode::RebaseTodo | BufferMode::Worktrees => Dwim::None,
             BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
                 ("committed", Some(r)) => Dwim::Range(r.clone()),
                 (t, _) => Dwim::Type(t.to_string()),
@@ -6029,6 +6031,9 @@ impl App {
     fn discard_cmd(&mut self) -> Result<()> {
         match self.current_line().map(|l| l.kind.clone()) {
             Some(LineKind::Stash { .. }) => return self.stash_drop(),
+            // magit-worktree-section-map: magit-delete-thing is
+            // magit-worktree-delete
+            Some(LineKind::Worktree { .. }) => return self.worktree_delete(),
             Some(LineKind::SectionHeader { section, .. }) if section == "stashes" => {
                 if self.confirm("drop-stashes", "Drop all stashes in refs/stash")? {
                     self.git.stash_clear()?;
@@ -8448,7 +8453,8 @@ impl App {
             }
         }
         let choices: Vec<String> = worktrees.iter().skip(1).map(|w| w.0.clone()).collect();
-        let Some(path) = self.read_choice("Delete worktree", &choices, None)? else {
+        let at_point = self.worktree_at_point().filter(|p| choices.contains(p));
+        let Some(path) = self.read_choice("Delete worktree", &choices, at_point.as_deref())? else {
             return Ok(());
         };
         let dir = std::path::PathBuf::from(&path);
@@ -8971,6 +8977,7 @@ impl App {
             BufferMode::LogSelect { .. } => "magit-log-select",
             BufferMode::Refs { .. } => "magit-refs",
             BufferMode::RebaseTodo => return "git-rebase-todo".into(),
+            BufferMode::Worktrees => "magit-worktrees",
             BufferMode::File { rev, file, .. } => return super::blame::buffer_name(rev, file),
         };
         format!("{m}: {repo}")
@@ -9159,6 +9166,12 @@ impl App {
             }
             LineKind::SectionHeader { section, .. } if section == "stashes" => {
                 self.setup_buffer(BufferMode::Stashes { refname: "refs/stash".into() }, Vec::new())
+            }
+            // magit-worktree-section-map: magit-visit-thing is
+            // magit-worktree-status
+            LineKind::Worktree { .. } => self.worktree_command("worktree-status")?,
+            LineKind::SectionHeader { section, .. } if section == "worktrees" && self.mode != BufferMode::Worktrees => {
+                self.setup_buffer(BufferMode::Worktrees, Vec::new())
             }
             // magit-stash-show / magit-show-commit, reading the stash or
             // revision with a prefix argument; magit-visit-ref
@@ -9386,7 +9399,8 @@ impl App {
             }
 
             // ---- worktree
-            "worktree-checkout" | "worktree-branch" | "worktree-move" | "worktree-delete" | "worktree-status" => {
+            "worktree-checkout" | "worktree-branch" | "worktree-move" | "worktree-delete" | "worktree-status"
+            | "worktree-list" => {
                 self.worktree_command(cmd)?
             }
 

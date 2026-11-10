@@ -54,6 +54,15 @@ fn worktree_prefix(toplevel: &std::path::Path) -> String {
 }
 
 impl App {
+    /// magit-section-value-if 'worktree: the directory of the worktree
+    /// section at point.
+    pub(super) fn worktree_at_point(&self) -> Option<String> {
+        match self.current_line().map(|l| &l.kind) {
+            Some(LineKind::Worktree { path }) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
     /// magit-list-worktrees: the main worktree first.
     pub(super) fn list_worktrees(&self) -> Vec<Worktree> {
         let mut out: Vec<Worktree> = Vec::new();
@@ -180,7 +189,10 @@ impl App {
             // one moved, its status follows it
             "worktree-move" => {
                 let choices: Vec<String> = self.list_worktrees().into_iter().skip(1).map(|w| w.path).collect();
-                let Some(worktree) = self.read_choice("Move worktree", &choices, None)? else { return Ok(()) };
+                let at_point = self.worktree_at_point().filter(|p| choices.contains(p));
+                let Some(worktree) = self.read_choice("Move worktree", &choices, at_point.as_deref())? else {
+                    return Ok(());
+                };
                 let top = self.git.toplevel.clone();
                 let Some(dir) = self.read_directory_name("Move worktree to: ", &top, "")? else { return Ok(()) };
                 if std::path::Path::new(&worktree).join(".git").is_dir() {
@@ -205,6 +217,11 @@ impl App {
             "worktree-delete" => self.worktree_delete()?,
             // magit-worktree-status: another worktree
             "worktree-status" => {
+                // the worktree at point, without asking
+                if let Some(path) = self.worktree_at_point() {
+                    self.visit_directory(std::path::Path::new(&path));
+                    return Ok(());
+                }
                 let top = self.git.toplevel.to_string_lossy().into_owned();
                 let choices: Vec<String> =
                     self.list_worktrees().into_iter().map(|w| w.path).filter(|p| p.trim_end_matches('/') != top).collect();
@@ -213,6 +230,8 @@ impl App {
                 };
                 self.visit_directory(std::path::Path::new(&worktree));
             }
+            // `git worktree list` in a buffer of worktree sections
+            "worktree-list" => self.setup_buffer(BufferMode::Worktrees, Vec::new()),
             _ => {}
         }
         Ok(())

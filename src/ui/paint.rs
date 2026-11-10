@@ -344,6 +344,8 @@ fn paint_kind(kind: &LineKind, c: &[char], p: &mut [Paint]) {
             }
         }
         LineKind::FileLine { .. } => {}
+        // the branch / commit face is given by magit-insert-worktrees
+        LineKind::Worktree { .. } => {}
     }
 }
 

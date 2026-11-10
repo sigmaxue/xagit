@@ -1767,6 +1767,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("m", "Move worktree", "worktree-move"),
                     cmd("k", "Delete worktree", "worktree-delete"),
                     cmd("g", "Visit worktree", "worktree-status"),
+                    // an xagit addition: `git worktree list` in a buffer
+                    cmd("l", "List worktrees", "worktree-list"),
                 ],
             ],
         },
