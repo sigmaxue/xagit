@@ -64,6 +64,7 @@ mod gitignore;
 mod stash;
 mod tag;
 mod worktree;
+mod rebase_todo;
 
 pub struct App {
     pub git: Git,
@@ -109,6 +110,8 @@ pub struct App {
     cx_prefix: bool,
     /// C-c ^ was typed on a hunk (magit-hunk-section-smerge-map)
     smerge_prefix: bool,
+    /// C-c typed in the git-rebase-mode buffer
+    rebase_todo_cc: bool,
     /// the prefix argument of the next command (current-prefix-arg)
     prefix_arg: Option<PrefixArg>,
     /// C-u / M-- was typed and digits are read (universal-argument-map)
@@ -136,6 +139,8 @@ pub struct App {
     /// pending text-mode buffer shown instead of status (diff/log/show output)
     view_text: Option<(String, String)>, // (title, content)
     view_scroll: usize,
+    /// the git-rebase-todo being edited (BufferMode::RebaseTodo)
+    rebase_todo: Option<RebaseTodoEdit>,
     /// directory xagit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
     /// arguments of new diff / revision / stash buffers (the current value
@@ -225,6 +230,28 @@ pub enum BufferMode {
     /// magit-refs-mode: the refs compared with UPSTREAM
     /// (magit-buffer-refs-upstream)
     Refs { upstream: String },
+    /// git-rebase-mode: the todo list of an interactive rebase edited in
+    /// xagit (the list itself is App::rebase_todo)
+    RebaseTodo,
+}
+
+/// An interactive rebase whose todo list is being edited in xagit.
+#[derive(Debug, Clone)]
+pub struct RebaseTodoEdit {
+    pub todo: super::rebase_todo::Todo,
+    pub cursor: usize,
+    pub mark: Option<usize>,
+    /// what git is run with once the list is finished
+    pub target: RebaseTodoTarget,
+}
+
+/// Where the finished todo list goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseTodoTarget {
+    /// start `git rebase -i` for COMMIT with ARGS
+    Start { commit: String, args: Vec<String> },
+    /// `git rebase --edit-todo` of the rebase in progress
+    InProgress,
 }
 
 /// What is done with the commit picked in a log-select buffer.
@@ -592,6 +619,7 @@ impl App {
             cc_prefix: false,
             cx_prefix: false,
             smerge_prefix: false,
+            rebase_todo_cc: false,
             prefix_arg: None,
             reading_arg: false,
             transient_helpp: false,
@@ -605,6 +633,7 @@ impl App {
             quit: false,
             view_text: None,
             view_scroll: 0,
+            rebase_todo: None,
             cwd,
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
@@ -1058,6 +1087,15 @@ impl App {
             &[("C-x", "common commands"), ("?", "help on a key"), ("C-u", "prefix argument")]
         } else if self.view_text.is_some() {
             &[("SPC/DEL", "page"), ("n/p", "scroll"), ("q", "close")]
+        } else if self.mode == BufferMode::RebaseTodo {
+            &[
+                ("C-c C-c", "rebase"),
+                ("C-c C-k", "abort"),
+                ("c/r/e/s/f/d", "action"),
+                ("k", "comment"),
+                ("M-p/M-n", "move"),
+                ("?", "help"),
+            ]
         } else {
             &[
                 ("h/?", "dispatch"),
@@ -1097,7 +1135,13 @@ impl App {
         let mut rows: Vec<Row> = vec![self.header_row(w, &branch)];
 
         let position;
-        if let Some((_, content)) = &self.view_text {
+        if self.mode == BufferMode::RebaseTodo && self.view_text.is_none() {
+            let mut scroll = self.scroll;
+            let (r, pos) = self.rebase_todo_rows(body, &mut scroll);
+            self.scroll = scroll;
+            rows.extend(r);
+            position = pos;
+        } else if let Some((_, content)) = &self.view_text {
             let diff = paint::looks_like_diff(content);
             let mut wrapped: Vec<Row> = Vec::new();
             for (n, line) in content.lines().enumerate() {
@@ -1889,6 +1933,10 @@ impl App {
 
     /// A key outside transients.
     fn dispatch_buffer_key(&mut self, key: Key) -> Result<()> {
+        // git-rebase-mode-map
+        if self.rebase_todo_key(&key)? {
+            return Ok(());
+        }
         if std::mem::take(&mut self.smerge_prefix) {
             // magit-hunk-section-smerge-map
             let how = match (key.ctrl, key.code.as_str()) {
@@ -4183,7 +4231,7 @@ impl App {
                 Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
                 _ => Dwim::None,
             },
-            BufferMode::File { .. } => Dwim::None,
+            BufferMode::File { .. } | BufferMode::RebaseTodo => Dwim::None,
             BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
                 ("committed", Some(r)) => Dwim::Range(r.clone()),
                 (t, _) => Dwim::Type(t.to_string()),
@@ -4640,9 +4688,8 @@ impl App {
             return Ok(());
         }
         let res = match cmd {
-            "rebase-interactive" => {
-                self.with_terminal(|g| g.rebase_interactive(commit, args, Editor::User, Editor::User))
-            }
+            // the todo is edited in xagit's git-rebase-mode buffer
+            "rebase-interactive" => return self.rebase_todo_start(commit, args),
             "rebase-edit-commit" => self.git.rebase_edit_commit(commit, args),
             "rebase-reword-commit" => self.with_terminal(|g| g.rebase_reword_commit(commit, args, Editor::User)),
             _ => self.git.rebase_remove_commit(commit, args),
@@ -8923,6 +8970,7 @@ impl App {
             BufferMode::Cherry { .. } => "magit-cherry",
             BufferMode::LogSelect { .. } => "magit-log-select",
             BufferMode::Refs { .. } => "magit-refs",
+            BufferMode::RebaseTodo => return "git-rebase-todo".into(),
             BufferMode::File { rev, file, .. } => return super::blame::buffer_name(rev, file),
         };
         format!("{m}: {repo}")
@@ -9431,10 +9479,7 @@ impl App {
                 let msg = format!("Type %p on a commit to rebase it and commits above it onto {newbase},");
                 self.log_select(SelectAction::RebaseSubset { newbase, args: args.to_vec() }, Some(&msg), None);
             }
-            "rebase-edit-todo" => {
-                let res = self.with_terminal(|g| g.rebase_edit_todo(Editor::User));
-                self.after_rebase(res);
-            }
+            "rebase-edit-todo" => self.rebase_todo_edit_in_progress()?,
 
             _ => self.set_msg(&format!("unknown command: {cmd}")),
         }

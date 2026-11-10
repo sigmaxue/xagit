@@ -7,6 +7,7 @@ pub mod logbuf;
 pub mod minibuf;
 pub mod options;
 pub mod paint;
+pub mod rebase_todo;
 pub mod refs;
 pub mod regexp;
 pub mod smerge;

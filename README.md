@@ -194,7 +194,7 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 
 菜单键按 Emacs `kbd` 的写法逐键输入：`-f` 是先按 `-` 再按 `f`，`a m` 是先按 `a` 再按 `m`（中间的空格只是记法分隔符）。mergetool 菜单的 `SPC m` 是例外：先按空格键，再按 `m`。只按了前缀时菜单会保持打开，等待后续按键；键序列没有定义时显示未绑定提示；`q` / `C-g` 退出菜单。
 
-`r i`、`r w`、进行中的 `r e` 会暂时离开 TUI，打开 git 配置的编辑器（`GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` / `core.editor`）编辑 todo 或提交消息，编辑器退出后回到 TUI。`r m`、`r k` 和 cherry 搬移按当前实现，用 perl 脚本改写 todo，不需要手动编辑，所以系统里要有 `perl`。
+`r i` 和进行中的 `r e` 在 TUI 内打开 todo 编辑缓冲区（对应 Magit 的 `git-rebase-mode`）：`c` pick、`r`/`w` reword、`e`/`m` edit、`s` squash、`S` fixup -c、`f` fixup、`F`/`A` fixup -C、`d` drop、`k`/`C-k` 注释或取消注释，改完自动移到下一行；`p`/`n` 移动光标，`M-p`/`M-n` 上下移动行，`C-SPC` 选区后批量修改；`x` exec、`b` break、`z` noop、`l`/`t`/`u` label/reset/update-ref、`y` 插入提交，`C-/` 撤销，`RET` 查看提交，`?` 查看帮助。`C-c C-c` 执行 rebase，`C-c C-k` 取消（有修改时会先确认）。打开缓冲区时只读取 todo，不改动仓库；取消时 HEAD 和工作区保持不变。reword、squash 的提交消息和 `r w` 仍然暂时离开 TUI，用 git 配置的编辑器（`GIT_EDITOR` / `core.editor`）编辑。`r m`、`r k` 和 cherry 搬移按当前实现，用 perl 脚本改写 todo，不需要手动编辑，所以系统里要有 `perl`。
 
 ### 按键记法与区域选择
 
@@ -263,7 +263,7 @@ cargo test
 
 xagit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
 
-- 提交消息及 `m e` 的合并消息主要通过提示行输入；需要编辑 todo 或提交消息时使用外部编辑器，替代 Emacs 的 `git-rebase-mode`/with-editor 会话。编辑器退出后返回 TUI。
+- 提交消息及 `m e` 的合并消息主要通过提示行输入；rebase todo 在内建的 `git-rebase-mode` 缓冲区里编辑；提交消息仍然使用外部编辑器，替代 Emacs 的 with-editor 会话。编辑器退出后返回 TUI。
 - `e`/`E` 用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；`E s` 用 `git add -p` 替代 Ediff 的选择性暂存，`E m`/`E M`/`E t` 用 `git mergetool` 替代 Ediff 的冲突解决会话，效果取决于本机配置的 merge 工具，不等同于 Emacs 的三方 Ediff。
 - 部分命令用统一文本视图替代 Magit 专用 buffer，不能据此推断完全没有结构化视图：项目已有专门的 status、diff、log、refs、blame 等模块。`!` 的 shell 命令与 `E t` 的 `git mergetool --gui` 同步捕获输出显示在文本视图，而不是 Magit 的异步 process buffer；`E m`/`E M` 与 `E s` 会把终端交给 merge 工具或 `git add -p`，`gitk`、`git gui` 等图形程序只在后台启动，不会嵌入 TUI。
 - refs 候选、最近提交列表及提示行输入与 Magit 的历史/log 选择交互不同。例如部分 rebase 操作从最近 30 个提交中选择，cherry 搬移可输入 commit 或 `A..B` 区间。

@@ -1541,6 +1541,20 @@ pub fn perl_pick_editor(abbrev: &str, replacement: &str) -> String {
     format!("perl -i -p -e '++$x if not $x and s/^pick {abbrev}/{replacement} {abbrev}/'")
 }
 
+/// S quoted for sh (single quotes).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// TEXT in a temporary file (removed when dropped).
+fn write_temp(text: &str) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut f = tempfile::NamedTempFile::new().context("temporary todo file")?;
+    f.write_all(text.as_bytes()).context("writing the todo file")?;
+    f.flush()?;
+    Ok(f)
+}
+
 impl Git {
     /// magit-rev-ancestor-p: `git merge-base --is-ancestor <a> <b>`
     pub fn is_ancestor(&self, a: &str, b: &str) -> bool {
@@ -1621,13 +1635,77 @@ impl Git {
     }
 
     fn rebase_i(&self, commit: &str, args: &[String], todo: Editor, message: Editor, global: &[&str]) -> Result<()> {
+        let strs = self.rebase_i_args(commit, args, global)?;
+        let strs: Vec<&str> = strs.iter().map(|s| s.as_str()).collect();
+        self.git_with_editors(todo, message, &strs)
+    }
+
+    /// The arguments of `git rebase -i` for COMMIT and later commits.
+    fn rebase_i_args(&self, commit: &str, args: &[String], global: &[&str]) -> Result<Vec<String>> {
         let since = self.rebase_since(commit)?;
         let mut a: Vec<String> = global.iter().map(|s| s.to_string()).collect();
         a.extend(["rebase".to_string(), "-i".to_string()]);
         a.extend(args.iter().filter(|x| *x != "--interactive").cloned());
         a.push(since.unwrap_or_else(|| "--root".into()));
-        let strs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
-        self.git_with_editors(todo, message, &strs)
+        Ok(a)
+    }
+
+    /// The todo list `git rebase -i` would offer for COMMIT and later
+    /// commits, without rebasing: the sequence editor saves a copy of the
+    /// todo file and fails, so git gives up before touching HEAD (an
+    /// autostash is applied back).  This is the first half of editing the
+    /// todo in xagit's git-rebase-mode; `rebase_interactive_todo` is the
+    /// second.
+    pub fn rebase_todo_capture(&self, commit: &str, args: &[String]) -> Result<String> {
+        let a = self.rebase_i_args(commit, args, &[])?;
+        let file = tempfile::NamedTempFile::new().context("temporary todo file")?;
+        let path = file.path().to_string_lossy().into_owned();
+        let editor = format!("sh -c 'cp \"$1\" {}; exit 1' xagit-capture", sh_quote(&path));
+        let strs: Vec<&str> = a.iter().map(String::as_str).collect();
+        let out = std::process::Command::new("git")
+            .args(["-c", "color.ui=false"])
+            .args(&strs)
+            .env("GIT_SEQUENCE_EDITOR", &editor)
+            .env("LC_ALL", "C")
+            .current_dir(&self.toplevel)
+            .output()
+            .with_context(|| format!("could not run git {}", strs.join(" ")))?;
+        let todo = std::fs::read_to_string(&path).unwrap_or_default();
+        if todo.is_empty() {
+            // git failed before running the editor (dirty tree, bad ref...)
+            bail!("{}", super::exec::failure(&self.toplevel, &strs, &out));
+        }
+        Ok(todo)
+    }
+
+    /// `git rebase -i` for COMMIT with TODO as the todo list (written by
+    /// the sequence editor) and MESSAGE editing the commit messages.
+    pub fn rebase_interactive_todo(&self, commit: &str, args: &[String], todo: &str, message: Editor) -> Result<()> {
+        let file = write_temp(todo)?;
+        let editor = format!("cp {}", sh_quote(&file.path().to_string_lossy()));
+        self.rebase_i(commit, args, Editor::Command(&editor), message, &[])
+    }
+
+    /// The remaining todo list of the rebase in progress
+    /// (`rebase-merge/git-rebase-todo`, as `git rebase --edit-todo` offers
+    /// it, with the instructions).
+    pub fn rebase_todo_in_progress(&self) -> Result<String> {
+        if !self.rebase_in_progress() {
+            bail!("No rebase in progress");
+        }
+        let file = tempfile::NamedTempFile::new().context("temporary todo file")?;
+        let path = file.path().to_string_lossy().into_owned();
+        // copy the todo out and leave it unchanged (a successful no-op edit)
+        let cap = format!("sh -c 'cp \"$1\" {}' xagit-capture", sh_quote(&path));
+        self.git_with_editors(Editor::Command(&cap), Editor::Accept, &["rebase", "--edit-todo"])?;
+        Ok(std::fs::read_to_string(&path).unwrap_or_default())
+    }
+
+    /// `git rebase --edit-todo` with TODO written as the new todo list.
+    pub fn rebase_edit_todo_with(&self, todo: &str) -> Result<()> {
+        let file = write_temp(todo)?;
+        let editor = format!("cp {}", sh_quote(&file.path().to_string_lossy()));
+        self.rebase_edit_todo(Editor::Command(&editor))
     }
 
     /// magit-rebase-interactive ("r i"): rebase COMMIT and later commits,

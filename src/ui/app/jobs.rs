@@ -142,6 +142,12 @@ impl BufferSpec {
             BufferMode::Stashes { refname } => build_stashes(git, refname, margin),
             BufferMode::Cherry { head, upstream } => build_cherry(git, head, upstream, margin),
             BufferMode::File { rev, file, blame } => build_file(git, rev, file, blame.as_ref()),
+            // the list is drawn from App::rebase_todo
+            BufferMode::RebaseTodo => {
+                let mut buf = StatusBuffer::default();
+                buf.title = "git-rebase-todo".into();
+                buf
+            }
             BufferMode::Refs { upstream } => {
                 let show = |r: &str| self.options.show_ref(r);
                 build_refs(git, upstream, &self.buf_args, self.refs_counts, &self.vis, margin, &show)
