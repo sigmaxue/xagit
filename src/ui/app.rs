@@ -2007,6 +2007,16 @@ impl App {
             self.set_msg(&format!("{} is undefined", key.label()));
             return Ok(());
         }
+        // magit-stash-section-map remaps magit-cherry-pick ("A") to
+        // magit-stash-pop on a stash section.  Lowercase "a" is already
+        // remapped to stash-apply by apply_cmd.
+        if self.view_text.is_none()
+            && !key.ctrl
+            && key.code == "A"
+            && matches!(self.current_line().map(|l| &l.kind), Some(LineKind::Stash { .. }))
+        {
+            return self.run_command("stash-pop", &BTreeMap::new());
+        }
         match binding {
             Binding::Bury => self.mode_bury_buffer(),
             Binding::Refresh => {
@@ -3359,13 +3369,10 @@ impl App {
                 _ => self.branch_delete()?,
             },
             "discard" => self.discard_cmd()?,
-            "untrack" => {
-                if let Some((_, path)) = self.pick_current_file_or_section() {
-                    g!().untrack(&path)?;
-                    self.set_msg("untracked");
-                    self.refresh();
-                }
-            }
+            // `K` is magit-file-untrack: the full command (region,
+            // confirmation, "Already untracked" and prefix --force) is
+            // implemented by file-untrack, also bound in file-dispatch.
+            "untrack" => self.file_command("file-untrack")?,
             "diff-show-or-scroll-up" => self.show_or_scroll(true)?,
             "diff-show-or-scroll-down" => self.show_or_scroll(false)?,
             "diff-more-context" | "diff-less-context" => {
