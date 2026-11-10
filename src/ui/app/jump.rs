@@ -43,6 +43,17 @@ impl App {
         self.children(0).into_iter().find(|&s| self.sec(s).ident == ident)
     }
 
+    /// The section of a jumper with IDENT. "Recent commits" is where
+    /// "Unpushed to @{upstream}" would be: magit-insert-unpushed-to-
+    /// upstream-or-recent inserts it as an `unpushed` "@{upstream}.."
+    /// section, so magit-jump-to-unpushed-to-upstream goes there.
+    fn jumper_section(&self, ident: &str) -> Option<usize> {
+        self.top_section(ident).or_else(|| match ident {
+            "unpushed:@{upstream}.." => self.top_section("recent"),
+            _ => None,
+        })
+    }
+
     /// The states of the magit-status-jump suffixes: (key, description,
     /// inapt).
     pub(super) fn status_jump_states(&self) -> Vec<(String, String, bool)> {
@@ -60,7 +71,7 @@ impl App {
                 } else {
                     heading
                 };
-                (k.to_string(), desc.to_string(), self.top_section(ident).is_none())
+                (k.to_string(), desc.to_string(), self.jumper_section(ident).is_none())
             })
             .collect()
     }
@@ -81,7 +92,7 @@ impl App {
         let Some((_, heading, ident)) = JUMPERS.iter().find(|(c, _, _)| *c == cmd) else {
             return;
         };
-        let Some(s) = self.top_section(ident) else {
+        let Some(s) = self.jumper_section(ident) else {
             self.set_msg(&format!("Section \"{heading}\" wasn't found"));
             return;
         };

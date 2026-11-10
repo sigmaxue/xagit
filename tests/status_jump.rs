@@ -33,7 +33,9 @@ fn menu_and_inapt_jumpers() {
     let p = app.transient_popup().join("\n");
     // no stashes and no upstream: inapt
     assert!(p.contains("(z Stashes)") && p.contains("n Untracked files"), "{p}");
-    assert!(p.contains("(fu Unpulled from @{upstream})") && p.contains("(pu Recent commits)"), "{p}");
+    assert!(p.contains("(fu Unpulled from @{upstream})"), "{p}");
+    // Recent commits takes the place of the unpushed commits
+    assert!(p.contains("pu Recent commits") && !p.contains("(pu Recent commits)"), "{p}");
     app.press("z").unwrap();
     assert_eq!(app.message(), "Inapt command: `z' (Use `C-g' to abort, `?' for help) [magit-jump-to-stashes]");
     assert_eq!(app.current_menu(), Some("status-jump-menu"));
@@ -51,6 +53,26 @@ fn jump_to_sections() {
     // two keys
     press(&mut app, &["j", "f"]);
     assert_eq!(app.current_menu(), Some("status-jump-menu"));
+    // no upstream: pu goes to Recent commits
+    press(&mut app, &["C-g", "j", "p", "u"]);
+    assert_eq!(app.current_menu(), None);
+    assert!(app.point_text().starts_with("Recent commits"), "{} / {}", app.point_text(), app.message());
+}
+
+#[test]
+fn jump_to_recent_commits_when_upstream_is_merged() {
+    let (_td, g) = repo();
+    g.git_interactive(&["branch", "base"]).unwrap();
+    g.git_interactive(&["branch", "--set-upstream-to=base"]).unwrap();
+    let mut app = App::new(g);
+    press(&mut app, &["j", "p", "u"]);
+    assert!(app.point_text().starts_with("Recent commits"), "{} / {}", app.point_text(), app.message());
+    // with a prefix argument it is expanded too
+    press(&mut app, &["j", "C-u", "p", "u"]);
+    assert!(app.point_text().starts_with("Recent commits"), "{}", app.point_text());
+    let lines: Vec<String> = app.visible_lines().iter().map(|l| l.text.clone()).collect();
+    let i = lines.iter().position(|l| l.starts_with("Recent commits")).unwrap();
+    assert!(lines.get(i + 1).is_some_and(|l| !l.is_empty()), "{lines:?}");
 }
 
 #[test]
