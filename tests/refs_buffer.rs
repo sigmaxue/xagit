@@ -111,6 +111,16 @@ fn detached_head_and_tracking() {
     assert_eq!(t[0], "Branches (3)");
     assert_eq!(t[1], "@ (detached)      topic work");
     assert_eq!(t[2], "  master1>      <1origin/master local work");
+    // the detached HEAD line is a Commit section, but its "@" and
+    // "(detached)" are highlighted like a Ref's focus column / branch
+    let line = &app.visible_lines()[1];
+    let faces = &line.faces;
+    use xagit_lib::ui::theme::Face;
+    assert!(faces.iter().any(|&(a, b, f)| a == 0 && b == 1 && f == Face::Head), "@ not highlighted: {faces:?}");
+    assert!(
+        faces.iter().any(|&(a, b, f)| line.text[a..b] == *"(detached)" && f == Face::BranchCurrent),
+        "(detached) not emphasized: {faces:?}"
+    );
 }
 
 #[test]

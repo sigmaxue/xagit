@@ -5,6 +5,7 @@
 //! as its body.
 
 use super::logbuf::{cherry_commits, now, Margin};
+use super::theme::Face;
 use super::view::{Builder, LineKind, StatusBuffer, Visibility};
 use crate::git::Git;
 
@@ -276,11 +277,23 @@ impl Refs<'_> {
                     let kind = LineKind::Ref { kind: RefKind::Local, name: b.clone() };
                     self.ref_section(&ref_ident(RefKind::Local, b), heading, kind, b, true);
                 }
-                // the detached HEAD: a commit section
+                // the detached HEAD: a commit section.  paint_commit doesn't
+                // know about the focus column, so mark the "@" and the
+                // "(detached)" placeholder like paint_ref marks a branch.
                 None => {
                     let hash = self.g.git_string(&["rev-parse", "HEAD"]).unwrap_or_default();
                     let kind = LineKind::Commit { section: "refs".into(), hash: hash.clone() };
-                    self.b.line(heading, kind, &format!("commit:{hash}"), true, 1);
+                    self.b.line(heading.clone(), kind, &format!("commit:{hash}"), true, 1);
+                    let mark = heading.find('@');
+                    let name = heading.find("(detached)");
+                    let mut faces = Vec::new();
+                    if let Some(i) = mark {
+                        faces.push((i, i + 1, Face::Head));
+                    }
+                    if let Some(i) = name {
+                        faces.push((i, i + "(detached)".len(), Face::BranchCurrent));
+                    }
+                    self.b.faces(faces);
                     self.ref_margin("HEAD");
                 }
             }

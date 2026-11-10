@@ -167,9 +167,18 @@ fn refs_buffer_shows_worktrees_with_branches() {
     // the branch (else the abbreviated commit), aligned, then the directory
     let short = g.rev_short("HEAD");
     let width = short.len().max("master".len()).max("topic".len()) + 1;
-    assert!(t.iter().any(|l| *l == format!("{:<width$}{}/", "master", base.join("repo").display())), "{t:?}");
-    assert!(t.iter().any(|l| l.ends_with("../wt-topic/")), "{t:?}");
-    assert!(t.iter().any(|l| l.ends_with("../wt-detached/")), "{t:?}");
+    assert!(t.iter().any(|l| *l == format!("@ {:<width$}{}/", "master", base.join("repo").display())), "{t:?}");
+    assert!(t.iter().any(|l| l.starts_with("  ") && l.ends_with("../wt-topic/")), "{t:?}");
+    assert!(t.iter().any(|l| l.starts_with("  ") && l.ends_with("../wt-detached/")), "{t:?}");
+    // the current worktree's "@" and branch are highlighted
+    let cur = app
+        .visible_lines()
+        .iter()
+        .find(|l| matches!(l.kind, xagit_lib::ui::view::LineKind::Worktree { .. }) && l.text.starts_with("@ "))
+        .expect("the @ worktree line");
+    let faces = &cur.faces;
+    assert!(faces.iter().any(|&(a, b, f)| a == 0 && b == 1 && f == xagit_lib::ui::theme::Face::Head), "@ not highlighted: {faces:?}");
+    assert!(faces.iter().any(|&(a, _, f)| a == 2 && f == xagit_lib::ui::theme::Face::BranchCurrent), "branch not emphasized: {faces:?}");
     // a single worktree: no Worktrees section (like magit-insert-worktrees)
     let (_td2, g2, _) = repo();
     let mut app2 = App::new(g2);

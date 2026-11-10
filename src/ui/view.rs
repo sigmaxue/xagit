@@ -1178,7 +1178,7 @@ pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git) {
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let here = canon(&g.toplevel);
     let current = g.current_branch();
-    let cols: Vec<(String, super::theme::Face, &WorktreeInfo)> = worktrees
+    let cols: Vec<(String, super::theme::Face, bool, &WorktreeInfo)> = worktrees
         .iter()
         .map(|w| {
             let this = canon(std::path::Path::new(&w.path)) == here;
@@ -1189,25 +1189,29 @@ pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git) {
                     } else {
                         super::theme::Face::BranchLocal
                     };
-                    (br.clone(), face, w)
+                    (br.clone(), face, this, w)
                 }
                 (None, Some(h)) if !w.bare => {
                     let face = if this { super::theme::Face::BranchCurrent } else { super::theme::Face::Hash };
-                    (g.rev_short(h), face, w)
+                    (g.rev_short(h), face, this, w)
                 }
-                _ => ("(bare)".to_string(), super::theme::Face::Dim, w),
+                _ => ("(bare)".to_string(), super::theme::Face::Dim, this, w),
             }
         })
         .collect();
-    let align = cols.iter().map(|(h, _, _)| super::width::str_width(h)).max().unwrap_or(0) + 1;
+    let align = cols.iter().map(|(h, _, _, _)| super::width::str_width(h)).max().unwrap_or(0) + 1;
     let n = cols.len();
     let kind = LineKind::SectionHeader { section: "worktrees".into(), n };
+    // a focus column, like Branches: "@" marks the worktree of this buffer
+    let has_focus = cols.iter().any(|(_, _, this, _)| *this);
     if b.heading(format!("Worktrees ({n})"), kind, "worktrees", 0, true) {
-        for (head, face, w) in cols {
+        for (head, face, this, w) in cols {
             let rel = relative_name(&w.path, &here);
             let abs = abbreviate_home(&w.path);
             let shown = if super::width::str_width(&rel) > super::width::str_width(&abs) || rel == "./" { abs } else { rel };
-            let mut text = format!("{head}{}{shown}", " ".repeat(align.saturating_sub(super::width::str_width(&head))));
+            let mark = if has_focus { if this { "@" } else { " " } } else { "" };
+            let lead = if has_focus { format!("{mark} ") } else { String::new() };
+            let mut text = format!("{lead}{head}{}{shown}", " ".repeat(align.saturating_sub(super::width::str_width(&head))));
             if let Some(r) = &w.locked {
                 text.push_str(if r.is_empty() { " (locked)" } else { " (locked: " });
                 if !r.is_empty() {
@@ -1219,8 +1223,13 @@ pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git) {
                 text.push_str(" (prunable)");
             }
             let id = format!("worktrees/{}", w.path);
+            let off = lead.len();
             b.line(text, LineKind::Worktree { path: w.path.clone() }, &id, true, 1);
-            b.faces(vec![(0, head.len(), face)]);
+            let mut faces = vec![(off, off + head.len(), face)];
+            if this && has_focus {
+                faces.push((0, 1, super::theme::Face::Head));
+            }
+            b.faces(faces);
         }
     }
     b.blank();
