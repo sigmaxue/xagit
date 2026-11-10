@@ -407,18 +407,6 @@ impl Builder {
 /// magit-status-margin (shown for the commits and stashes), LOG_ARGS the
 /// buffer's log arguments (magit-buffer-log-args).
 pub fn build_status(g: &Git, st: &Status, diff_args: &[String], log_args: &[String], margin: &Margin) -> StatusBuffer {
-    build_status_with(g, st, diff_args, log_args, margin, false)
-}
-
-/// build_status, with magit-insert-worktrees in the sections when WORKTREES.
-pub fn build_status_with(
-    g: &Git,
-    st: &Status,
-    diff_args: &[String],
-    log_args: &[String],
-    margin: &Margin,
-    worktrees: bool,
-) -> StatusBuffer {
     let mut b = Builder::new();
     b.log_margin = margin.clone();
     let unstaged = g.diff_sections(false, diff_args).unwrap_or_default();
@@ -434,9 +422,6 @@ pub fn build_status_with(
     insert_changes(&mut b, "unstaged", "Unstaged changes", &st.unstaged, &unstaged);
     insert_changes(&mut b, "staged", "Staged changes", &st.staged, &staged);
     insert_stashes(&mut b, g, &st.stashes);
-    if worktrees {
-        insert_worktrees(&mut b, g, false);
-    }
     insert_log_sections(&mut b, g, log_args);
 
     while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
@@ -1180,13 +1165,14 @@ fn abbreviate_home(path: &str) -> String {
     }
 }
 
-/// magit-insert-worktrees: a section for each worktree, its branch (the
-/// current one emphasized), else its abbreviated commit, else "(bare)",
-/// and its directory (relative unless the absolute name is shorter).
-/// Nothing when there is only one worktree, unless ALWAYS.
-pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git, always: bool) {
+/// The Worktrees section shown next to Branches in the refs buffer
+/// (`y`): each worktree's branch (the current one emphasized), else its
+/// abbreviated commit, else "(bare)", and its directory (relative unless
+/// the absolute name is shorter).
+pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git) {
     let worktrees = list_worktrees(g);
-    if worktrees.len() < 2 && !always {
+    // like magit-insert-worktrees: nothing when there is only one
+    if worktrees.len() < 2 {
         return;
     }
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
@@ -1238,17 +1224,6 @@ pub(crate) fn insert_worktrees(b: &mut Builder, g: &Git, always: bool) {
         }
     }
     b.blank();
-}
-
-/// The worktrees buffer of `Z l` (an xagit addition): the worktree
-/// sections, also when there is only one.
-pub fn build_worktrees(g: &Git) -> StatusBuffer {
-    let mut b = Builder::new();
-    insert_worktrees(&mut b, g, true);
-    while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
-        b.lines.pop();
-    }
-    StatusBuffer::new(b.lines, Vec::new(), "Worktrees".into())
 }
 
 /// magit-insert-stashes ("Stashes (N)", hidden by default)

@@ -49,7 +49,7 @@ fn layout() {
     let (_td, g, _) = repo();
     let mut app = App::new(g.clone());
     app.press("Z").unwrap();
-    assert_eq!(app.menu_keys(), ["b", "c", "m", "k", "g", "l"]);
+    assert_eq!(app.menu_keys(), ["b", "c", "m", "k", "g"]);
     let p = app.transient_popup().join("\n");
     assert!(p.contains("b worktree") && p.contains("c branch and worktree") && p.contains("g Visit worktree"), "{p}");
 }
@@ -153,40 +153,40 @@ fn three_worktrees() -> (TempDir, Git, std::path::PathBuf) {
     (td, g, base)
 }
 
+/// `y` shows Worktrees and Branches in the same refs buffer.
 #[test]
-fn list_buffer() {
+fn refs_buffer_shows_worktrees_with_branches() {
     let (_td, g, base) = three_worktrees();
     let mut app = App::new(g.clone());
-    press(&mut app, &["Z", "l"]);
-    assert_eq!(app.mode(), &BufferMode::Worktrees);
+    app.press("y").unwrap();
+    assert!(matches!(app.mode(), BufferMode::Refs { .. }));
     let t = texts(&app);
-    assert_eq!(t[0], "Worktrees (3)", "{t:?}");
-    // the branch (else the abbreviated commit), aligned, then the
-    // directory relative to this worktree
+    let branches = t.iter().position(|l| l.starts_with("Branches")).expect("Branches");
+    let worktrees = t.iter().position(|l| l == "Worktrees (3)").expect("Worktrees");
+    assert!(worktrees > branches, "Worktrees must follow Branches: {t:?}");
+    // the branch (else the abbreviated commit), aligned, then the directory
     let short = g.rev_short("HEAD");
     let width = short.len().max("master".len()).max("topic".len()) + 1;
-    // the current worktree by its absolute name (its relative name is "./")
-    assert_eq!(t[1], format!("{:<width$}{}/", "master", base.join("repo").display()), "{t:?}");
-    // the others in git's order
-    let mut rest = t[2..4].to_vec();
-    rest.sort();
-    let mut want = vec![format!("{:<width$}../wt-topic/", "topic"), format!("{:<width$}../wt-detached/", short)];
-    want.sort();
-    assert_eq!(rest, want, "{t:?}");
-    // a single worktree is listed too
+    assert!(t.iter().any(|l| *l == format!("{:<width$}{}/", "master", base.join("repo").display())), "{t:?}");
+    assert!(t.iter().any(|l| l.ends_with("../wt-topic/")), "{t:?}");
+    assert!(t.iter().any(|l| l.ends_with("../wt-detached/")), "{t:?}");
+    // a single worktree: no Worktrees section (like magit-insert-worktrees)
     let (_td2, g2, _) = repo();
     let mut app2 = App::new(g2);
-    press(&mut app2, &["Z", "l"]);
-    assert_eq!(texts(&app2)[..2].len(), 2);
-    assert_eq!(texts(&app2)[0], "Worktrees (1)");
+    app2.press("y").unwrap();
+    assert!(!texts(&app2).iter().any(|l| l.starts_with("Worktrees")), "{:?}", texts(&app2));
+    // Z l is gone
+    let mut app3 = App::new(g.clone());
+    app3.press("Z").unwrap();
+    assert_eq!(app3.menu_keys(), ["b", "c", "m", "k", "g"]);
 }
 
 #[test]
-fn list_buffer_locked_and_keys() {
+fn refs_worktree_keys() {
     let (_td, g, base) = three_worktrees();
     git(&g, &["worktree", "lock", "--reason", "usb", &base.join("wt-topic").to_string_lossy()]);
     let mut app = App::new(g.clone());
-    press(&mut app, &["Z", "l"]);
+    app.press("y").unwrap();
     assert!(texts(&app).iter().any(|l| l.ends_with("../wt-topic/ (locked: usb)")), "{:?}", texts(&app));
     // k on a locked worktree refuses
     goto(&mut app, "wt-topic");
@@ -200,7 +200,8 @@ fn list_buffer_locked_and_keys() {
     app.press("k").unwrap();
     assert!(!base.join("wt-detached").exists(), "{}", app.message());
     assert_eq!(worktrees(&g).len(), 2);
-    // the list was refreshed
+    // the refs buffer was refreshed in place
+    assert!(matches!(app.mode(), BufferMode::Refs { .. }));
     assert!(!texts(&app).iter().any(|l| l.contains("wt-detached")), "{:?}", texts(&app));
     // RET: the status of the worktree at point, without asking
     goto(&mut app, "wt-topic");
@@ -209,31 +210,11 @@ fn list_buffer_locked_and_keys() {
     assert_eq!(app.prompts().len(), n);
     assert_eq!(app.mode(), &BufferMode::Status);
     assert_eq!(canon(app.toplevel()), base.join("wt-topic"));
-}
-
-#[test]
-fn status_section_when_enabled() {
-    let (_td, g, base) = three_worktrees();
-    // not inserted by default (magit-status-sections-hook)
-    let mut app = App::new(g.clone());
-    assert!(!texts(&app).iter().any(|l| l.starts_with("Worktrees")));
-    let (o, e) = Options::parse("magit-insert-worktrees t");
-    assert!(e.is_empty(), "{e:?}");
-    app.set_options(o.clone());
-    app.refresh();
-    assert!(texts(&app).iter().any(|l| l == "Worktrees (3)"), "{:?}", texts(&app));
-    // only one worktree: nothing, like magit-insert-worktrees
-    let (_td2, g2, _) = repo();
-    let mut app2 = App::new(g2);
-    app2.set_options(o);
-    app2.refresh();
-    assert!(!texts(&app2).iter().any(|l| l.starts_with("Worktrees")));
-    // RET on the heading opens the list buffer, g on a worktree there
-    goto(&mut app, "Worktrees (3)");
-    app.press("RET").unwrap();
-    assert_eq!(app.mode(), &BufferMode::Worktrees);
-    // Z g / m default to the worktree at point
+    // Z g defaults to the worktree at point in the refs buffer
+    app.press("y").unwrap();
     goto(&mut app, "wt-topic");
+    let n = app.prompts().len();
     press(&mut app, &["Z", "g"]);
+    assert_eq!(app.prompts().len(), n);
     assert_eq!(canon(app.toplevel()), base.join("wt-topic"));
 }

@@ -103,6 +103,8 @@ pub fn build_refs(
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     r.branch_description();
     r.local_branches(&args);
+    // Worktrees are shown together with Branches in the refs buffer (`y`)
+    super::view::insert_worktrees(&mut r.b, g);
     r.remote_branches(&args);
     r.tags(&args);
     let deferred = std::mem::take(&mut r.deferred);

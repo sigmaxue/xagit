@@ -141,8 +141,6 @@ pub struct Options {
     pub reshelve_since_committer_only: bool,
     /// magit-submodule-remove-trash-gitdirs
     pub submodule_remove_trash_gitdirs: bool,
-    /// magit-insert-worktrees is a member of magit-status-sections-hook
-    pub status_worktrees: bool,
     /// magit-read-worktree-directory-function
     pub read_worktree_directory: WorktreeDirectory,
     /// magit-read-worktree-offsite-directory
@@ -222,7 +220,6 @@ impl Default for Options {
             remote_add_set_push_default: SetPushDefault::AskIfUnset,
             reshelve_since_committer_only: false,
             submodule_remove_trash_gitdirs: false,
-            status_worktrees: false,
             read_worktree_directory: WorktreeDirectory::Sibling,
             read_worktree_offsite_directory: match std::env::var_os("XDG_DATA_HOME") {
                 Some(d) => std::path::PathBuf::from(d).join("wtrees"),
@@ -370,8 +367,6 @@ impl Options {
                 "magit-submodule-remove-trash-gitdirs" => {
                     boolean(&values).map(|b| o.submodule_remove_trash_gitdirs = b).err()
                 }
-                // magit-status-sections-hook with magit-insert-worktrees
-                "magit-insert-worktrees" => boolean(&values).map(|b| o.status_worktrees = b).err(),
                 "enable-command" | "disable-command" => match values.as_slice() {
                     [c] => {
                         o.put_disabled(c, name == "disable-command");

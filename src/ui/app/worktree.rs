@@ -230,8 +230,6 @@ impl App {
                 };
                 self.visit_directory(std::path::Path::new(&worktree));
             }
-            // `git worktree list` in a buffer of worktree sections
-            "worktree-list" => self.setup_buffer(BufferMode::Worktrees, Vec::new()),
             _ => {}
         }
         Ok(())

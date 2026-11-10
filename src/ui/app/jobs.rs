@@ -125,14 +125,7 @@ impl BufferSpec {
         match &self.mode {
             BufferMode::Status => {
                 let st = Status::load(git);
-                crate::ui::view::build_status_with(
-                    git,
-                    &st,
-                    &self.status_diff_args,
-                    &self.status_log_args,
-                    margin,
-                    self.options.status_worktrees,
-                )
+                build_status(git, &st, &self.status_diff_args, &self.status_log_args, margin)
             }
             BufferMode::Diff(spec) => build_diff(git, spec, &self.buf_args),
             BufferMode::Revision { rev, files } => build_revision(git, rev, &self.buf_args, files),
@@ -149,7 +142,6 @@ impl BufferSpec {
             BufferMode::Stashes { refname } => build_stashes(git, refname, margin),
             BufferMode::Cherry { head, upstream } => build_cherry(git, head, upstream, margin),
             BufferMode::File { rev, file, blame } => build_file(git, rev, file, blame.as_ref()),
-            BufferMode::Worktrees => crate::ui::view::build_worktrees(git),
             // the list is drawn from App::rebase_todo
             BufferMode::RebaseTodo => {
                 let mut buf = StatusBuffer::default();
