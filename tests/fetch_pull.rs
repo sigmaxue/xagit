@@ -281,8 +281,12 @@ fn incompatible_arguments() {
     app.script_answers(&["false"]);
     press(&mut app, &["-", "r"]);
     assert_eq!(app.active_switches(), ["--ff-only", "--rebase=false"]);
+    // a :choices option set is unset by its key
+    press(&mut app, &["-", "r"]);
+    assert_eq!(app.active_switches(), ["--ff-only"]);
     app.script_answers(&["merges"]);
     press(&mut app, &["-", "r"]);
+    assert_eq!(app.prompts().last().unwrap(), "--rebase=");
     assert_eq!(app.active_switches(), ["--rebase=merges"]);
     app.press("C-g").unwrap();
     // merge

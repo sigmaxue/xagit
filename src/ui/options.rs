@@ -25,6 +25,8 @@
 //! magit-branch-adjust-remote-upstream-alist origin/master (master next maint)
 //! magit-branch-adjust-remote-upstream-alist origin/maint \`hotfix/
 //! magit-branch-name-suggestions feature/ fix/
+//! magit-push-options skip-ci ci.skip
+//! magit-openpgp-default-signing-key 0123ABCD...
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -43,7 +45,8 @@
 //! magit-branch-adjust-remote-upstream-alist line adds an entry: the
 //! upstream and a regexp, or a parenthesized list of the branches not
 //! using it. magit-branch-prefer-remote-upstream and
-//! magit-branch-name-suggestions take a list (or `nil`).
+//! magit-branch-name-suggestions take a list (or `nil`), as does
+//! magit-push-options (the choices of `P -o`).
 
 use super::regexp::Regexp;
 use std::collections::BTreeMap;
@@ -123,6 +126,10 @@ pub struct Options {
     pub branch_adjust_remote_upstream: Vec<(String, UpstreamRule)>,
     /// magit-branch-name-suggestions
     pub branch_name_suggestions: Vec<String>,
+    /// magit-push-options
+    pub push_options: Vec<String>,
+    /// magit-openpgp-default-signing-key (a fingerprint)
+    pub openpgp_default_signing_key: Option<String>,
 }
 
 /// The RULE of an entry of magit-branch-adjust-remote-upstream-alist.
@@ -165,6 +172,8 @@ impl Default for Options {
             branch_prefer_remote_upstream: Vec::new(),
             branch_adjust_remote_upstream: Vec::new(),
             branch_name_suggestions: Vec::new(),
+            push_options: vec!["skip-ci".into(), "ci.skip".into()],
+            openpgp_default_signing_key: None,
         }
     }
 }
@@ -299,6 +308,14 @@ impl Options {
                 }
                 "magit-branch-name-suggestions" => {
                     o.branch_name_suggestions = list(&values);
+                    None
+                }
+                "magit-push-options" => {
+                    o.push_options = list(&values);
+                    None
+                }
+                "magit-openpgp-default-signing-key" => {
+                    o.openpgp_default_signing_key = list(&values).into_iter().next();
                     None
                 }
                 "magit-branch-adjust-remote-upstream-alist" => match values.as_slice() {

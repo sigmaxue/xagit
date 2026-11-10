@@ -1345,19 +1345,6 @@ impl Git {
 
     // ---- rebase (magit-rebase)
 
-    /// magit-rebase-onto-pushremote ("r p"): `git rebase <args> <pushremote>/<branch>`
-    pub fn rebase_pushremote(&self, args: &[String]) -> Result<String> {
-        let Some(branch) = self.current_branch() else {
-            bail!("no current branch (detached HEAD)");
-        };
-        let Some(remote) = self.push_remote_of(&branch) else {
-            bail!("no push-remote configured for {branch} (set it with b C p)");
-        };
-        let target = format!("{remote}/{branch}");
-        self.rebase(&target, args)?;
-        Ok(target)
-    }
-
     /// magit-rebase-autosquash ("r f"): `git rebase -i --autosquash --keep-empty
     /// [args] <base>`, with the todo list accepted unchanged.
     pub fn rebase_autosquash_with(&self, base: &str, args: &[String]) -> Result<()> {
@@ -1572,6 +1559,27 @@ impl Git {
     /// magit-rev-abbrev
     pub fn abbrev(&self, rev: &str) -> Result<String> {
         Ok(self.git_string(&["rev-parse", "--short", rev])?.trim().to_string())
+    }
+
+    /// magit-main-branch with REMOTE: the branch `refs/remotes/REMOTE/HEAD`
+    /// refers to, else REMOTE/B for the first B of `init.defaultBranch`,
+    /// main, master, trunk and development REMOTE has.
+    pub fn remote_main_branch(&self, remote: &str) -> Option<String> {
+        if let Some(b) = self
+            .git_string(&["symbolic-ref", "-q", "--short", &format!("refs/remotes/{remote}/HEAD")])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(b);
+        }
+        let branches = self.remote_branches();
+        let configured = self.git_string(&["config", "init.defaultBranch"]).ok().map(|s| s.trim().to_string());
+        configured
+            .into_iter()
+            .chain(["main", "master", "trunk", "development"].map(String::from))
+            .map(|b| format!("{remote}/{b}"))
+            .find(|b| branches.contains(b))
     }
 
     /// magit-main-branch: `init.defaultBranch`, else main/master/trunk/development.

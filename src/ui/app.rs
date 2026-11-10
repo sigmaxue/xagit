@@ -118,6 +118,8 @@ pub struct App {
     /// keys answering the question being read at once (y-or-n-p,
     /// read-char-choice): key code -> answer
     instant_keys: std::cell::RefCell<Vec<(String, String)>>,
+    /// the INITIAL-INPUT of the next question read
+    initial_input: std::cell::RefCell<Option<String>>,
     /// the rows of a help window shown above the minibuffer while a
     /// question is read (read-multiple-choice's help)
     minibuffer_above: std::cell::RefCell<Vec<String>>,
@@ -564,6 +566,7 @@ impl App {
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
             instant_keys: std::cell::RefCell::new(Vec::new()),
+            initial_input: std::cell::RefCell::new(None),
             minibuffer_above: std::cell::RefCell::new(Vec::new()),
             user_init_file: None,
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
@@ -1117,6 +1120,7 @@ impl App {
         table: Option<Completion>,
     ) -> Result<Option<String>> {
         self.prompts.borrow_mut().push(prompt.to_string());
+        let initial = self.initial_input.borrow_mut().take();
         if let Some(ans) = self.scripted.borrow_mut().pop_front() {
             return Ok(Some(ans));
         }
@@ -1129,6 +1133,9 @@ impl App {
         let mut ed = LineEditor::new(history, default.map(str::to_string));
         if let Some(t) = table {
             ed = ed.with_completion(t);
+        }
+        if let Some(i) = initial {
+            ed = ed.with_initial_input(&i);
         }
         if let Some(keys) = self.scripted_keys.borrow_mut().pop_front() {
             for k in &keys {
@@ -1831,6 +1838,7 @@ impl App {
         let no_levels = BTreeMap::new();
         let levels = self.options.suffix_levels.get(&prefix).unwrap_or(&no_levels);
         let dynamic = self.menu_suffix_states(&name);
+        let gpg_format = self.config("gpg.format");
         let preset: Vec<String> = match self.menus.get_mut(&name) {
             Some(m) => {
                 m.set_level(level, levels);
@@ -1838,6 +1846,16 @@ impl App {
                     if let Some((_, desc, shown)) = dynamic.iter().find(|(k, _, _)| *k == e.key) {
                         e.desc.clone_from(desc);
                         e.hidden |= !shown;
+                    }
+                    // magit:--gpg-sign: "Sign using " gpg.format
+                    if matches!(&e.action, Action::Option { arg, .. } if arg == "--gpg-sign=") {
+                        e.desc = format!("Sign using {}", gpg_format.as_deref().unwrap_or("openpgp"));
+                    }
+                    // magit-push:--push-option offers magit-push-options
+                    if let Action::Option { arg, reader: Reader::Multi(choices) } = &mut e.action {
+                        if arg == "--push-option=" {
+                            choices.clone_from(&self.options.push_options);
+                        }
                     }
                 }
                 preset.iter().filter(|a| !m.hidden_arg(a)).cloned().collect()
@@ -2199,10 +2217,42 @@ impl App {
                     top.1 = active;
                 }
             }
+            // :multi-value repeat: always read, the values set the initial
+            // input; empty unsets
+            Action::Option { arg, reader: Reader::Multi(choices) } => {
+                let old: Vec<String> =
+                    active.iter().filter(|(k, on)| **on && super::transient::option_matches(&arg, k)).map(|(k, _)| k.clone()).collect();
+                let initial: Vec<&str> = old.iter().map(|k| &k[arg.len()..]).collect();
+                if !initial.is_empty() {
+                    *self.initial_input.borrow_mut() = Some(initial.join(","));
+                }
+                let table = Completion { candidates: choices, require_match: false, multiple: true };
+                let Some(input) = self.read_line_hist(&arg, None, Hist::Infix(&arg), Some(table))? else {
+                    return Ok(());
+                };
+                for o in &old {
+                    active.remove(o);
+                }
+                let values: Vec<&str> = input.split(',').map(str::trim).filter(|v| !v.is_empty()).collect();
+                if !values.is_empty() {
+                    add_to_history(self.infix_history.borrow_mut().entry(arg.clone()).or_default(), &values.join(","), true);
+                }
+                for v in values {
+                    let value = format!("{arg}{v}");
+                    active.insert(value.clone(), true);
+                    super::transient::unset_incompatible(&menu, &entry, &value, &mut active);
+                }
+                if let Some(top) = self.stack.last_mut() {
+                    top.1 = active;
+                }
+            }
             Action::Option { arg, reader } => {
                 let old = entry.action.value_in(&active);
-                let is_choice = matches!(reader, Reader::Choices(_));
-                let new = if old.is_some() && !is_choice {
+                // transient-infix-read: a value set is unset, unless the
+                // infix has :always-read (magit-diff:--diff-algorithm and
+                // --diff-merges)
+                let always_read = matches!(arg.as_str(), "--diff-algorithm=" | "-Xdiff-algorithm=" | "--diff-merges=");
+                let new = if old.is_some() && !always_read {
                     None
                 } else {
                     match self.read_option(&arg, &reader)? {
@@ -2701,8 +2751,10 @@ impl App {
         let value = self.read_option_value(arg, reader)?;
         // transient-infix-read: the value read becomes the newest of the
         // infix's history
+        // magit-tag:--local-user has the :history-key magit:--gpg-sign
+        let key = if *reader == Reader::GpgKey { "--gpg-sign=" } else { arg };
         if let Some(Some(v)) = &value {
-            add_to_history(self.infix_history.borrow_mut().entry(arg.to_string()).or_default(), v, true);
+            add_to_history(self.infix_history.borrow_mut().entry(key.to_string()).or_default(), v, true);
         }
         Ok(value)
     }
@@ -2724,6 +2776,24 @@ impl App {
                         return Ok(None);
                     }
                 }
+            }
+            Reader::GpgKey => {
+                let Some(v) = self.read_gpg_signing_key(arg)? else {
+                    return Ok(None);
+                };
+                // only --gpg-sign has :allow-empty
+                if v.is_empty() && arg != "--gpg-sign=" {
+                    return Ok(None);
+                }
+                v
+            }
+            Reader::Pick(choices) => {
+                let table = Completion { candidates: choices.clone(), require_match: true, multiple: false };
+                let read = self.completing_read(arg, None, Hist::Infix(arg), Some(table))?;
+                let Some(v) = read.filter(|v| !v.is_empty()) else {
+                    return Ok(None);
+                };
+                v
             }
             Reader::FileTrace => {
                 let Some(file) = self.read_line_prompt("File", self.current_file().map(|(_, p)| p).as_deref())? else {
@@ -3090,90 +3160,8 @@ impl App {
             "fetch-from-pushremote" | "fetch-from-upstream" | "fetch-other" | "fetch-branch" | "fetch-refspec"
             | "fetch-all" | "fetch-modules" | "fetch-modules-run" | "pull-from-pushremote" | "pull-from-upstream"
             | "pull-into-upstream" | "pull-branch" => self.fetch_pull_command(cmd, &args)?,
-            "push-upstream" => {
-                match g!().push_upstream(&args) {
-                    Ok(()) => self.set_msg("pushed"),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-                self.refresh();
-            }
-            "push-other" | "push-other-branch" => {
-                let src = if cmd == "push-other" {
-                    match g!().current_branch() {
-                        Some(b) => b,
-                        None => {
-                            self.set_msg("cannot push: detached HEAD");
-                            return Ok(());
-                        }
-                    }
-                } else {
-                    let bs = g!().branches();
-                    let Some(b) = self.pick_rev("Push branch", &bs, None)?.cloned() else {
-                        return Ok(());
-                    };
-                    b
-                };
-                let default = g!().remotes().first().map(|r| format!("{r}/{src}"));
-                let Some(target) =
-                    self.read_rev(&format!("Push {src} to (remote/branch)"), default.as_deref())?
-                else {
-                    return Ok(());
-                };
-                let (remote, dst) = g!().tracked_of(&target);
-                if remote == "." {
-                    self.set_msg(&format!("not a remote branch: {target}"));
-                    return Ok(());
-                }
-                g!().push_refspec(&remote, &src, &dst, &args)?;
-                self.set_msg(&format!("pushed {src} to {target}"));
-                self.refresh();
-            }
-            "push-tag" => {
-                let remotes = g!().remotes();
-                let tags = g!().tags();
-                if let (Some(r), Some(t)) = (
-                    self.pick("Push tag to remote", &remotes, None)?,
-                    self.pick_rev("Tag", &tags, None)?,
-                ) {
-                    g!().push_tag(r, t)?;
-                    self.set_msg("tag pushed");
-                }
-                self.refresh();
-            }
-            "push-pushremote" => {
-                match g!().push_pushremote(&args) {
-                    Ok(r) => self.set_msg(&format!("pushed to {r}")),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-                self.refresh();
-            }
-            "push-tags" | "push-matching" | "push-refspecs" => {
-                let remotes = g!().remotes();
-                let default = g!()
-                    .current_branch()
-                    .and_then(|b| g!().upstream_of(&b))
-                    .map(|(r, _)| r)
-                    .filter(|r| r != ".");
-                let Some(remote) = self.pick("Push to remote", &remotes, default.as_deref())?.cloned() else {
-                    return Ok(());
-                };
-                let res = match cmd {
-                    "push-tags" => g!().push_tags(&remote, &args),
-                    "push-matching" => g!().push_matching(&remote, &args),
-                    _ => {
-                        let Some(specs) = self.read_line_prompt("Refspecs (space separated)", None)? else {
-                            return Ok(());
-                        };
-                        let specs: Vec<String> = specs.split_whitespace().map(str::to_string).collect();
-                        g!().push_refspecs(&remote, &specs, &args)
-                    }
-                };
-                match res {
-                    Ok(()) => self.set_msg(&format!("pushed to {remote}")),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-                self.refresh();
-            }
+            "push-current-to-pushremote" | "push-current-to-upstream" | "push-current" | "push-other" | "push-refspecs"
+            | "push-matching" | "push-tags" | "push-tag" | "push-notes-ref" => self.push_command(cmd, &args)?,
 
             // -------- merge / rebase
             "merge-plain" | "merge-nocommit" | "merge-squash" | "merge-editmsg" | "merge-preview" => {
@@ -3226,12 +3214,39 @@ impl App {
                 self.set_msg("merge aborted");
                 self.refresh();
             }
-            "rebase-pushremote" => {
-                match g!().rebase_pushremote(&args) {
-                    Ok(t) => self.set_msg(&format!("rebased onto {t}")),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
+            // magit-rebase-onto-pushremote
+            "rebase-onto-pushremote" => {
+                let Some((branch, remote, _)) = self.select_push_remote("rebase onto that")? else {
+                    return Ok(());
+                };
+                let res = self.git.rebase(&format!("{remote}/{branch}"), &args);
+                self.after_rebase(res);
+            }
+            // magit-rebase-onto-upstream
+            "rebase-onto-upstream" => {
+                let Some(branch) = self.git.current_branch() else {
+                    self.set_msg("No branch is checked out");
+                    return Ok(());
+                };
+                let mut upstream = self.upstream_branch(&branch);
+                if self.prefix_arg.is_some() || upstream.is_none() {
+                    let prompt = format!("Set upstream of {branch} and rebase onto that");
+                    let Some(up) = self.read_upstream_branch(&branch, &prompt)? else {
+                        return Ok(());
+                    };
+                    self.git.git_interactive(&["branch", "--set-upstream-to", &up, &branch])?;
+                    upstream = Some(up);
                 }
-                self.refresh();
+                let res = self.git.rebase(&upstream.unwrap_or_default(), &args);
+                self.after_rebase(res);
+            }
+            // magit-rebase-branch
+            "rebase-branch" => {
+                let Some(target) = self.read_other_branch_or_commit("Rebase onto")? else {
+                    return Ok(());
+                };
+                let res = self.git.rebase(&target, &args);
+                self.after_rebase(res);
             }
             // magit-rebase-autosquash: the commits after the merge-base
             // with the upstream, else after one selected from the log
@@ -3242,23 +3257,6 @@ impl App {
                     self.log_select(SelectAction::RebaseAutosquash { args: args.clone() }, Some(msg), None);
                 }
             },
-            "rebase-upstream" | "rebase-other" => {
-                let bs = g!().branches();
-                if cmd == "rebase-upstream" {
-                    let branch = g!().current_branch().unwrap_or_else(|| "HEAD".into());
-                    let target = format!("{branch}@{{u}}");
-                    if g!().rev_parse(&target).is_ok() {
-                        g!().rebase(&target, &args)?;
-                        self.set_msg("rebased onto upstream");
-                    } else {
-                        self.set_msg("no upstream configured");
-                    }
-                } else if let Some(onto) = self.pick_rev("Rebase onto", &bs, None)? {
-                    g!().rebase(onto, &args)?;
-                    self.set_msg("rebased");
-                }
-                self.refresh();
-            }
             "rebase-continue" => {
                 g!().rebase_continue()?;
                 self.set_msg("rebase continued");
@@ -7134,6 +7132,59 @@ impl App {
         })
     }
 
+    /// The secret OpenPGP keys that can sign (`gpg --list-secret-keys`):
+    /// the fingerprints of their primary keys.
+    fn gpg_signing_keys(&self) -> Vec<String> {
+        let Ok(out) = std::process::Command::new("gpg").args(["--list-secret-keys", "--with-colons"]).output() else {
+            return Vec::new();
+        };
+        let mut keys: Vec<(String, bool)> = Vec::new();
+        let mut want_fpr = false;
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let f: Vec<&str> = line.split(':').collect();
+            match f[0] {
+                "sec" => {
+                    keys.push((String::new(), false));
+                    want_fpr = true;
+                }
+                "ssb" => want_fpr = false,
+                "fpr" if want_fpr => {
+                    if let Some(k) = keys.last_mut() {
+                        k.0 = f.get(9).unwrap_or(&"").to_string();
+                    }
+                    want_fpr = false;
+                }
+                _ => {}
+            }
+            if matches!(f[0], "sec" | "ssb") && f.get(11).is_some_and(|c| c.contains('s')) {
+                if let Some(k) = keys.last_mut() {
+                    k.1 = true;
+                }
+            }
+        }
+        keys.into_iter().filter(|(f, sign)| *sign && !f.is_empty()).map(|(f, _)| f).collect()
+    }
+
+    /// magit-read-gpg-signing-key: "" unless gpg.format is openpgp; the
+    /// only key, or magit-openpgp-default-signing-key, without asking
+    /// unless with a prefix argument; else one read (any input).
+    fn read_gpg_signing_key(&mut self, prompt: &str) -> Result<Option<String>> {
+        if !matches!(self.config("gpg.format").as_deref(), None | Some("openpgp")) {
+            return Ok(Some(String::new()));
+        }
+        let keys = self.gpg_signing_keys();
+        if self.prefix_arg.is_none() {
+            if keys.len() == 1 {
+                return Ok(keys.into_iter().next());
+            }
+            if let Some(d) = self.options.openpgp_default_signing_key.clone().filter(|d| keys.contains(d)) {
+                return Ok(Some(d));
+            }
+        }
+        let table = Completion { candidates: keys, require_match: false, multiple: false };
+        Ok(self.read_line_hist(prompt, None, Hist::Infix("--gpg-sign="), Some(table))?.map(|s| s.trim().to_string()))
+    }
+
     /// magit-remote-at-point: the remote section at point, or the remote
     /// of the remote branch section at point.
     fn remote_at_point(&self) -> Option<String> {
@@ -7243,24 +7294,25 @@ impl App {
     /// magit--select-push-remote: the current branch and its push-remote,
     /// which is read (and set) with a prefix argument or when it isn't
     /// an existing remote ("Set VAR and PROMPT-SUFFIX").
-    fn select_push_remote(&mut self, suffix: &str) -> Result<Option<(String, String)>> {
+    /// CHANGED: whether it was read.
+    fn select_push_remote(&mut self, suffix: &str) -> Result<Option<(String, String, bool)>> {
         let Some(branch) = self.git.current_branch() else {
             self.set_msg("No branch is checked out");
             return Ok(None);
         };
         let remote = self.get_push_remote(Some(&branch)).filter(|r| self.git.remotes().contains(r));
-        let remote = match remote {
-            Some(r) if self.prefix_arg.is_none() => r,
+        let (remote, changed) = match remote {
+            Some(r) if self.prefix_arg.is_none() => (r, false),
             _ => {
                 let var = Self::push_remote_variable(Some(&branch), false);
                 let Some(r) = self.read_remote(&format!("Set {var} and {suffix}"))? else {
                     return Ok(None);
                 };
                 self.git.git_interactive(&["config", &var, &r])?;
-                r
+                (r, true)
             }
         };
-        Ok(Some((branch, remote)))
+        Ok(Some((branch, remote, changed)))
     }
 
     /// magit-pull--upstreams: the upstream of the current branch if it is
@@ -7273,6 +7325,17 @@ impl App {
         }
         let up2 = self.upstream_branch(&up1)?;
         is("refs/remotes/", &up2).then_some((up1, up2))
+    }
+
+    /// magit-pull--pushbranch-description of BRANCH.
+    fn pull_pushbranch_description(&self, b: &str, remotes: &[String]) -> String {
+        let v = Self::push_remote_variable(Some(b), true);
+        match self.get_push_remote(Some(b)) {
+            Some(r) if self.git.rev_verify(&format!("{r}/{b}")) => format!("{r}/{b}"),
+            Some(r) if remotes.contains(&r) => format!("{v}, replacing non-existent"),
+            Some(_) => format!("{v}, replacing invalid"),
+            None => format!("{v}, setting that"),
+        }
     }
 
     /// The descriptions and `:if` of the suffixes of NAME that depend on
@@ -7297,15 +7360,7 @@ impl App {
                 let Some(b) = branch else {
                     return ["p", "u", "r"].map(|k| (k, String::new(), false)).into_iter().chain([("U", String::new(), false)]).collect();
                 };
-                // magit-pull--pushbranch-description
-                let remote = self.get_push_remote(Some(&b));
-                let v = Self::push_remote_variable(Some(&b), true);
-                let p = match remote {
-                    Some(r) if self.git.rev_verify(&format!("{r}/{b}")) => format!("{r}/{b}"),
-                    Some(r) if remotes.contains(&r) => format!("{v}, replacing non-existent"),
-                    Some(_) => format!("{v}, replacing invalid"),
-                    None => format!("{v}, setting that"),
-                };
+                let p = self.pull_pushbranch_description(&b, &remotes);
                 // magit-pull--upstream-description
                 let remote = self.config(&format!("branch.{b}.remote"));
                 let merge = self.config(&format!("branch.{b}.merge"));
@@ -7328,8 +7383,344 @@ impl App {
                     ("r", "branch.<branch>.rebase".into(), true),
                 ]
             }
+            "rebase-menu" => {
+                let Some(b) = branch else {
+                    return ["p", "u"].map(|k| (k, String::new(), false)).into();
+                };
+                let p = self.pull_pushbranch_description(&b, &remotes);
+                // magit-rebase--upstream-description
+                let remote = self.config(&format!("branch.{b}.remote"));
+                let merge = self.config(&format!("branch.{b}.merge"));
+                let u = match self.upstream_branch(&b) {
+                    Some(up) => up,
+                    None if unnamed_upstream(remote.as_deref(), merge.as_deref()) => "@{upstream}, replacing unnamed".into(),
+                    None if valid_upstream(remote.as_deref(), merge.as_deref(), &remotes) => {
+                        "@{upstream}, replacing non-existent".into()
+                    }
+                    None if remote.is_some() || merge.is_some() => "@{upstream}, replacing invalid".into(),
+                    None => "@{upstream}, setting that".into(),
+                };
+                vec![("p", p, true), ("u", u, true)]
+            }
+            "push-menu" => {
+                let Some(b) = branch else {
+                    return ["p", "u", "e"].map(|k| (k, String::new(), false)).into();
+                };
+                // magit-push--pushbranch-description
+                let remote = self.get_push_remote(Some(&b));
+                let v = Self::push_remote_variable(Some(&b), true);
+                let p = match remote {
+                    Some(r) if self.git.rev_verify(&format!("{r}/{b}")) => format!("{r}/{b}"),
+                    Some(r) if remotes.contains(&r) => format!("{r}/{b}, creating it"),
+                    Some(_) => format!("{v}, replacing invalid"),
+                    None => format!("{v}, setting that"),
+                };
+                // magit-push--upstream-description
+                let remote = self.config(&format!("branch.{b}.remote"));
+                let merge = self.config(&format!("branch.{b}.merge"));
+                let u = match self.upstream_branch(&b) {
+                    Some(up) => up,
+                    None if unnamed_upstream(remote.as_deref(), merge.as_deref()) => {
+                        format!("{} as {}", remote.unwrap_or_default(), merge.unwrap_or_default())
+                    }
+                    None if valid_upstream(remote.as_deref(), merge.as_deref(), &remotes) => {
+                        format!("{} creating {}", remote.unwrap_or_default(), merge.unwrap_or_default())
+                    }
+                    None if remote.is_some() || merge.is_some() => "@{upstream}, creating it and replacing invalid".into(),
+                    None => "@{upstream}, creating it".into(),
+                };
+                vec![("p", p, true), ("u", u, true), ("e", "elsewhere".into(), true)]
+            }
             _ => Vec::new(),
         }
+    }
+
+    /// magit-get-tracked: the remote and the ref on it of the
+    /// remote-tracking branch REFNAME (per the remote.*.fetch refspecs).
+    fn get_tracked(&self, refname: &str) -> Option<(String, String)> {
+        let full = self
+            .git
+            .git_string(&["rev-parse", "--verify", "-q", "--symbolic-full-name", refname])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        self.git.git_lines(&["config", "--local", "--list"]).iter().find_map(|line| {
+            let rest = line.strip_prefix("remote.")?;
+            let (remote, rest) = rest.split_once(".fetch=")?;
+            if remote.contains('.') {
+                return None;
+            }
+            let (src, dst) = rest.trim_start_matches('+').split_once(':')?;
+            let star = match dst.split_once('*') {
+                Some((pre, post)) => full.strip_prefix(pre)?.strip_suffix(post).filter(|m| !m.is_empty())?,
+                None if dst == full => "",
+                None => return None,
+            };
+            Some((remote.to_string(), src.replacen('*', star, 1)))
+        })
+    }
+
+    /// magit-split-branch-name: (".", BRANCH) for a local branch, else
+    /// the remote and the branch on it.
+    fn split_branch_name(&self, branch: &str) -> std::result::Result<(String, String), String> {
+        if self.git.branches().iter().any(|b| b == branch) {
+            return Ok((".".into(), branch.into()));
+        }
+        self.git
+            .remotes()
+            .into_iter()
+            .find_map(|r| {
+                let b = branch.strip_prefix(&format!("{r}/")).filter(|b| !b.is_empty())?.to_string();
+                Some((r, b))
+            })
+            .ok_or_else(|| format!("Invalid branch name {branch}"))
+    }
+
+    /// magit-read-remote with USE-ONLY: the only remote without asking.
+    fn read_remote_use_only(&mut self, prompt: &str) -> Result<Option<String>> {
+        let remotes = self.git.remotes();
+        if remotes.len() == 1 {
+            return Ok(remotes.into_iter().next());
+        }
+        self.read_remote(prompt)
+    }
+
+    /// magit-read-remote-branch without REMOTE, with LOCAL-BRANCH and
+    /// REQUIRE-MATCH confirm: REMOTE/LOCAL-BRANCH for every remote and
+    /// the remote branches offered; the choice must have the form
+    /// REMOTE/BRANCH.
+    fn read_remote_branch(&mut self, prompt: &str, default: Option<&str>, local: &str) -> Result<Option<String>> {
+        let mut candidates: Vec<String> = self.git.remotes().iter().map(|r| format!("{r}/{local}")).collect();
+        for b in self.git.remote_branches() {
+            if !candidates.contains(&b) {
+                candidates.push(b);
+            }
+        }
+        let table = Completion { candidates, ..Default::default() };
+        let Some(choice) = self.read_any(prompt, default, Hist::Revision, table)? else {
+            return Ok(None);
+        };
+        if !choice.split_once('/').is_some_and(|(r, b)| !r.is_empty() && !b.is_empty()) {
+            self.set_msg(&format!("`{choice}' doesn't have the form REMOTE/BRANCH"));
+            return Ok(None);
+        }
+        Ok(Some(choice))
+    }
+
+    /// magit-read-local-branch-or-commit: a local branch, a special ref
+    /// (HEAD, ORIG_HEAD, ... that exist) or the commit at point (the
+    /// default after the local branch at point).
+    fn read_local_branch_or_commit(&mut self, prompt: &str) -> Result<Option<String>> {
+        let commit = self.commit_at_point();
+        let mut candidates: Vec<String> = commit.iter().cloned().collect();
+        candidates.extend(self.git.branches());
+        candidates.extend(
+            ["HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD"]
+                .iter()
+                .filter(|r| self.git.gitdir.join(r).exists())
+                .map(|r| r.to_string()),
+        );
+        let default = self.local_branch_at_point().or(commit);
+        let table = Completion { candidates, ..Default::default() };
+        self.read_any(prompt, default.as_deref(), Hist::Revision, table)
+    }
+
+    /// magit-read-tag: a tag, the one at point the default.
+    fn read_tag(&mut self, prompt: &str) -> Result<Option<String>> {
+        let default = self.tag_at_point();
+        let table = Completion { candidates: self.git.tags(), require_match: true, multiple: false };
+        Ok(self.completing_read(prompt, default.as_deref(), Hist::Revision, Some(table))?.filter(|t| !t.is_empty()))
+    }
+
+    /// magit-notes-read-ref: a notes ref (without refs/notes/), the
+    /// default core.notesRef; the full ref returned.
+    fn notes_read_ref(&mut self, prompt: &str) -> Result<Option<String>> {
+        let candidates: Vec<String> = self
+            .git
+            .git_lines(&["for-each-ref", "--format=%(refname)", "refs/notes"])
+            .iter()
+            .filter_map(|r| r.strip_prefix("refs/notes/").map(str::to_string))
+            .collect();
+        let default = self.config("core.notesRef").map(|d| d.strip_prefix("refs/notes/").map_or(d.clone(), str::to_string));
+        let table = Completion { candidates, require_match: true, multiple: false };
+        let read = self.completing_read(prompt, default.as_deref(), Hist::Minibuffer, Some(table))?;
+        let Some(r) = read.filter(|r| !r.is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some(if r.starts_with("refs/") { r } else { format!("refs/notes/{r}") }))
+    }
+
+    /// magit-git-push: push BRANCH to the remote branch TARGET
+    /// ("REMOTE/NAME"), qualified with refs/heads/ unless it exists.
+    fn git_push(&mut self, branch: &str, target: &str, args: &[String]) {
+        let namespace = if self.get_tracked(target).is_some() { "" } else { "refs/heads/" };
+        let (remote, name) = match self.split_branch_name(target) {
+            Ok(x) => x,
+            Err(e) => {
+                self.set_msg(&e);
+                return;
+            }
+        };
+        let mut a: Vec<String> = vec!["push".into(), "-v".into()];
+        a.extend(args.iter().cloned());
+        a.extend([remote, format!("{branch}:{namespace}{name}")]);
+        self.run_remote_git(&a, &format!("pushed {branch} to {target}"));
+    }
+
+    /// The suffixes of magit-push.
+    fn push_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
+        let push = |head: &[&str], tail: &[String]| -> Vec<String> {
+            head.iter().map(|s| s.to_string()).chain(tail.iter().cloned()).collect()
+        };
+        match cmd {
+            // magit-push-current-to-pushremote
+            "push-current-to-pushremote" => {
+                let Some((branch, remote, changed)) = self.select_push_remote("push there")? else {
+                    return Ok(());
+                };
+                let prompt = format!("Really use \"{remote}\" as push-remote and push \"{branch}\" there");
+                if changed && !self.confirm("set-and-push", &prompt)? {
+                    return Ok(());
+                }
+                let mut a = push(&["push", "-v"], args);
+                a.extend([remote.clone(), format!("refs/heads/{branch}:refs/heads/{branch}")]);
+                self.run_remote_git(&a, &format!("pushed {branch} to {remote}"));
+            }
+            // magit-push-current-to-upstream
+            "push-current-to-upstream" => self.push_current_to_upstream(args)?,
+            // magit-push-current
+            "push-current" => {
+                let Some(branch) = self.git.current_branch() else {
+                    self.set_msg("No branch is checked out");
+                    return Ok(());
+                };
+                let Some(target) = self.read_remote_branch(&format!("Push {branch} to"), None, &branch)? else {
+                    return Ok(());
+                };
+                self.git_push(&branch, &target, args);
+            }
+            // magit-push-other
+            "push-other" => {
+                let Some(source) = self.read_local_branch_or_commit("Push")? else {
+                    return Ok(());
+                };
+                let push_branch = |s: &Self, b: &str| s.get_push_remote(Some(b)).map(|r| format!("{r}/{b}"));
+                let default = if self.git.branches().contains(&source) {
+                    push_branch(self, &source).or_else(|| self.upstream_branch(&source))
+                } else if self.git.is_ancestor(&source, "HEAD") {
+                    self.git.current_branch().and_then(|c| push_branch(self, &c).or_else(|| self.upstream_branch(&c)))
+                } else {
+                    None
+                };
+                let prompt = format!("Push {source} to");
+                let Some(target) = self.read_remote_branch(&prompt, default.as_deref(), &source)? else {
+                    return Ok(());
+                };
+                self.git_push(&source, &target, args);
+            }
+            // magit-push-refspecs
+            "push-refspecs" => {
+                let Some(remote) = self.read_remote("Push to remote")? else {
+                    return Ok(());
+                };
+                let mut candidates = vec!["HEAD".to_string()];
+                candidates.extend(self.git.branches());
+                let table = Completion { candidates, require_match: false, multiple: true };
+                let Some(input) = self.completing_read("Push refspec,s", None, Hist::Minibuffer, Some(table))? else {
+                    return Ok(());
+                };
+                let mut a = push(&["push", "-v"], args);
+                a.push(remote.clone());
+                a.extend(input.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
+                self.run_remote_git(&a, &format!("pushed to {remote}"));
+            }
+            // magit-push-matching
+            "push-matching" => {
+                let Some(remote) = self.read_remote_use_only("Push matching branches to")? else {
+                    return Ok(());
+                };
+                let mut a = push(&["push", "-v"], args);
+                a.extend([remote.clone(), ":".into()]);
+                self.run_remote_git(&a, &format!("pushed matching branches to {remote}"));
+            }
+            // magit-push-tags: git push REMOTE --tags ARGS
+            "push-tags" => {
+                let Some(remote) = self.read_remote_use_only("Push tags to remote")? else {
+                    return Ok(());
+                };
+                let a = push(&["push", &remote, "--tags"], args);
+                self.run_remote_git(&a, &format!("pushed tags to {remote}"));
+            }
+            // magit-push-tag / magit-push-notes-ref: git push REMOTE REF ARGS
+            "push-tag" | "push-notes-ref" => {
+                let r = if cmd == "push-tag" { self.read_tag("Push tag")? } else { self.notes_read_ref("Push notes")? };
+                let Some(r) = r else {
+                    return Ok(());
+                };
+                let Some(remote) = self.read_remote_use_only(&format!("Push {r} to remote"))? else {
+                    return Ok(());
+                };
+                let a = push(&["push", &remote, &r], args);
+                self.run_remote_git(&a, &format!("pushed {r} to {remote}"));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// magit-push-current-to-upstream: with a prefix argument, or when
+    /// the upstream isn't usable, it is read ("Set upstream of B and push
+    /// there", any REMOTE/BRANCH) and set by pushing with --set-upstream.
+    fn push_current_to_upstream(&mut self, args: &[String]) -> Result<()> {
+        let Some(branch) = self.git.current_branch() else {
+            self.set_msg("No branch is checked out");
+            return Ok(());
+        };
+        let mut remote = self.config(&format!("branch.{branch}.remote"));
+        let mut merge = self.config(&format!("branch.{branch}.merge"));
+        let mut args = args.to_vec();
+        let remotes = self.git.remotes();
+        let usable = self.upstream_branch(&branch).is_some()
+            || unnamed_upstream(remote.as_deref(), merge.as_deref())
+            || valid_upstream(remote.as_deref(), merge.as_deref(), &remotes);
+        if self.prefix_arg.is_some() || !usable {
+            let mut candidates: Vec<String> = remotes.iter().map(|r| format!("{r}/{branch}")).collect();
+            for b in self.git.remote_branches() {
+                if !candidates.contains(&b) {
+                    candidates.push(b);
+                }
+            }
+            let default = self
+                .remote_branch_at_point()
+                .or_else(|| self.git.primary_remote().and_then(|r| self.git.remote_main_branch(&r)));
+            let table = Completion { candidates, ..Default::default() };
+            let prompt = format!("Set upstream of {branch} and push there");
+            let Some(upstream) = self.read_any(&prompt, default.as_deref(), Hist::Revision, table)? else {
+                return Ok(());
+            };
+            let (r, m) = match self.get_tracked(&upstream).map_or_else(|| self.split_branch_name(&upstream), Ok) {
+                Ok(x) => x,
+                Err(e) => {
+                    self.set_msg(&e);
+                    return Ok(());
+                }
+            };
+            let m = if m.starts_with("refs/") { m } else { format!("refs/heads/{m}") };
+            let prompt = format!("Really use \"{upstream}\" as upstream and push \"{branch}\" there");
+            if !self.confirm("set-and-push", &prompt)? {
+                return Ok(());
+            }
+            (remote, merge) = (Some(r), Some(m));
+            if !args.iter().any(|a| a == "--set-upstream") {
+                args.insert(0, "--set-upstream".into());
+            }
+        }
+        let mut a: Vec<String> = vec!["push".into(), "-v".into()];
+        a.extend(args);
+        a.extend(remote.clone());
+        a.push(format!("{branch}:{}", merge.unwrap_or_default()));
+        self.run_remote_git(&a, &format!("pushed {branch} to {}", remote.unwrap_or_default()));
+        Ok(())
     }
 
     /// Run the git command A (fetching or pulling), then refresh.
@@ -7428,7 +7819,7 @@ impl App {
             }
             // magit-pull-from-pushremote
             "pull-from-pushremote" => {
-                let Some((branch, remote)) = self.select_push_remote("pull from there")? else {
+                let Some((branch, remote, _)) = self.select_push_remote("pull from there")? else {
                     return Ok(());
                 };
                 let mut a = v(&["pull"], args);

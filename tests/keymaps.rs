@@ -212,7 +212,7 @@ fn pull_popup_layout() {
     let m = menu("pull-menu");
     assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "--ff-only"));
     assert!(matches!(action_of(&m, "-r"),
-        Action::Option { arg, reader: xagit_lib::ui::transient::Reader::Choices(c) } if arg == "--rebase=" && *c == ["true", "merges", "interactive", "false"]));
+        Action::Option { arg, reader: xagit_lib::ui::transient::Reader::Pick(c) } if arg == "--rebase=" && *c == ["true", "merges", "interactive", "false"]));
     assert!(matches!(action_of(&m, "-A"), Action::Switch(s) if s == "--autostash"));
     for (key, target) in [
         ("p", "pull-from-pushremote"),
@@ -240,10 +240,14 @@ fn push_popup_layout() {
     assert!(matches!(action_of(&m, "-h"), Action::Switch(s) if s == "--no-verify"));
     assert!(matches!(action_of(&m, "-T"), Action::Switch(s) if s == "--tags"));
     assert!(matches!(action_of(&m, "-t"), Action::Switch(s) if s == "--follow-tags"));
-    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "push-pushremote"));
-    assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "push-upstream"));
-    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "push-other"));
-    assert!(matches!(action_of(&m, "o"), Action::Command(c) if c == "push-other-branch"));
+    assert!(matches!(action_of(&m, "-o"),
+        Action::Option { arg, reader: xagit_lib::ui::transient::Reader::Multi(c) } if arg == "--push-option=" && *c == ["skip-ci", "ci.skip"]));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "push-current-to-pushremote"));
+    assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "push-current-to-upstream"));
+    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "push-current"));
+    assert!(matches!(action_of(&m, "o"), Action::Command(c) if c == "push-other"));
+    assert!(matches!(action_of(&m, "n"), Action::Command(c) if c == "push-notes-ref"));
+    assert_eq!(m.keys(), ["-f", "-F", "-h", "-n", "-u", "-T", "-t", "-o", "p", "u", "e", "o", "r", "m", "T", "t", "n", "C"]);
     assert!(matches!(action_of(&m, "r"), Action::Command(c) if c == "push-refspecs"));
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "push-matching"));
     // magit-push-tag is "T"; "t" is magit-push-tags (all tags)
@@ -251,7 +255,7 @@ fn push_popup_layout() {
     assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "push-tags"));
     assert!(matches!(action_of(&m, "C"), Action::Command(c) if c == "branch-config-menu"));
     let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
-    assert_eq!(level("-u"), 5);
+    assert_eq!((level("-u"), level("-o"), level("n")), (5, 5, 6));
 }
 
 /// magit-merge.el:37 magit-merge prefix
@@ -260,6 +264,19 @@ fn merge_popup_layout() {
     let m = menu("merge-menu");
     let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
     assert_eq!((level("-b"), level("-w"), level("-s")), (5, 5, 1));
+    assert!(matches!(action_of(&m, "-X"), Action::Option { arg, .. } if arg == "--strategy-option="));
+    assert!(matches!(action_of(&m, "-A"), Action::Option { arg, .. } if arg == "-Xdiff-algorithm="));
+    assert_eq!((level("-X"), level("-A")), (5, 5));
+    // magit:--gpg-sign (level 5) and magit:--signoff (level 6)
+    for name in ["commit-menu", "merge-menu", "rebase-menu", "cherry-pick-menu", "revert-menu", "patches-menu"] {
+        let m = menu(name);
+        let e = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).cloned().unwrap_or_else(|| panic!("{name} {k}"));
+        assert!(matches!(&e("-S").action, Action::Option { arg, .. } if arg == "--gpg-sign="), "{name}");
+        assert!(matches!(&e("+s").action, Action::Switch(s) if s == "--signoff"), "{name}");
+        assert_eq!((e("-S").level, e("+s").level), (5, 6), "{name}");
+    }
+    let c = menu("commit-menu");
+    assert!(matches!(action_of(&c, "-D"), Action::Option { arg, .. } if arg == "--date="));
     assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "--ff-only"));
     assert!(matches!(action_of(&m, "-n"), Action::Switch(s) if s == "--no-ff"));
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "merge-plain"));
@@ -288,11 +305,22 @@ fn rebase_popup_layout() {
     assert!(matches!(action_of(&m, "-d"), Action::Switch(s) if s == "--committer-date-is-author-date"));
     assert!(matches!(action_of(&m, "-t"), Action::Switch(s) if s == "--ignore-date"));
     assert!(matches!(action_of(&m, "-k"), Action::Switch(s) if s == "--keep-empty"));
-    assert!(matches!(action_of(&m, "-r"), Action::Switch(s) if s == "--rebase-merges"));
+    assert!(matches!(action_of(&m, "-r"),
+        Action::Option { arg, reader: xagit_lib::ui::transient::Reader::Choices(c) } if arg == "--rebase-merges=" && *c == ["no-rebase-cousins", "rebase-cousins"]));
     assert!(matches!(action_of(&m, "-u"), Action::Switch(s) if s == "--update-refs"));
-    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "rebase-pushremote"));
-    assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "rebase-upstream"));
-    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "rebase-other"));
+    assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "--force-rebase"));
+    assert!(matches!(action_of(&m, "-x"), Action::Option { arg, .. } if arg == "--exec="));
+    assert!(matches!(action_of(&m, "=X"), Action::Option { arg, .. } if arg == "-Xdiff-algorithm="));
+    assert!(matches!(action_of(&m, "-S"), Action::Option { arg, .. } if arg == "--gpg-sign="));
+    assert!(matches!(action_of(&m, "+s"), Action::Switch(s) if s == "--signoff"));
+    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "rebase-onto-pushremote"));
+    assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "rebase-onto-upstream"));
+    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "rebase-branch"));
+    let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
+    assert_eq!(
+        ["-s", "-X", "=X", "-f", "-x", "-S", "+s", "-r"].map(level),
+        [7, 7, 7, 7, 7, 5, 6, 1]
+    );
     assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "rebase-autosquash"));
     assert!(matches!(action_of(&m, "i"), Action::Command(c) if c == "rebase-interactive"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "rebase-subset"));

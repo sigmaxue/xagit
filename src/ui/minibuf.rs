@@ -145,6 +145,13 @@ impl LineEditor {
         }
     }
 
+    /// Start with the input INITIAL, point after it (INITIAL-INPUT).
+    pub fn with_initial_input(mut self, initial: &str) -> LineEditor {
+        self.text = initial.chars().collect();
+        self.point = self.text.len();
+        self
+    }
+
     /// Read with completion against TABLE (completing-read).
     pub fn with_completion(mut self, mut table: Completion) -> LineEditor {
         let mut seen = std::collections::HashSet::new();

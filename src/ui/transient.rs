@@ -67,8 +67,19 @@ pub enum Reader {
     Similarity,
     /// magit-read-char-case: one of these ("unspecified" unsets)
     Choices(Vec<String>),
+    /// transient-option :choices: completing-read of one of these
+    /// (require-match); typing the key again unsets it
+    Pick(Vec<String>),
     /// magit-read-file-trace: "TRACE:FILE"
     FileTrace,
+    /// magit-read-gpg-signing-key: a secret OpenPGP key that can sign
+    /// (with only one, or magit-openpgp-default-signing-key, that one
+    /// unless with a prefix argument); "" unless gpg.format is openpgp
+    GpgKey,
+    /// :multi-value repeat with :choices: completing-read-multiple of
+    /// values separated by commas (any value), the argument repeated for
+    /// each ("--push-option=a --push-option=b")
+    Multi(Vec<String>),
 }
 
 impl Action {
@@ -77,6 +88,10 @@ impl Action {
         let on = active.iter().filter(|(_, on)| **on).map(|(k, _)| k);
         match self {
             Action::Switch(sw) => on.into_iter().find(|k| *k == sw).cloned(),
+            Action::Option { arg, reader: Reader::Multi(_) } => {
+                let v: Vec<&str> = on.into_iter().filter(|k| option_matches(arg, k)).map(String::as_str).collect();
+                (!v.is_empty()).then(|| v.join(" "))
+            }
             Action::Option { arg, .. } => on.into_iter().find(|k| option_matches(arg, k)).cloned(),
             Action::Switches(args) => on.into_iter().find(|k| args.contains(k)).cloned(),
             _ => None,
@@ -113,7 +128,7 @@ pub enum Lookup<'a> {
 pub fn key_seq(label: &str) -> Vec<Key> {
     if label.len() > 1 && label.contains(' ') {
         label.split(' ').filter(|s| !s.is_empty()).map(key_from_label).collect()
-    } else if label.len() == 2 && (label.starts_with('-') || label.starts_with('=')) {
+    } else if label.len() == 2 && (label.starts_with('-') || label.starts_with('=') || label.starts_with('+')) {
         vec![key_from_label(&label[..1]), key_from_label(&label[1..])]
     } else {
         vec![key_from_label(label)]
@@ -222,12 +237,31 @@ fn opt(key: &str, desc: &str, arg: &str, reader: Reader) -> MenuEntry {
 fn choices(c: &[&str]) -> Reader {
     Reader::Choices(c.iter().map(|s| s.to_string()).collect())
 }
+fn pick(c: &[&str]) -> Reader {
+    Reader::Pick(c.iter().map(|s| s.to_string()).collect())
+}
 fn switches(key: &str, desc: &str, args: &[&str]) -> MenuEntry {
     MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switches(args.iter().map(|s| s.to_string()).collect()), level: 1, hidden: false }
 }
 /// magit-merge:--strategy ("-s" for merge, "=s" for cherry-pick and revert)
 fn merge_strategy(key: &str) -> MenuEntry {
-    opt(key, "Strategy", "--strategy=", choices(&["resolve", "recursive", "octopus", "ours", "subtree"]))
+    opt(key, "Strategy", "--strategy=", pick(&["resolve", "recursive", "octopus", "ours", "subtree"]))
+}
+/// magit-merge:--strategy-option
+fn strategy_option() -> MenuEntry {
+    opt("-X", "Strategy Option", "--strategy-option=", pick(&["ours", "theirs", "patience"]))
+}
+/// magit-diff:--diff-algorithm with the argument "-Xdiff-algorithm="
+fn x_diff_algorithm(key: &str) -> MenuEntry {
+    opt(key, "Diff algorithm", "-Xdiff-algorithm=", choices(&["default", "minimal", "patience", "histogram"]))
+}
+/// magit:--gpg-sign (level 5; the description follows gpg.format)
+fn gpg_sign() -> MenuEntry {
+    opt("-S", "Sign using openpgp", "--gpg-sign=", Reader::GpgKey).level(5)
+}
+/// magit:--signoff (level 6)
+fn signoff() -> MenuEntry {
+    sw("+s", "Add Signed-off-by trailer", "--signoff").level(6)
 }
 /// magit-cherry-pick:--mainline
 fn mainline() -> MenuEntry {
@@ -795,6 +829,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-n", "Disable hooks", "--no-verify"),
                     sw("-R", "Claim authorship and reset author date", "--reset-author"),
                     opt("-A", "Override the author", "--author=", Reader::String),
+                    opt("-D", "Override the author date", "--date=", Reader::String).level(7),
+                    gpg_sign(),
+                    signoff(),
                     opt("-C", "Reuse commit message", "--reuse-message=", Reader::String),
                     opt("-c", "Reedit commit message", "--reedit-message=", Reader::String),
                 ],
@@ -933,7 +970,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
             groups: vec![
                 vec![
                     sw("-f", "Fast-forward only", "--ff-only"),
-                    opt("-r", "Rebase local commits", "--rebase=", choices(&["true", "merges", "interactive", "false"])),
+                    opt("-r", "Rebase local commits", "--rebase=", pick(&["true", "merges", "interactive", "false"])),
                     sw("-A", "Autostash", "--autostash").level(7),
                     sw("-F", "Force", "--force"),
                 ],
@@ -969,18 +1006,25 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-u", "Set upstream", "--set-upstream").level(5),
                     sw("-T", "Include all tags", "--tags"),
                     sw("-t", "Include related annotated tags", "--follow-tags"),
+                    opt("-o", "Set push-options", "--push-option=", Reader::Multi(vec!["skip-ci".into(), "ci.skip".into()]))
+                        .level(5),
+                ],
+                // Push BRANCH to (:if magit-get-current-branch; the
+                // descriptions of p and u are set when the menu is shown)
+                vec![
+                    cmd("p", "pushRemote", "push-current-to-pushremote"),
+                    cmd("u", "@{upstream}", "push-current-to-upstream"),
+                    cmd("e", "elsewhere", "push-current"),
                 ],
                 vec![
-                    cmd("p", "pushRemote", "push-pushremote"),
-                    cmd("u", "upstream", "push-upstream"),
-                    cmd("e", "elsewhere", "push-other"),
-                ],
-                vec![
-                    cmd("o", "another branch", "push-other-branch"),
+                    cmd("o", "another branch", "push-other"),
                     cmd("r", "explicit refspecs", "push-refspecs"),
                     cmd("m", "matching branches", "push-matching"),
+                ],
+                vec![
                     cmd("T", "a tag", "push-tag"),
                     cmd("t", "all tags", "push-tags"),
+                    cmd("n", "a note ref", "push-notes-ref").level(6),
                 ],
                 vec![cmd("C", "Set variables...", "branch-config-menu")],
             ],
@@ -998,8 +1042,12 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-f", "Fast-forward only", "--ff-only"),
                     sw("-n", "No fast-forward", "--no-ff"),
                     merge_strategy("-s"),
+                    strategy_option().level(5),
                     sw("-b", "Ignore changes in amount of whitespace", "-Xignore-space-change").level(5),
                     sw("-w", "Ignore whitespace when comparing lines", "-Xignore-all-space").level(5),
+                    x_diff_algorithm("-A").level(5),
+                    gpg_sign(),
+                    signoff(),
                 ],
                 vec![
                     cmd("m", "Merge", "merge-plain"),
@@ -1037,19 +1085,28 @@ pub fn registry() -> BTreeMap<String, Menu> {
             groups: vec![
                 vec![
                     sw("-k", "Keep empty commits", "--keep-empty"),
-                    sw("-r", "Rebase merges", "--rebase-merges"),
+                    opt("-r", "Rebase merges", "--rebase-merges=", choices(&["no-rebase-cousins", "rebase-cousins"])),
                     sw("-u", "Update branches", "--update-refs"),
+                    merge_strategy("-s").level(7),
+                    strategy_option().level(7),
+                    x_diff_algorithm("=X").level(7),
+                    sw("-f", "Force rebase", "--force-rebase").level(7),
                     sw("-d", "Use author date as committer date", "--committer-date-is-author-date"),
                     sw("-t", "Use current time as author date", "--ignore-date"),
                     sw("-a", "Autosquash", "--autosquash"),
                     sw("-A", "Autostash", "--autostash"),
                     sw("-i", "Interactive", "--interactive"),
                     sw("-h", "Disable hooks", "--no-verify"),
+                    opt("-x", "Run command after commits", "--exec=", Reader::String).level(7),
+                    gpg_sign(),
+                    signoff(),
                 ],
+                // Rebase BRANCH onto (:if magit-get-current-branch for p
+                // and u; their descriptions are set when shown)
                 vec![
-                    cmd("p", "onto pushRemote", "rebase-pushremote"),
-                    cmd("u", "onto upstream", "rebase-upstream"),
-                    cmd("e", "elsewhere", "rebase-other"),
+                    cmd("p", "pushRemote", "rebase-onto-pushremote"),
+                    cmd("u", "@{upstream}", "rebase-onto-upstream"),
+                    cmd("e", "elsewhere", "rebase-branch"),
                 ],
                 vec![
                     cmd("i", "interactively", "rebase-interactive"),
@@ -1110,7 +1167,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-e", "Edit message", "--edit"),
                     sw("-a", "Annotate", "--annotate"),
                     sw("-s", "Sign", "--sign"),
-                    opt("-u", "Sign as", "--local-user=", Reader::String),
+                    opt("-u", "Sign as", "--local-user=", Reader::GpgKey),
                 ],
                 vec![
                     cmd("t", "tag", "tag-create"),
@@ -1277,6 +1334,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-F", "Attempt fast-forward", "--ff"),
                     sw("-x", "Reference cherry in commit message", "-x"),
                     sw("-e", "Edit commit messages", "--edit"),
+                    gpg_sign(),
+                    signoff(),
                 ],
                 vec![
                     cmd("A", "Pick", "cherry-pick"),
@@ -1318,6 +1377,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-e", "Edit commit message", "--edit"),
                     sw("-E", "Don't edit commit message", "--no-edit"),
                     merge_strategy("=s"),
+                    gpg_sign(),
+                    signoff(),
                 ],
                 vec![
                     cmd("V", "Revert commit(s)", "revert"),
@@ -1506,6 +1567,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-b", "Limit removal of email cruft", "--keep-non-patch"),
                     sw("-d", "Use author date as committer date", "--committer-date-is-author-date"),
                     sw("-t", "Use current time as author date", "--ignore-date"),
+                    gpg_sign(),
+                    signoff(),
                 ],
                 vec![
                     cmd("m", "maildir", "patches-apply-maildir"),

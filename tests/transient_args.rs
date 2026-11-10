@@ -53,12 +53,13 @@ fn merge_strategy() {
     g.git_interactive(&["commit", "-q", "-am", "three"]).unwrap();
     let mut app = App::new(g.clone());
     app.press("m").unwrap();
-    // a choice that is not offered changes nothing
-    app.script_answers(&["fast"]);
+    // :choices are read with require-match: a choice that is not
+    // offered can't be entered
+    app.script_keys(&["f", "a", "s", "t", "RET", "C-g"]);
     press_all(&mut app, &["-", "s"]);
-    assert_eq!(app.message(), "fast is not one of resolve, recursive, octopus, ours, subtree");
+    assert_eq!(app.prompts().last().unwrap(), "--strategy=");
     assert!(app.active_switches().is_empty());
-    app.script_answers(&["ou"]);
+    app.script_keys(&["o", "u", "TAB", "RET"]);
     press_all(&mut app, &["-", "s"]);
     assert_eq!(app.active_switches(), ["--strategy=ours"]);
     app.script_answers(&["side"]);
