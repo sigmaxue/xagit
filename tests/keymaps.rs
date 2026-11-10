@@ -338,6 +338,8 @@ fn rebase_popup_layout() {
         [7, 7, 7, 7, 7, 5, 6, 1]
     );
     assert!(matches!(action_of(&m, "f"), Action::Command(c) if c == "rebase-autosquash"));
+    assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "reshelve-since"));
+    assert_eq!(m.groups.iter().flatten().find(|e| e.key == "t").unwrap().level, 6);
     assert!(matches!(action_of(&m, "i"), Action::Command(c) if c == "rebase-interactive"));
     assert!(matches!(action_of(&m, "s"), Action::Command(c) if c == "rebase-subset"));
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "rebase-edit-commit"));

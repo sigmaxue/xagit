@@ -1161,6 +1161,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("w", "to reword a commit", "rebase-reword-commit"),
                     cmd("k", "to remove a commit", "rebase-remove-commit"),
                     cmd("f", "to autosquash", "rebase-autosquash"),
+                    cmd("t", "to change dates", "reshelve-since").level(6),
                 ],
             ],
         },

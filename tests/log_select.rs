@@ -223,3 +223,66 @@ fn log_select_is_a_log_buffer() {
     app.press("q").unwrap();
     assert_eq!(app.mode(), &BufferMode::Status);
 }
+
+/// magit-reshelve-since ("r t", level 6)
+#[test]
+fn reshelve_since_selects_and_changes_dates() {
+    let (_td, g) = repo();
+    let dates = |g: &Git| g.git_string(&["log", "--format=%s %at %ct"]).unwrap();
+    let mut app = App::new(g.clone());
+    app.press("r").unwrap();
+    assert!(!app.menu_keys().contains(&"t".to_string()));
+    app.press("C-g").unwrap();
+    let (o, _) = xagit_lib::ui::options::Options::parse("transient-level magit-rebase 6");
+    app.set_options(o);
+    app.press("r").unwrap();
+    app.press("t").unwrap();
+    assert!(is_select(&app));
+    assert_eq!(app.header_line(), "Type C-c C-c on a commit to reshelve it and the commits above it, or C-c C-k to abort");
+    goto(&mut app, " two");
+    app.script_answers(&["2020-01-01 10:00:00 +0000"]);
+    app.press("C-c").unwrap();
+    app.press("C-c").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Date for first commit: ");
+    assert_eq!(app.mode(), &BufferMode::Status);
+    let d = dates(&g);
+    let lines: Vec<&str> = d.lines().collect();
+    assert_eq!(lines[0], "three 1577872860 1577872860");
+    assert_eq!(lines[1], "two 1577872800 1577872800");
+    assert!(!lines[2].contains("15778728"));
+    // the history: a minute after the parent of the commit
+    let parent = g.git_string(&["log", "-1", "--format=%at", "HEAD~2"]).unwrap().trim().parse::<i64>().unwrap();
+    let hist = app.infix_history("magit--reshelve-history");
+    assert_eq!(hist[0], "2020-01-01 10:00:00 +0000");
+    assert_eq!(hist[1], xagit_lib::ui::logbuf::format_time("%F %T %z", parent - parent % 60 + 60));
+
+    // the backup ref of the previous run
+    app.script_answers(&["n"]);
+    app.press("r").unwrap();
+    app.press("t").unwrap();
+    assert_eq!(app.prompts().last().unwrap(), "Backup ref refs/original/refs/heads/master already exists.  Override? (y or n) ");
+    assert_eq!(app.message(), "Abort");
+    assert!(!is_select(&app));
+
+    // committer dates only (in another repository: a run leaves
+    // .git-rewrite behind where `rm` is restricted)
+    let (_td2, g2) = repo();
+    let mut app2 = App::new(g2.clone());
+    let (o, _) = xagit_lib::ui::options::Options::parse(
+        "transient-level magit-rebase 6\nmagit-reshelve-since-committer-only t",
+    );
+    app2.set_options(o);
+    let author = g2.git_string(&["log", "-1", "--format=%at"]).unwrap();
+    app2.script_answers(&["2021-01-01 00:00:00 +0000"]);
+    app2.press("r").unwrap();
+    app2.press("t").unwrap();
+    app2.press("C-c").unwrap();
+    app2.press("C-c").unwrap();
+    assert_eq!(dates(&g2).lines().next().unwrap(), format!("three {} 1609459200", author.trim()));
+
+    // detached HEAD
+    g.git_interactive(&["checkout", "-q", "--detach"]).unwrap();
+    app.press("r").unwrap();
+    app.press("t").unwrap();
+    assert_eq!(app.message(), "Refusing to reshelve detached head");
+}

@@ -28,6 +28,7 @@
 //! magit-push-options skip-ci ci.skip
 //! magit-openpgp-default-signing-key 0123ABCD...
 //! magit-remote-add-set-remote.pushDefault ask-if-unset
+//! magit-reshelve-since-committer-only nil
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -133,6 +134,8 @@ pub struct Options {
     pub openpgp_default_signing_key: Option<String>,
     /// magit-remote-add-set-remote.pushDefault
     pub remote_add_set_push_default: SetPushDefault,
+    /// magit-reshelve-since-committer-only
+    pub reshelve_since_committer_only: bool,
 }
 
 /// The values of magit-remote-add-set-remote.pushDefault.
@@ -191,6 +194,7 @@ impl Default for Options {
             push_options: vec!["skip-ci".into(), "ci.skip".into()],
             openpgp_default_signing_key: None,
             remote_add_set_push_default: SetPushDefault::AskIfUnset,
+            reshelve_since_committer_only: false,
         }
     }
 }
@@ -301,6 +305,9 @@ impl Options {
                     _ => Some("expected a string".into()),
                 },
                 "disabled-command-function" => boolean(&values).map(|b| o.disabled_command_function = b).err(),
+                "magit-reshelve-since-committer-only" => {
+                    boolean(&values).map(|b| o.reshelve_since_committer_only = b).err()
+                }
                 "enable-command" | "disable-command" => match values.as_slice() {
                     [c] => {
                         o.put_disabled(c, name == "disable-command");
