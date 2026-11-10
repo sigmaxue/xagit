@@ -58,6 +58,11 @@ fn essential_and_mode_map_keys() {
     assert!(matches!(action_of(&d, "<return>"), Action::Command(c) if c == "visit"));
     // magit-mode.el:380 h/? open dispatch
     assert!(matches!(action_of(&d, "h"), Action::Command(c) if c == "help"));
+    // magit-status-jump; "fu" is two keys as in kbd
+    let j = menu("status-jump-menu");
+    assert_eq!(j.keys(), ["z", "n", "u", "s", "fu", "fp", "pu", "pp", "j"]);
+    assert!(matches!(j.lookup(&xagit_lib::ui::transient::key_seq("f")), xagit_lib::ui::transient::Lookup::Prefix));
+    assert!(matches!(action_of(&j, "fu"), Action::Command(c) if c == "jump-to-unpulled-from-upstream"));
 }
 
 /// magit-mode.el:370-423 direct bindings map to the same menus

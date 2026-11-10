@@ -83,7 +83,7 @@ cargo install --path .
 | `TAB` | toggle-section | 折叠/展开 section |
 | `RET` | visit-thing | 查看光标处内容（diff / stash / 文件） |
 | `n` / `p`；`C-n` / `C-p` / 方向键 | 移动 | 前者按 section 移动，后者按行移动（Magit 没有 vi 式移动：`k` 是 discard，`j` 是跳转） |
-| `j` | status-jump | 跳转到指定 section |
+| `j` | status-jump | status 中打开 Jump to 菜单：`z` Stashes、`n` Untracked files、`u` Unstaged changes、`s` Staged changes、`fu` / `fp` Unpulled from upstream / push-remote、`pu`（无上游或 HEAD 已在上游中时显示 Recent commits，否则 Unmerged into upstream）/ `pp` Unpushed to upstream / push-remote（section 不存在时显示为括号内的不可用项，按下只提示 `Inapt command`；带 `C-u` 时同时展开该 section 并置于窗口顶部）、`j` Imenu（先选顶层 section，再选其中一项）。diff / revision buffer 中跳转到 diffstat 或 diff。dispatch 中的 `j` 在 status 里是 Jump to section，在其他 buffer 里是 Display status |
 | `^` | section-up | 跳到所在 section 的标题行 |
 | `s` / `u` | stage / unstage | 暂存 / 取消暂存光标处 section、文件、hunk 或选中 region |
 | `S` / `U` | stage-modified / unstage-all | 全部暂存 / 全部取消暂存 |

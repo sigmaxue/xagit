@@ -37,6 +37,7 @@ mod gitvar;
 mod remote;
 mod reshelve;
 mod bisect;
+mod jump;
 mod notes;
 mod patch;
 mod spread;
@@ -1832,6 +1833,15 @@ impl App {
         if name == "blame-menu" {
             self.menus.insert(name.clone(), blame_menu(blob, blaming, read_only));
         }
+        // magit-dispatch: "j" is magit-status-jump in the status buffer
+        // (:if-mode), magit-status-quick elsewhere (:if-not-mode)
+        if name == "dispatch" {
+            let status = self.mode == BufferMode::Status;
+            if let Some(e) = self.menus.get_mut(&name).and_then(|m| m.groups.iter_mut().flatten().find(|e| e.key == "j")) {
+                e.desc = if status { "Jump to section" } else { "Display status" }.into();
+                e.action = Action::Command(if status { "jump" } else { "status-quick" }.into());
+            }
+        }
         if name == "file-dispatch" {
             let status = self.mode == BufferMode::Status;
             self.menus.insert(name.clone(), file_dispatch_menu(in_file, blob, blaming, read_only, status));
@@ -1866,6 +1876,7 @@ impl App {
             self.var_scopes.remove(&name);
         }
         let dynamic = self.menu_states(&name);
+        let inapt = if name == "status-jump-menu" { self.status_jump_states() } else { Vec::new() };
         let gpg_format = self.config("gpg.format");
         let preset: Vec<String> = match self.menus.get_mut(&name) {
             Some(m) => {
@@ -1874,6 +1885,11 @@ impl App {
                     if let Some((_, desc, shown)) = dynamic.iter().find(|(k, _, _)| *k == e.key) {
                         e.desc.clone_from(desc);
                         e.hidden |= !shown;
+                    }
+                    // :inapt-if-not of the section jumpers
+                    if let Some((_, desc, inapt)) = inapt.iter().find(|(k, _, _)| *k == e.key) {
+                        e.desc.clone_from(desc);
+                        e.inapt = *inapt;
                     }
                     // magit:--gpg-sign: "Sign using " gpg.format
                     if matches!(&e.action, Action::Option { arg, .. } if arg == "--gpg-sign=") {
@@ -2210,6 +2226,16 @@ impl App {
         let mut typed = std::mem::take(&mut self.pending);
         typed.push(key);
         let entry: MenuEntry = match menu.lookup(&typed) {
+            // transient--do-warn-inapt
+            Lookup::Found(e) if e.inapt => {
+                let keys: Vec<String> = typed.iter().map(Key::label).collect();
+                let cmd = match &e.action {
+                    Action::Command(c) | Action::Submenu(c) => format!("magit-{c}"),
+                    _ => "nil".into(),
+                };
+                self.set_msg(&format!("Inapt command: `{}' (Use `C-g' to abort, `?' for help) [{cmd}]", keys.join(" ")));
+                return Ok(());
+            }
             Lookup::Found(e) => e.clone(),
             Lookup::Prefix => {
                 self.pending = typed;
@@ -3019,7 +3045,14 @@ impl App {
             "quit" => self.mode_bury_buffer(),
             "toggle-section" => self.toggle_section(),
             "visit" => self.visit_thing()?,
-            "jump" => self.jump_section(),
+            "jump" => self.jump_command(),
+            "jump-to-stashes" | "jump-to-untracked" | "jump-to-unstaged" | "jump-to-staged" | "jump-to-unpulled-from-upstream"
+            | "jump-to-unpulled-from-pushremote" | "jump-to-unpushed-to-upstream" | "jump-to-unpushed-to-pushremote" => {
+                self.section_jumper(cmd)
+            }
+            "imenu" => self.imenu()?,
+            // magit-status-quick: the status buffer (shown again)
+            "status-quick" => self.switch_to_mode(BufferMode::Status),
             "help" => {
                 self.view_text = Some((
                     "Key bindings".into(),
@@ -8885,27 +8918,9 @@ impl App {
         Ok(())
     }
 
-    /// `j`: magit-status-jump in the status buffer (the next top-level
-    /// section), magit-jump-to-diffstat-or-diff elsewhere.
-    fn jump_section(&mut self) {
-        if self.mode != BufferMode::Status {
-            return self.jump_to_diffstat_or_diff();
-        }
-        let headers: Vec<usize> = self
-            .children(0)
-            .into_iter()
-            .filter(|&s| !matches!(self.buf.all[self.sec(s).start].kind, LineKind::Head))
-            .map(|s| self.sec(s).start)
-            .collect();
-        let p = self.point();
-        if let Some(&next) = headers.iter().find(|&&h| h > p).or(headers.first()) {
-            self.cursor = self.visible_index_near(next);
-        }
-    }
-
     /// magit-jump-to-diffstat-or-diff: from a file in the diffstat to its
     /// diff, from a file or hunk to its diffstat line, else to the diffstat.
-    fn jump_to_diffstat_or_diff(&mut self) {
+    pub(super) fn jump_to_diffstat_or_diff(&mut self) {
         let s = self.cur_sec();
         let ident = self.sec(s).ident.clone();
         let target = match &self.buf.all[self.sec(s).start].kind {

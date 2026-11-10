@@ -16,6 +16,8 @@ pub struct MenuEntry {
     pub level: u8,
     /// not used at the level of the prefix (set when it is shown)
     pub hidden: bool,
+    /// :inapt-if / :inapt-if-not: shown, but invoking it only warns
+    pub inapt: bool,
 }
 
 impl MenuEntry {
@@ -153,7 +155,9 @@ pub enum Lookup<'a> {
 pub fn key_seq(label: &str) -> Vec<Key> {
     if label.len() > 1 && label.contains(' ') {
         label.split(' ').filter(|s| !s.is_empty()).map(key_from_label).collect()
-    } else if label.len() == 2 && (label.starts_with('-') || label.starts_with('=') || label.starts_with('+')) {
+    } else if label.len() == 2
+        && (label.starts_with('-') || label.starts_with('=') || label.starts_with('+') || label.chars().all(|c| c.is_ascii_lowercase()))
+    {
         vec![key_from_label(&label[..1]), key_from_label(&label[1..])]
     } else {
         vec![key_from_label(label)]
@@ -249,6 +253,11 @@ impl Menu {
 }
 
 fn display(e: &MenuEntry, active: &BTreeMap<String, bool>) -> String {
+    // transient-inapt-suffix (shadow): the key and description in
+    // parentheses
+    if e.inapt {
+        return format!("({} {})", e.key.trim_end(), e.desc);
+    }
     match e.action.value_in(active) {
         Some(v) => format!("{} {} ({v})", e.key, e.desc),
         None => format!("{} {}", e.key, e.desc),
@@ -262,6 +271,7 @@ fn opt(key: &str, desc: &str, arg: &str, reader: Reader) -> MenuEntry {
         action: Action::Option { arg: arg.into(), reader },
         level: 1,
         hidden: false,
+        inapt: false,
     }
 }
 fn choices(c: &[&str]) -> Reader {
@@ -274,7 +284,7 @@ fn pick(c: &[&str]) -> Reader {
     Reader::Pick(c.iter().map(|s| s.to_string()).collect())
 }
 fn switches(key: &str, desc: &str, args: &[&str]) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switches(args.iter().map(|s| s.to_string()).collect()), level: 1, hidden: false }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switches(args.iter().map(|s| s.to_string()).collect()), level: 1, hidden: false, inapt: false }
 }
 /// magit-merge:--strategy ("-s" for merge, "=s" for cherry-pick and revert)
 fn merge_strategy(key: &str) -> MenuEntry {
@@ -324,13 +334,13 @@ fn margin_details() -> MenuEntry {
 }
 
 fn cmd(key: &str, desc: &str, command: &str) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Command(command.into()), level: 1, hidden: false }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Command(command.into()), level: 1, hidden: false, inapt: false }
 }
 fn sw(key: &str, desc: &str, switch: &str) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switch(switch.into()), level: 1, hidden: false }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switch(switch.into()), level: 1, hidden: false, inapt: false }
 }
 fn sub(key: &str, desc: &str, menu: &str) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Submenu(menu.into()), level: 1, hidden: false }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Submenu(menu.into()), level: 1, hidden: false, inapt: false }
 }
 
 /// magit-diff argument switches shared by `d` and `D` (default level).
@@ -865,7 +875,6 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("o", "Submodule", "submodule-menu"),
                     cmd("O", "Subtree", "subtree-menu"),
                     cmd("P", "Push", "push-menu"),
-                    cmd("q", "Bury buffer", "quit"),
                     cmd("Q", "Command", "git-command"),
                 ],
                 vec![
@@ -891,11 +900,41 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("S", "Stage all", "stage-all"),
                     cmd("U", "Unstage all", "unstage-all"),
                 ],
+                // "Essential commands"
                 vec![
-                    cmd("g", "Refresh current buffer", "refresh"),
-                    cmd("<tab>", "Toggle section at point", "toggle-section"),
+                    cmd("g", "       Refresh current buffer", "refresh"),
+                    cmd("q", "       Bury current buffer", "quit"),
+                    cmd("<tab>", "   Toggle section at point", "toggle-section"),
                     cmd("<return>", "Visit thing at point", "visit"),
                 ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-status-jump (j)
+    // magit-jump-to-tracked, -ignored, -assume-unchanged and
+    // -skip-worktree are only offered when their inserters are members
+    // of magit-status-sections-hook, which they aren't by default
+    m.insert(
+        "status-jump-menu".into(),
+        Menu {
+            name: "status-jump-menu".into(),
+            title: "Jump to".into(),
+            groups: vec![
+                vec![
+                    cmd("z", "Stashes", "jump-to-stashes"),
+                    cmd("n", "Untracked files", "jump-to-untracked"),
+                    cmd("u", "Unstaged changes", "jump-to-unstaged"),
+                    cmd("s", "Staged changes", "jump-to-staged"),
+                ],
+                vec![
+                    cmd("fu", "Unpulled from @{upstream}", "jump-to-unpulled-from-upstream"),
+                    cmd("fp", "Unpulled from <push-remote>", "jump-to-unpulled-from-pushremote"),
+                    cmd("pu", "Unmerged into upstream", "jump-to-unpushed-to-upstream"),
+                    cmd("pp", "Unpushed to <push-remote>", "jump-to-unpushed-to-pushremote"),
+                ],
+                // "Jump using"
+                vec![cmd("j", "Imenu", "imenu")],
             ],
         },
     );
