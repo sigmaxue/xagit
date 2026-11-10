@@ -100,8 +100,14 @@ fn bury_several() {
     assert!(matches!(app.mode(), BufferMode::Revision { .. }));
     press(&mut app, &["q", "q"]);
     assert_eq!(app.mode(), &BufferMode::Status);
-    // the last buffer: quit
+    // the status buffer stays; C-x C-c quits
     app.press("q").unwrap();
+    assert!(!app.quitting());
+    assert_eq!(app.mode(), &BufferMode::Status);
+    assert_eq!(app.message(), "Type C-x C-c to quit xagit");
+    press(&mut app, &["C-x", "C-g"]);
+    assert!(!app.quitting());
+    press(&mut app, &["C-x", "C-c"]);
     assert!(app.quitting());
 }
 

@@ -146,6 +146,24 @@ pub(crate) fn failure(dir: &Path, args: &[&str], out: &std::process::Output) -> 
     text
 }
 
+/// Whether git (or ssh) failed because it could not ask the user for
+/// something on the terminal: credentials, a passphrase, a host key.
+pub(crate) fn wants_terminal(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    [
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+        "host key verification failed",
+        "read_passphrase",
+        "can't open /dev/tty",
+        "authentication failed",
+        "permission denied (publickey",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
 pub(crate) fn spawn_failure(dir: &Path, args: &[&str], e: std::io::Error) -> anyhow::Error {
     anyhow!("{} could not start/wait\nin {}\n{}", command_label(args), sanitize(&dir.display().to_string()), sanitize(&e.to_string()))
 }
@@ -436,6 +454,46 @@ impl Git {
         Ok(())
     }
 
+    /// Run a long git command (fetch, pull, push …) in the background:
+    /// no stdin, its output captured, and away from the terminal the TUI
+    /// owns (its own session, no terminal prompts), so it can never write
+    /// over the screen or wait for input nobody sees. ON_START gets the
+    /// process id (the id of its process group too). The error is the
+    /// failure text and whether the command wanted to ask the user
+    /// something (a password, a host key) and so should be run again in
+    /// the terminal.
+    pub fn git_detached(&self, args: &[&str], on_start: impl FnOnce(u32)) -> std::result::Result<(), (String, bool)> {
+        use std::process::Stdio;
+        let mut cmd = Command::new(env_git());
+        cmd.args(GLOBAL_ARGS)
+            .args(args)
+            .current_dir(&self.toplevel)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // a new session: no controlling terminal for ssh to prompt on
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+        let child = cmd.spawn().map_err(|e| (format!("{:#}", spawn_failure(&self.toplevel, args, e)), false))?;
+        on_start(child.id());
+        let out = child.wait_with_output().map_err(|e| (format!("{:#}", spawn_failure(&self.toplevel, args, e)), false))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        record(&self.toplevel, args, out.status.success(), out.status.code(), &stderr);
+        if out.status.success() {
+            return Ok(());
+        }
+        Err((failure(&self.toplevel, args, &out), wants_terminal(&stderr)))
+    }
+
     #[cfg(unix)]
     fn checkout_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
         use std::fs::File;
@@ -643,5 +701,14 @@ mod diagnostic_tests {
     fn signal_is_reported() {
         let out = std::process::Output { status: std::process::ExitStatus::from_raw(15), stdout: vec![], stderr: vec![] };
         assert!(failure(Path::new("/repo"), &["fetch"], &out).contains("signal: 15"));
+    }
+
+    #[test]
+    fn prompts_wanted_are_recognized() {
+        assert!(wants_terminal("fatal: could not read Username for 'https://x': terminal prompts disabled"));
+        assert!(wants_terminal("Host key verification failed.\nfatal: Could not read from remote repository."));
+        assert!(wants_terminal("git@x: Permission denied (publickey).\n"));
+        assert!(!wants_terminal("fatal: '/nonexistent' does not appear to be a git repository"));
+        assert!(!wants_terminal(" ! [rejected]        main -> main (non-fast-forward)"));
     }
 }

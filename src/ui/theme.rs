@@ -175,10 +175,28 @@ pub struct Glyphs {
     pub region: char,
     pub rule: char,
     pub sep: &'static str,
+    /// the frames of the busy indicator of the mode line
+    pub spinner: &'static [char],
 }
 
-const UNICODE: Glyphs = Glyphs { folded: '▸', unfolded: '▾', cursor: '▌', region: '┃', rule: '─', sep: " · " };
-const ASCII: Glyphs = Glyphs { folded: '>', unfolded: 'v', cursor: '>', region: '|', rule: '-', sep: " - " };
+const UNICODE: Glyphs = Glyphs {
+    folded: '▸',
+    unfolded: '▾',
+    cursor: '▌',
+    region: '┃',
+    rule: '─',
+    sep: " · ",
+    spinner: &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+};
+const ASCII: Glyphs = Glyphs {
+    folded: '>',
+    unfolded: 'v',
+    cursor: '>',
+    region: '|',
+    rule: '-',
+    sep: " - ",
+    spinner: &['|', '/', '-', '\\'],
+};
 
 struct Palette {
     accent: Rgb,

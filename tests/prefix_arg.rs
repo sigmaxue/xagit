@@ -295,9 +295,13 @@ fn bury_and_kill_buffers() {
     press(&mut app, &["C-u", "q"]);
     assert_eq!(app.mode(), &BufferMode::Status);
     assert!(!app.quitting());
-    // two kill all Magit buffers
-    press(&mut app, &["d", "u", "C-u", "C-u", "q"]);
-    assert!(app.quitting());
+    // two kill all Magit buffers but the status buffer
+    press(&mut app, &["d", "u", "l", "l", "C-u", "C-u", "q"]);
+    assert!(!app.quitting());
+    assert_eq!(app.mode(), &BufferMode::Status);
+    app.press("q").unwrap();
+    assert_eq!(app.mode(), &BufferMode::Status, "nothing was left below");
+    assert!(!app.quitting());
 }
 
 #[test]

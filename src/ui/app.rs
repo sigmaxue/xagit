@@ -49,6 +49,7 @@ fn restore_terminal() {
 }
 
 mod gitvar;
+mod jobs;
 mod run;
 mod remote;
 mod reshelve;
@@ -104,6 +105,8 @@ pub struct App {
     transient_log_args: Option<Vec<String>>,
     /// C-c was typed (the prefix of C-c C-n)
     cc_prefix: bool,
+    /// C-x was typed (the prefix of C-x C-c)
+    cx_prefix: bool,
     /// C-c ^ was typed on a hunk (magit-hunk-section-smerge-map)
     smerge_prefix: bool,
     /// the prefix argument of the next command (current-prefix-arg)
@@ -193,6 +196,10 @@ pub struct App {
     history: HashMap<String, Vec<Vec<String>>>,
     /// the history of the transient shown and the position in it
     menu_history: (Vec<Vec<String>>, usize),
+    /// refreshes and git processes running in the background
+    jobs: jobs::Jobs,
+    /// HEAD as the header line shows it (taken when refreshing)
+    head_label: String,
 }
 
 /// The major mode of a buffer: magit-status-mode, magit-diff-mode,
@@ -583,6 +590,7 @@ impl App {
             transient_diff_args: None,
             transient_log_args: None,
             cc_prefix: false,
+            cx_prefix: false,
             smerge_prefix: false,
             prefix_arg: None,
             reading_arg: false,
@@ -622,6 +630,8 @@ impl App {
             values_file: None,
             history: HashMap::new(),
             menu_history: (Vec::new(), 0),
+            jobs: jobs::Jobs::default(),
+            head_label: String::new(),
         };
         app.refresh();
         // magit-status-initial-section '(1): the first section after the headers
@@ -677,52 +687,10 @@ impl App {
         &self.buf.title
     }
 
-    /// magit-refresh: rebuild the buffer, keeping point in the same section
-    /// at the same offset (or at the same line when that section is gone).
-    pub fn refresh(&mut self) {
-        let anchor = self.anchor();
-        self.buf = self.build_buffer();
-        self.mark = None;
-        self.lines = self.buf.visible(&self.vis);
-        let (id, fallback) = anchor;
-        let target = id.and_then(|(ident, off)| {
-            let sec = self.buf.sections.iter().skip(1).find(|s| s.ident == ident)?;
-            Some(if sec.start + off < sec.end { sec.start + off } else { sec.start })
-        });
-        self.cursor = match target {
-            Some(p) => self.visible_index_near(p),
-            None => fallback.min(self.lines.len().saturating_sub(1)),
-        };
-    }
-
-    /// The refresh function of the buffer's mode.
+    /// The refresh function of the buffer's mode, run on this thread
+    /// (`refresh` is in jobs.rs).
     fn build_buffer(&self) -> StatusBuffer {
-        let margin = self.margin_config();
-        match &self.mode {
-            BufferMode::Status => {
-                let st = Status::load(&self.git);
-                build_status(&self.git, &st, &self.status_diff_args(), &self.status_log_args, &margin)
-            }
-            BufferMode::Diff(spec) => build_diff(&self.git, spec, &self.buf_args),
-            BufferMode::Revision { rev, files } => build_revision(&self.git, rev, &self.buf_args, files),
-            BufferMode::Stash { stash } => build_stash(&self.git, stash, &self.buf_args),
-            BufferMode::Log { revs, files } => build_log(&self.git, revs, &self.buf_args, files, &margin),
-            BufferMode::LogSelect { rev, msg, .. } => {
-                // magit-log-select-refresh-buffer; the header line shows
-                // the usage (magit-log-select-show-usage)
-                let mut buf = build_log(&self.git, std::slice::from_ref(rev), &self.buf_args, &[], &margin);
-                buf.title = msg.clone();
-                buf
-            }
-            BufferMode::Reflog { refname } => build_reflog(&self.git, refname, &self.buf_args, &margin),
-            BufferMode::Stashes { refname } => build_stashes(&self.git, refname, &margin),
-            BufferMode::Cherry { head, upstream } => build_cherry(&self.git, head, upstream, &margin),
-            BufferMode::File { rev, file, blame } => build_file(&self.git, rev, file, blame.as_ref()),
-            BufferMode::Refs { upstream } => {
-                let show = |r: &str| self.options.show_ref(r);
-                build_refs(&self.git, upstream, &self.buf_args, self.refs_counts, &self.vis, &margin, &show)
-            }
-        }
+        self.buffer_spec().build()
     }
 
     /// magit--right-margin-config of the buffer shown (the default of its
@@ -798,16 +766,19 @@ impl App {
     }
 
     /// magit-mode-bury-buffer (q): with two prefix arguments kill all
-    /// Magit buffers of the repository (and so quit), with one kill the
-    /// buffer shown, else bury it (magit-mode-quit-window): the buffer
-    /// below is shown and the buried one stays around (J, or setting up
-    /// a buffer of its mode, shows it again).
+    /// Magit buffers of the repository but the status buffer, with one
+    /// kill the buffer shown, else bury it (magit-mode-quit-window): the
+    /// buffer below is shown and the buried one stays around (J, or
+    /// setting up a buffer of its mode, shows it again). The status
+    /// buffer stays: xagit quits with C-x C-c.
     fn mode_bury_buffer(&mut self) {
         if self.prefix_numeric() >= 16 {
             self.view_text = None;
             self.buried.clear();
             self.background.clear();
-            self.quit = true;
+            if self.mode != BufferMode::Status {
+                self.show_status_buffer();
+            }
             return;
         }
         if self.prefix_arg.is_some() || self.view_text.is_some() || self.buried.is_empty() {
@@ -821,14 +792,19 @@ impl App {
     }
 
     /// Leave the text view, else kill the buffer shown and show the
-    /// buffer below (refreshed), else quit.
+    /// buffer below (refreshed). The last buffer gives way to the status
+    /// buffer, which is not killed (C-x C-c quits).
     fn kill_buffer(&mut self) {
         if self.view_text.take().is_some() {
             self.set_msg("");
             return;
         }
         let Some(b) = self.buried.pop() else {
-            self.quit = true;
+            if self.mode == BufferMode::Status {
+                self.set_msg("Type C-x C-c to quit xagit");
+            } else {
+                self.show_status_buffer();
+            }
             return;
         };
         self.mode = b.mode;
@@ -839,6 +815,24 @@ impl App {
         self.cursor = b.cursor.min(self.lines.len().saturating_sub(1));
         self.scroll = b.scroll;
         self.refresh();
+    }
+
+    /// Show the status buffer in place of the buffer shown (killed).
+    fn show_status_buffer(&mut self) {
+        self.mode = BufferMode::Status;
+        self.buf_args.clear();
+        self.buf = StatusBuffer::default();
+        self.vis.clear();
+        self.lines.clear();
+        self.cursor = 0;
+        self.scroll = 0;
+        self.refresh();
+    }
+
+    /// save-buffers-kill-terminal (C-x C-c): quit xagit.
+    fn kill_terminal(&mut self) {
+        self.view_text = None;
+        self.quit = true;
     }
 
     /// (ident of the section at point, offset from its heading), plus the
@@ -1043,6 +1037,9 @@ impl App {
         let bar = t.style(Face::ModeLine);
         let mut left = Row::new(bar);
         left.push(format!(" {} ", self.mode_name()), t.style(Face::ModeBadge)).push(" ", bar);
+        if let Some(busy) = self.busy_label() {
+            left.push(busy, t.style(Face::Keyword).over(bar)).push("  ", bar);
+        }
         let lower = self.message.to_lowercase();
         let error = ["error", "fatal", "cannot", "could not", "unable", "failed", "[no match]"]
             .iter()
@@ -1067,9 +1064,10 @@ impl App {
                 ("g", "refresh"),
                 ("TAB", "toggle"),
                 ("RET", "visit"),
+                ("q", "back"),
+                ("C-x C-c", "quit"),
                 ("n/p", "section"),
                 ("C-n/C-p", "line"),
-                ("q", "quit"),
             ]
         };
         let mut r = Row::new(Style::default());
@@ -1089,7 +1087,10 @@ impl App {
         let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
         let (w, h) = (w as usize, h as usize);
         let t = self.theme.clone();
-        let branch = self.git.head_desc();
+        if self.head_label.is_empty() {
+            self.head_label = self.git.head_desc();
+        }
+        let branch = self.head_label.clone();
         let popup = self.popup_rows(w);
         // header, mode line and hints around the body and the transient
         let body = h.saturating_sub(3 + popup.len()).max(1);
@@ -1699,20 +1700,36 @@ impl App {
 
     pub fn run(&mut self) -> Result<()> {
         self.in_terminal = true;
+        self.jobs.enabled = true;
         self.theme = Theme::detect();
         // a panic must not leave the terminal in raw mode on the
-        // alternate screen
+        // alternate screen; one on a worker (a refresh) is reported by
+        // the worker and must not take the terminal away
+        let main = std::thread::current().id();
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_terminal();
-            previous(info);
+            if std::thread::current().id() == main {
+                restore_terminal();
+                previous(info);
+            }
         }));
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), EnterAlternateScreen, crossterm::cursor::Hide);
         self.draw();
+        let mut frame = self.jobs.frame();
         loop {
-            if self.quit {
+            if self.quit && self.quit_with_jobs() {
                 break;
+            }
+            // wait for a key, but keep showing the work done meanwhile
+            if !event::poll(self.jobs.tick())? {
+                let done = self.poll_jobs();
+                // redraw when work is done or the busy indicator turns
+                if done || self.jobs.frame() != frame {
+                    self.draw();
+                    frame = self.jobs.frame();
+                }
+                continue;
             }
             match event::read()? {
                 Event::Key(ev) => {
@@ -1720,6 +1737,11 @@ impl App {
                         continue;
                     }
                     let key = Key::from_event(&ev);
+                    // moving around is done in the buffer shown; any
+                    // other command works on the refreshed one
+                    if !self.only_moves(&key) {
+                        self.settle();
+                    }
                     if let Err(e) = self.handle_key(key) {
                         self.set_msg(&format!("{e:#}"));
                     }
@@ -1730,7 +1752,9 @@ impl App {
                 }
                 _ => {}
             }
+            self.poll_jobs();
             self.draw();
+            frame = self.jobs.frame();
         }
         self.save_history();
         restore_terminal();
@@ -1741,11 +1765,21 @@ impl App {
         if self.universal_argument(&key) {
             return Ok(());
         }
+        // the refreshes the command asks for are done once, after it
+        self.jobs.depth += 1;
         let r = self.dispatch_key(key);
+        self.jobs.depth -= 1;
+        if self.jobs.depth == 0 {
+            self.flush_refresh();
+        }
+        // magit-blame's post-command hook reads the chunk at point
+        if matches!(self.mode, BufferMode::File { blame: Some(_), .. }) {
+            self.settle();
+        }
         self.blame_post_command();
         // the prefix argument is for one command; prefix keys (C-c, the
         // first keys of a transient's key sequence) pass it on
-        if !self.cc_prefix && !self.smerge_prefix && self.pending.is_empty() {
+        if !self.cc_prefix && !self.cx_prefix && !self.smerge_prefix && self.pending.is_empty() {
             self.prefix_arg = None;
         }
         r
@@ -1890,6 +1924,20 @@ impl App {
                 (false, "M-g") => self.open_menu("file-dispatch"),
                 _ => self.set_msg(&format!("C-c {} is undefined", key.label())),
             }
+            return Ok(());
+        }
+        if std::mem::take(&mut self.cx_prefix) {
+            match (key.ctrl, key.code.as_str()) {
+                // save-buffers-kill-terminal
+                (true, "c") => self.kill_terminal(),
+                (true, "g") => self.set_msg("Quit"),
+                _ => self.set_msg(&format!("C-x {} is undefined", key.label())),
+            }
+            return Ok(());
+        }
+        if key.ctrl && key.code == "x" {
+            self.cx_prefix = true;
+            self.set_msg("C-x-");
             return Ok(());
         }
         if key.ctrl && key.code == "c" {
@@ -4311,6 +4359,7 @@ impl App {
 
     /// magit-log-goto-commit-section: move to the commit REV in the log.
     fn log_goto_commit(&mut self, rev: &str) -> bool {
+        self.settle();
         let abbrev = self.git.rev_short(rev);
         let id = format!("commit:{abbrev}");
         match (1..self.buf.sections.len()).find(|&i| self.sec(i).ident == id || self.sec(i).ident.starts_with(&format!("{id}:"))) {
@@ -4524,6 +4573,7 @@ impl App {
         let rev = self.git.current_branch().unwrap_or_else(|| "HEAD".into());
         let args = self.log_select_args.clone();
         self.setup_buffer(BufferMode::LogSelect { rev, action, msg: msg.clone() }, args);
+        self.settle();
         match initial {
             Some(c) => {
                 self.log_goto_commit(&c);
@@ -6679,6 +6729,7 @@ impl App {
     }
 
     fn goto_file_line(&mut self, line: usize) {
+        self.settle();
         if let Some(i) = self.lines.iter().position(|l| matches!(l.kind, LineKind::FileLine { line: n, .. } if n >= line)) {
             self.cursor = i;
         } else {
@@ -8025,14 +8076,10 @@ impl App {
         Ok(())
     }
 
-    /// Run the git command A (fetching or pulling), then refresh.
+    /// Run the git command A (fetching, pulling, pushing) in the
+    /// background, then refresh.
     fn run_remote_git(&mut self, a: &[String], ok: &str) {
-        let strs: Vec<&str> = a.iter().map(String::as_str).collect();
-        match self.git.git_interactive(&strs) {
-            Ok(()) => self.set_msg(ok),
-            Err(e) => self.set_msg(&format!("{e:#}")),
-        }
-        self.refresh();
+        self.run_git_async(a, ok);
     }
 
     /// The suffixes of magit-fetch and magit-pull.
@@ -8935,6 +8982,7 @@ impl App {
     /// go to LINE of FILE in the diffs of GROUPS (all when empty): the
     /// diff line, else the file section; the sections around it are shown.
     fn goto_file_position(&mut self, file: &str, line: usize, groups: &[&str]) {
+        self.settle();
         let groups: Vec<String> = if groups.is_empty() {
             self.buf.diffs.iter().map(|(g, _)| g.clone()).collect()
         } else {
