@@ -28,7 +28,7 @@ pub fn man_page(name: &str) -> Option<&'static str> {
         "worktree-menu" => "git-worktree",
         "submodule-menu" => "git-submodule",
         "notes-menu" => "git-notes",
-        "subtree-menu" => "git-subtree",
+        "subtree-menu" | "subtree-import-menu" | "subtree-export-menu" => "git-subtree",
         "patches-menu" => "git-am",
         "blame-menu" => "git-blame",
         _ => return None,

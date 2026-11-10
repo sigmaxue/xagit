@@ -36,6 +36,7 @@ use std::io::{stdout, Write};
 mod gitvar;
 mod remote;
 mod reshelve;
+mod bisect;
 mod spread;
 mod submodule;
 mod subtree;
@@ -5364,14 +5365,22 @@ impl App {
     /// than the current branch; the default the branch or commit at
     /// point (not HEAD's commit when detached), else the previous branch.
     fn read_other_branch_or_commit(&mut self, prompt: &str) -> Result<Option<String>> {
+        self.read_other_branch_or_commit_excluding(prompt, None)
+    }
+
+    /// magit-read-other-branch-or-commit with EXCLUDE (else the current
+    /// branch): the current branch also a default when not excluded.
+    fn read_other_branch_or_commit_excluding(&mut self, prompt: &str, exclude: Option<&str>) -> Result<Option<String>> {
         let current = self.git.current_branch();
+        let exclude = exclude.map(str::to_string).or_else(|| current.clone());
         let rev = |r: &str| self.git.git_string(&["rev-parse", "--verify", "-q", r]).ok().filter(|s| !s.is_empty());
         let default = self
             .branch_or_commit_at_point()
-            .filter(|a| Some(a) != current.as_ref() && !(current.is_none() && rev(a) == rev("HEAD")))
+            .filter(|a| Some(a) != exclude.as_ref() && !(current.is_none() && rev(a) == rev("HEAD")))
+            .or_else(|| current.clone().filter(|c| Some(c) != exclude.as_ref()))
             .or_else(|| self.previous_branch());
         let mut candidates = self.git.refnames();
-        candidates.retain(|r| Some(r) != current.as_ref());
+        candidates.retain(|r| Some(r) != exclude.as_ref());
         let table = Completion { candidates, ..Default::default() };
         self.read_any(prompt, default.as_deref(), Hist::Revision, table)
     }
@@ -9021,62 +9030,8 @@ impl App {
     fn run_extra(&mut self, cmd: &str, args: &[String]) -> Result<()> {
         match cmd {
             // ---- bisect
-            "bisect-start" => {
-                let Some(bad) = self.read_rev("Bisect bad revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                let good = self.read_rev("Bisect good revisions (space separated)", None)?;
-                let goods: Vec<String> = good
-                    .as_deref()
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect();
-                let res = self.git.bisect_start(Some(&bad), &goods);
-                self.done("bisect started", res);
-            }
-            "bisect-bad" | "bisect-good" | "bisect-skip" => {
-                let state = match cmd {
-                    "bisect-bad" => "bad",
-                    "bisect-good" => "good",
-                    _ => "skip",
-                };
-                let rev = self.read_rev(&format!("Bisect {state} revision"), Some("HEAD"))?;
-                let res = self.git.bisect_mark(state, rev.as_deref());
-                self.done(&format!("bisect {state}"), res);
-            }
-            "bisect-reset" => {
-                // magit-bisect-reset
-                if !self.confirm("reset-bisect", "Reset bisect")? {
-                    return Ok(());
-                }
-                let res = self.git.bisect_reset(None);
-                self.done("bisect reset", res);
-            }
-            "bisect-log" => {
-                let res = self.git.bisect_log();
-                self.show("bisect log", res);
-            }
-            "bisect-run" | "bisect-start-run" => {
-                // magit-bisect-run: when not bisecting yet, start first
-                if cmd == "bisect-start-run" || !self.git.bisect_in_progress() {
-                    let Some(bad) = self.read_rev("Bisect bad revision", Some("HEAD"))? else {
-                        return Ok(());
-                    };
-                    let Some(good) = self.read_rev("Bisect good revision", None)? else {
-                        return Ok(());
-                    };
-                    if let Err(e) = self.git.bisect_start(Some(&bad), &[good]) {
-                        self.set_msg(&format!("{e:#}"));
-                        return Ok(());
-                    }
-                }
-                let Some(command) = self.read_line_prompt("Bisect run shell command", None)? else {
-                    return Ok(());
-                };
-                let res = self.git.bisect_run(&command);
-                self.show("bisect run", res);
-                self.refresh();
+            "bisect-start" | "bisect-bad" | "bisect-good" | "bisect-mark" | "bisect-skip" | "bisect-reset" | "bisect-run" => {
+                self.bisect_command(cmd, args)?
             }
 
             // ---- worktree

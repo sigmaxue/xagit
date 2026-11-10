@@ -1534,10 +1534,17 @@ pub fn registry() -> BTreeMap<String, Menu> {
         Menu {
             name: "bisect-menu".into(),
             title: "Bisect".into(),
-            groups: vec![vec![
-                cmd("B", "Start", "bisect-start"),
-                cmd("s", "Start script", "bisect-start-run"),
-            ]],
+            groups: vec![
+                // "Arguments" (-p needs Git 2.29)
+                vec![
+                    sw("-n", "Don't checkout commits", "--no-checkout"),
+                    sw("-p", "Follow only first parent of a merge", "--first-parent"),
+                    opt("=o", "Old/good term", "--term-old=", Reader::String).level(6),
+                    opt("=n", "New/bad term", "--term-new=", Reader::String).level(6),
+                ],
+                // "Actions"
+                vec![cmd("B", "Start", "bisect-start"), cmd("s", "Start script", "bisect-run")],
+            ],
         },
     );
     // :if magit-bisect-in-progress-p
@@ -1545,18 +1552,15 @@ pub fn registry() -> BTreeMap<String, Menu> {
         "bisect-menu@progress".into(),
         Menu {
             name: "bisect-menu@progress".into(),
-            title: "Bisect in progress".into(),
-            groups: vec![
-                vec![
-                    cmd("B", "Bad", "bisect-bad"),
-                    cmd("g", "Good", "bisect-good"),
-                    cmd("k", "Skip", "bisect-skip"),
-                    cmd("r", "Reset", "bisect-reset"),
-                    cmd("s", "Run script", "bisect-run"),
-                ],
-                // xagit extra: Magit shows the log in the status buffer
-                vec![cmd("l", "Log", "bisect-log")],
-            ],
+            title: "Bisect".into(),
+            groups: vec![vec![
+                cmd("B", "Bad", "bisect-bad"),
+                cmd("g", "Good", "bisect-good"),
+                cmd("m", "Mark", "bisect-mark").level(6),
+                cmd("k", "Skip", "bisect-skip"),
+                cmd("r", "Reset", "bisect-reset"),
+                cmd("s", "Run script", "bisect-run"),
+            ]],
         },
     );
 

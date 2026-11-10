@@ -918,8 +918,13 @@ fn insert_bisect(b: &mut Builder, g: &Git) {
     }
     b.blank();
 
-    // git bisect visualize git log == git log --bisect
-    let rest = log_lines(g, None, LOG_SECTION_LIMIT, &["--decorate=full", "--bisect"]);
+    // git bisect visualize git log == git log --bisect (and
+    // --first-parent when started with it)
+    let mut rest_args = vec!["--decorate=full", "--bisect"];
+    if g.gitdir.join("BISECT_FIRST_PARENT").exists() {
+        rest_args.push("--first-parent");
+    }
+    let rest = log_lines(g, None, LOG_SECTION_LIMIT, &rest_args);
     b.commit_section(g, "bisect-view", format!("Bisect Rest ({})", rest.len()), "bisect-view", &rest);
 
     // magit-wash-bisect-log

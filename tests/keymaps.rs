@@ -650,9 +650,13 @@ fn extra_features_popup_layout() {
     // magit-bisect: idle menu only starts; marking needs a running bisect
     let b = menu("bisect-menu");
     assert!(matches!(action_of(&b, "B"), Action::Command(c) if c == "bisect-start"));
-    assert!(matches!(action_of(&b, "s"), Action::Command(c) if c == "bisect-start-run"));
+    assert!(matches!(action_of(&b, "s"), Action::Command(c) if c == "bisect-run"));
     assert!(find(&b, "g").is_none());
+    assert_eq!(b.keys(), ["-n", "-p", "=o", "=n", "B", "s"]);
+    assert!(matches!(action_of(&b, "-p"), Action::Switch(a) if a == "--first-parent"));
+    assert!(matches!(action_of(&b, "=o"), Action::Option { arg, .. } if arg == "--term-old="));
     let b = menu("bisect-menu@progress");
+    assert_eq!(b.keys(), ["B", "g", "m", "k", "r", "s"]);
     assert!(matches!(action_of(&b, "B"), Action::Command(c) if c == "bisect-bad"));
     assert!(matches!(action_of(&b, "g"), Action::Command(c) if c == "bisect-good"));
     assert!(matches!(action_of(&b, "k"), Action::Command(c) if c == "bisect-skip"));
