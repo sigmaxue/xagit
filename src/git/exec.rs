@@ -349,6 +349,9 @@ impl Git {
     /// Run git and split stdout on NUL (for -z listings); skips empty entries.
     /// Falls back to newline splitting when the output contains no NUL bytes.
     pub fn git_lines(&self, args: &[&str]) -> Vec<String> {
+        if let Some(v) = super::query::answer_lines(args) {
+            return v;
+        }
         let out = Command::new(env_git())
             .args(GLOBAL_ARGS)
             .args(args)
@@ -382,6 +385,14 @@ impl Git {
 
     /// `git_output` with the environment variables ENV set.
     pub fn git_output_env(&self, env: &[(&str, &str)], args: &[&str]) -> Result<std::process::Output> {
+        // read-only whitelisted queries are answered in-process while a
+        // buffer is being refreshed; anything else (and any command with
+        // an environment, e.g. GIT_INDEX_FILE) still runs the git CLI
+        if env.is_empty() {
+            if let Some(out) = super::query::answer(args) {
+                return Ok(out);
+            }
+        }
         Command::new(env_git())
             .args(GLOBAL_ARGS)
             .args(args)

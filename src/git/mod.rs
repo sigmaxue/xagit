@@ -3,6 +3,7 @@ pub mod diff;
 pub mod exec;
 pub mod libgit2;
 pub mod ops;
+pub mod query;
 pub mod status;
 pub mod wip;
 

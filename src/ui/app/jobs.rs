@@ -119,6 +119,8 @@ pub(super) struct BufferSpec {
 impl BufferSpec {
     /// The refresh function of the buffer's mode.
     pub fn build(&self) -> StatusBuffer {
+        // libgit2 answers the read-only queries of this refresh in-process
+        let _queries = crate::git::query::enter(&self.git.toplevel);
         let (git, margin) = (&self.git, &self.margin);
         match &self.mode {
             BufferMode::Status => {
@@ -190,6 +192,7 @@ impl App {
         let spec = self.buffer_spec();
         let (gen, tx) = (self.jobs.gen, self.jobs.tx.clone());
         std::thread::spawn(move || {
+            let _queries = crate::git::query::enter(&spec.git.toplevel);
             let buf = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Box::new(spec.build()))).map_err(|p| {
                 p.downcast_ref::<String>()
                     .cloned()
@@ -208,6 +211,7 @@ impl App {
         self.jobs.gen += 1;
         self.jobs.refreshing = false;
         self.jobs.mark_idle();
+        let _queries = crate::git::query::enter(&self.git.toplevel);
         let buf = self.buffer_spec().build();
         if self.in_terminal {
             self.head_label = self.git.head_desc();
