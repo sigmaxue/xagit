@@ -38,6 +38,7 @@ mod remote;
 mod reshelve;
 mod spread;
 mod submodule;
+mod subtree;
 mod gitignore;
 mod stash;
 mod tag;
@@ -2842,6 +2843,22 @@ impl App {
                     return Ok(None);
                 }
                 files.join(" ")
+            }
+            Reader::Revision => {
+                let mut candidates = vec!["HEAD".to_string()];
+                candidates.extend(self.git.refnames());
+                let default = self.branch_or_commit_at_point().or_else(|| self.git.current_branch());
+                let table = Completion { candidates, ..Default::default() };
+                let Some(v) = self.read_any(arg, default.as_deref(), Hist::Infix(arg), table)? else {
+                    return Ok(None);
+                };
+                v
+            }
+            Reader::SubtreePrefix => {
+                let Some(v) = self.subtree_read_prefix(arg)? else {
+                    return Ok(None);
+                };
+                v
             }
             Reader::FileTrace => {
                 let Some(file) = self.read_line_prompt("File", self.current_file().map(|(_, p)| p).as_deref())? else {
@@ -7224,6 +7241,22 @@ impl App {
         self.read_any(prompt, default.as_deref(), Hist::Minibuffer, table)
     }
 
+    /// magit-read-refspec: one of the refs of magit-remote-list-refs of
+    /// REMOTE (any input).
+    fn read_refspec(&mut self, prompt: &str, remote: &str) -> Result<Option<String>> {
+        self.set_msg("Determining available refs...");
+        let candidates = self
+            .git
+            .git_lines(&["ls-remote", remote])
+            .into_iter()
+            .filter_map(|l| l.get(41..).map(str::to_string))
+            .filter(|r| !r.ends_with("^{}"))
+            .collect();
+        self.set_msg("Determining available refs...done");
+        let table = Completion { candidates, ..Default::default() };
+        self.read_any(prompt, None, Hist::Minibuffer, table)
+    }
+
     /// magit-remote-branch-at-point: the remote branch at point, or one
     /// at the commit at point.
     fn remote_branch_at_point(&self) -> Option<String> {
@@ -7775,18 +7808,7 @@ impl App {
                     let table = Completion { candidates, ..Default::default() };
                     self.read_any("Fetch branch", None, Hist::Revision, table)?
                 } else {
-                    // magit-read-refspec: the refs of magit-remote-list-refs
-                    self.set_msg("Determining available refs...");
-                    let candidates = self
-                        .git
-                        .git_lines(&["ls-remote", &r])
-                        .into_iter()
-                        .filter_map(|l| l.get(41..).map(str::to_string))
-                        .filter(|r| !r.ends_with("^{}"))
-                        .collect();
-                    self.set_msg("Determining available refs...done");
-                    let table = Completion { candidates, ..Default::default() };
-                    self.read_any("Fetch using refspec", None, Hist::Minibuffer, table)?
+                    self.read_refspec("Fetch using refspec", &r)?
                 };
                 let Some(what) = what else {
                     return Ok(());
@@ -9144,38 +9166,8 @@ impl App {
             "cherries" => self.cherry()?,
 
             // ---- subtree
-            "subtree-prefixes" => {
-                let prefixes = self.git.subtree_prefixes();
-                let text = if prefixes.is_empty() {
-                    "No subtree prefixes found".into()
-                } else {
-                    prefixes.join("\n")
-                };
-                self.view_text = Some(("subtree prefixes".into(), text));
-            }
-            "subtree-add" | "subtree-pull" | "subtree-push" => {
-                let prefix = self.subtree_prefix_prompt()?;
-                let Some(prefix) = prefix else { return Ok(()) };
-                let Some(repo) = self.read_line_prompt("Subtree repository", None)? else {
-                    return Ok(());
-                };
-                let Some(rev) = self.read_rev("Subtree revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                let res = match cmd {
-                    "subtree-add" => self.git.subtree_add(&prefix, &repo, &rev),
-                    "subtree-pull" => self.git.subtree_pull(&prefix, &repo, &rev),
-                    _ => self.git.subtree_push(&prefix, &repo, &rev),
-                };
-                self.done("subtree updated", res);
-            }
-            "subtree-split" => {
-                let Some(prefix) = self.subtree_prefix_prompt()? else { return Ok(()) };
-                let Some(branch) = self.read_line_prompt("Split into branch", None)? else {
-                    return Ok(());
-                };
-                let res = self.git.subtree_split(&prefix, &branch);
-                self.done("subtree split", res);
+            "subtree-add" | "subtree-add-commit" | "subtree-merge" | "subtree-pull" | "subtree-push" | "subtree-split" => {
+                self.subtree_command(cmd, args)?
             }
 
             // ---- patches
@@ -9565,16 +9557,6 @@ impl App {
         }
         self.refresh();
         Ok(())
-    }
-
-    /// Pick a known subtree prefix, or ask for one when none is recorded.
-    fn subtree_prefix_prompt(&mut self) -> Result<Option<String>> {
-        let prefixes = self.git.subtree_prefixes();
-        if prefixes.is_empty() {
-            self.read_line_prompt("Subtree prefix", None)
-        } else {
-            Ok(self.pick("Subtree prefix", &prefixes, None)?.cloned())
-        }
     }
 }
 

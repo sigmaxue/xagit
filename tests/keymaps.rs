@@ -1,7 +1,7 @@
 //! tests/keymaps.rs — verify every menu matches Magit's key bindings extracted
 //! from the lisp sources (magit.el, magit-branch.el, magit-commit.el, ...).
 
-use xagit_lib::ui::transient::{registry, resolve_menu, Action, RepoState};
+use xagit_lib::ui::transient::{registry, resolve_menu, Action, Reader, RepoState};
 
 fn menu(name: &str) -> xagit_lib::ui::transient::Menu {
     registry().get(name).expect("menu exists").clone()
@@ -736,8 +736,20 @@ fn remaining_extras_popup_layout() {
     assert!(matches!(action_of(&b, "C"), Action::Command(c) if c == "branch-config-menu"));
     let l = menu("log-menu");
     assert!(matches!(action_of(&l, "r"), Action::Command(c) if c == "reflog-current"));
+    // magit-subtree ("O"), -import and -export
     let s = menu("subtree-menu");
-    assert!(matches!(action_of(&s, "a"), Action::Command(c) if c == "subtree-add"));
+    assert_eq!(s.keys(), ["i", "e"]);
+    assert!(matches!(action_of(&s, "i"), Action::Command(c) if c == "subtree-import-menu"));
+    assert!(matches!(action_of(&s, "e"), Action::Command(c) if c == "subtree-export-menu"));
+    let s = menu("subtree-import-menu");
+    assert_eq!(s.keys(), ["-P", "-m", "-s", "a", "c", "m", "f"]);
+    assert!(matches!(action_of(&s, "-P"), Action::Option { arg, reader: Reader::SubtreePrefix } if arg == "--prefix="));
+    assert!(matches!(action_of(&s, "c"), Action::Command(c) if c == "subtree-add-commit"));
+    assert!(matches!(action_of(&s, "f"), Action::Command(c) if c == "subtree-pull"));
+    let s = menu("subtree-export-menu");
+    assert_eq!(s.keys(), ["-P", "-a", "-b", "-o", "-i", "-j", "p", "s"]);
+    assert!(matches!(action_of(&s, "-o"), Action::Option { arg, reader: Reader::Revision } if arg == "--onto="));
+    assert!(matches!(action_of(&s, "-j"), Action::Switch(a) if a == "--rejoin"));
 
     // magit-am ("w")
     let p = menu("patches-menu");

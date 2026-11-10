@@ -84,6 +84,11 @@ pub enum Reader {
     /// (magit-stash-push's magit:--): files separated by commas, the
     /// value "-- FILE..."
     Files,
+    /// magit-transient-read-revision: HEAD or a ref (any input), the
+    /// branch or commit at point (else the current branch) the default
+    Revision,
+    /// magit-subtree-read-prefix: a directory relative to the toplevel
+    SubtreePrefix,
 }
 
 impl Action {
@@ -753,10 +758,10 @@ pub fn show_refs_menu(in_refs: bool) -> Menu {
         title: "Show refs".into(),
         groups: vec![
             vec![
-                opt("-c", "Contains", "--contains=", Reader::String),
-                opt("-M", "Merged", "--merged=", Reader::String),
+                opt("-c", "Contains", "--contains=", Reader::Revision),
+                opt("-M", "Merged", "--merged=", Reader::Revision),
                 sw("-m", "Merged to HEAD", "--merged"),
-                opt("-N", "Not merged", "--no-merged=", Reader::String),
+                opt("-N", "Not merged", "--no-merged=", Reader::Revision),
                 sw("-n", "Not merged to HEAD", "--no-merged"),
                 opt("-s", "Sort", "--sort=", choices(&["-committerdate", "-authordate", "committerdate", "authordate"])),
             ],
@@ -1665,15 +1670,45 @@ pub fn registry() -> BTreeMap<String, Menu> {
         "subtree-menu".into(),
         Menu {
             name: "subtree-menu".into(),
-            title: "Subtree".into(),
+            title: "Subtree actions".into(),
+            groups: vec![vec![cmd("i", "Import", "subtree-import-menu"), cmd("e", "Export", "subtree-export-menu")]],
+        },
+    );
+    m.insert(
+        "subtree-import-menu".into(),
+        Menu {
+            name: "subtree-import-menu".into(),
+            title: "Import subtrees".into(),
             groups: vec![
+                // "Arguments"
                 vec![
-                    cmd("a", "Add", "subtree-add"),
-                    cmd("P", "Pull", "subtree-pull"),
-                    cmd("p", "Push", "subtree-push"),
-                    cmd("s", "Split", "subtree-split"),
+                    opt("-P", "Prefix", "--prefix=", Reader::SubtreePrefix),
+                    opt("-m", "Message", "--message=", Reader::String),
+                    sw("-s", "Squash", "--squash"),
                 ],
-                vec![cmd("l", "List prefixes", "subtree-prefixes")],
+                // "Subtree import actions"
+                vec![cmd("a", "Add", "subtree-add"), cmd("c", "Add commit", "subtree-add-commit")],
+                vec![cmd("m", "Merge", "subtree-merge"), cmd("f", "Pull", "subtree-pull")],
+            ],
+        },
+    );
+    m.insert(
+        "subtree-export-menu".into(),
+        Menu {
+            name: "subtree-export-menu".into(),
+            title: "Export subtrees".into(),
+            groups: vec![
+                // "Arguments"
+                vec![
+                    opt("-P", "Prefix", "--prefix=", Reader::SubtreePrefix),
+                    opt("-a", "Annotate", "--annotate=", Reader::String),
+                    opt("-b", "Branch", "--branch=", Reader::String),
+                    opt("-o", "Onto", "--onto=", Reader::Revision),
+                    sw("-i", "Ignore joins", "--ignore-joins"),
+                    sw("-j", "Rejoin", "--rejoin"),
+                ],
+                // "Subtree export actions"
+                vec![cmd("p", "Push", "subtree-push"), cmd("s", "Split", "subtree-split")],
             ],
         },
     );
