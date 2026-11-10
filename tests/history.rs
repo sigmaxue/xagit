@@ -84,17 +84,17 @@ fn minibuffer_history() {
 fn prompts_share_minibuffer_history() {
     let (_td, g, _) = repo_with_commit();
     let mut app = App::new(g.clone());
-    app.script_keys(&["f", "o", "o", "RET"]);
     app.script_keys(&["RET"]);
+    app.script_keys(&["f", "o", "o", "RET"]);
     press_all(&mut app, &["b", "c"]);
-    assert_eq!(app.prompts(), ["New branch name", "Start from (empty = HEAD)"]);
+    assert_eq!(app.prompts(), ["Create and checkout branch starting at", "Name for new branch"]);
     assert!(g.branches().contains(&"foo".to_string()), "{}", app.message());
-    // empty inputs aren't added
+    // the starting point has magit-revision-history
     assert_eq!(app.minibuffer_history(), ["foo"]);
     // M-p gives the inputs of earlier prompts
     app.script_keys(&["M-p", "-", "2", "RET"]);
-    app.script_keys(&["M-p", "M-p", "C-a", "C-k", "RET"]);
-    press_all(&mut app, &["b", "c"]);
+    press_all(&mut app, &["b", "s"]);
+    assert_eq!(app.prompts().last().unwrap(), "Spin off to branch");
     assert!(g.branches().contains(&"foo-2".to_string()), "{}", app.message());
     assert_eq!(app.minibuffer_history(), ["foo-2", "foo"]);
 }

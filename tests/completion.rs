@@ -149,14 +149,14 @@ fn revision_history() {
     for k in ["b", "b"] {
         app.press(k).unwrap();
     }
-    assert_eq!(app.prompts(), ["Checkout branch/revision"]);
+    assert_eq!(app.prompts(), ["Checkout"]);
     assert_eq!(g.current_branch().as_deref(), Some("feature"), "{}", app.message());
     assert_eq!(app.revision_history(), ["feature"]);
     assert!(app.minibuffer_history().is_empty());
-    // a name read with minibuffer-history, the start with
-    // magit-revision-history
-    app.script_keys(&["n", "e", "w", "RET"]);
+    // the start read first with magit-revision-history, then the name
+    // with minibuffer-history
     app.script_keys(&["M-p", "RET"]);
+    app.script_keys(&["n", "e", "w", "RET"]);
     for k in ["b", "c"] {
         app.press(k).unwrap();
     }

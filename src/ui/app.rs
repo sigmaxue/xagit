@@ -2907,36 +2907,37 @@ impl App {
             }
 
             // -------- branch menu
-            "checkout" | "branch-checkout" => {
-                let bs = g!().branches();
-                // magit-read-other-branch-or-commit: the branch at point
-                let current = g!().current_branch();
-                let default = self.branch_at_point().filter(|b| Some(b) != current.as_ref() && bs.contains(b));
-                if let Some(b) = self.pick_rev("Checkout branch/revision", &bs, default.as_deref())? {
-                    g!().checkout(b)?;
-                    self.set_msg(&format!("checked out {b}"));
-                    self.refresh();
-                }
+            // magit-checkout: a local branch becomes the current branch,
+            // anything else (a remote branch, a tag, a commit) detaches HEAD
+            "checkout" => {
+                let Some(commit) = self.read_other_branch_or_commit("Checkout")? else {
+                    return Ok(());
+                };
+                self.checkout_rev(&commit, &args);
             }
+            "branch-checkout" => self.branch_checkout(&args)?,
+            // magit-branch-and-checkout
             "branch-and-checkout" => {
-                let Some(name) = self.read_line_prompt("New branch name", None)? else {
+                let Some((name, start)) = self.branch_read_args("Create and checkout branch")? else {
                     return Ok(());
                 };
-                let bs = g!().branches();
-                let start = self.pick_rev("Start from (empty = HEAD)", &bs, Some(""))?;
-                g!().branch_and_checkout(&name, start.map(|s| s.as_str()))?;
-                self.set_msg(&format!("created and checked out {name}"));
-                self.refresh();
+                let res = if is_stash_ref(&start) {
+                    g!().git_interactive(&["stash", "branch", &name, &start])
+                } else {
+                    let mut a: Vec<&str> = vec!["checkout"];
+                    a.extend(args.iter().map(String::as_str));
+                    a.extend(["-b", &name, &start]);
+                    g!().git_interactive(&a)
+                };
+                self.done("", res.map(|_| String::new()));
             }
+            // magit-branch-create
             "branch-create" => {
-                let Some(name) = self.read_line_prompt("New branch name", None)? else {
+                let Some((name, start)) = self.branch_read_args("Create branch")? else {
                     return Ok(());
                 };
-                let bs = g!().branches();
-                let start = self.pick_rev("Start from (empty = HEAD)", &bs, Some(""))?;
-                g!().branch_create(&name, start.map(|s| s.as_str()))?;
-                self.set_msg(&format!("created branch {name}"));
-                self.refresh();
+                let res = g!().git_interactive(&["branch", &name, &start]);
+                self.done("", res.map(|_| String::new()));
             }
             "branch-spinoff" => {
                 let Some(name) = self.read_line_prompt("Spin off to branch", None)? else {
@@ -5193,6 +5194,258 @@ impl App {
         self.set_msg("unstaged");
         self.refresh();
         Ok(())
+    }
+
+    /// magit-rev-name REV PATTERN (anchored), unless relative to the ref
+    /// (with `~` or `^`).
+    fn rev_name_exact(&self, rev: &str, pattern: &str) -> Option<String> {
+        let refs = format!("--refs={pattern}");
+        let exclude = format!("--exclude=*/{pattern}");
+        let a = ["name-rev", "--name-only", "--no-undefined", &refs, "--exclude=*/HEAD", &exclude, rev];
+        let n = self.git.git_string(&a).ok()?;
+        let n = n.trim();
+        (!n.is_empty() && !n.contains(['~', '^'])).then(|| n.to_string())
+    }
+
+    /// magit-name-local-branch: the local branch at REV.
+    fn name_local_branch(&self, rev: &str) -> Option<String> {
+        self.rev_name_exact(rev, "refs/heads/*")
+    }
+
+    /// magit-name-remote-branch: the remote branch at REV.
+    fn name_remote_branch(&self, rev: &str) -> Option<String> {
+        self.rev_name_exact(rev, "refs/remotes/*").and_then(|n| n.strip_prefix("remotes/").map(str::to_string))
+    }
+
+    /// magit-ref-maybe-qualify: NAME, or PREFIX and NAME if NAME alone is
+    /// ambiguous (None if that is too).
+    fn ref_maybe_qualify(&self, name: &str, prefix: &str) -> Option<String> {
+        let ambiguous = |r: &str| {
+            let base = r.split(['~', '^']).next().unwrap_or(r);
+            self.git
+                .git_string(&["rev-parse", "--verify", "--symbolic-full-name", base])
+                .map_or(true, |f| f.trim().is_empty())
+        };
+        if !ambiguous(name) {
+            return Some(name.to_string());
+        }
+        let q = format!("{prefix}{name}");
+        (!ambiguous(&q)).then_some(q)
+    }
+
+    /// magit-branch-or-commit-at-point: the branch (local or remote) or
+    /// tag at point, the commit at point (the branch at it, if any), the
+    /// revision of a revision or stash buffer.
+    fn branch_or_commit_at_point(&self) -> Option<String> {
+        match self.current_line().map(|l| l.kind.clone()) {
+            Some(LineKind::Ref { kind: RefKind::Local | RefKind::Remote, name }) => self.ref_maybe_qualify(&name, "heads/"),
+            Some(LineKind::Ref { kind: RefKind::Tag, name }) => self.ref_maybe_qualify(&name, "tags/"),
+            Some(LineKind::Commit { hash, .. }) => Some(
+                self.name_local_branch(&hash)
+                    .or_else(|| self.name_remote_branch(&hash))
+                    .unwrap_or_else(|| self.git.rev_short(&hash)),
+            ),
+            _ => match &self.mode {
+                BufferMode::Revision { rev, .. } => Some(rev.clone()),
+                BufferMode::Stash { stash } => Some(stash.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    /// magit-read-other-branch-or-commit: a ref (or any input) other
+    /// than the current branch; the default the branch or commit at
+    /// point (not HEAD's commit when detached), else the previous branch.
+    fn read_other_branch_or_commit(&mut self, prompt: &str) -> Result<Option<String>> {
+        let current = self.git.current_branch();
+        let rev = |r: &str| self.git.git_string(&["rev-parse", "--verify", "-q", r]).ok().filter(|s| !s.is_empty());
+        let default = self
+            .branch_or_commit_at_point()
+            .filter(|a| Some(a) != current.as_ref() && !(current.is_none() && rev(a) == rev("HEAD")))
+            .or_else(|| self.previous_branch());
+        let mut candidates = self.git.refnames();
+        candidates.retain(|r| Some(r) != current.as_ref());
+        let table = Completion { candidates, ..Default::default() };
+        self.read_any(prompt, default.as_deref(), Hist::Revision, table)
+    }
+
+    /// magit-completing-read with REQUIRE-MATCH `any`: an empty input is
+    /// the default, without one "Nothing selected".
+    fn read_any(&mut self, prompt: &str, default: Option<&str>, hist: Hist, table: Completion) -> Result<Option<String>> {
+        let r = self.completing_read(prompt, default, hist, Some(table))?;
+        if r.as_deref() == Some("") {
+            self.set_msg("Nothing selected");
+            return Ok(None);
+        }
+        Ok(r)
+    }
+
+    /// magit--checkout: `git checkout ARGS REV` (a leading heads/
+    /// removed).
+    fn checkout_rev(&mut self, rev: &str, args: &[String]) {
+        let rev = rev.strip_prefix("heads/").unwrap_or(rev);
+        let mut a: Vec<&str> = vec!["checkout"];
+        a.extend(args.iter().map(String::as_str));
+        a.push(rev);
+        let res = self.git.git_interactive(&a);
+        self.done("", res.map(|_| String::new()));
+    }
+
+    /// magit-branch-checkout (b l): a local branch (not the current one)
+    /// is checked out; a remote branch (unless a local branch has its
+    /// name) becomes a new local branch of that name, the remote its
+    /// push-remote unless it is remote.pushDefault; another name is a
+    /// new branch, its starting point read.
+    fn branch_checkout(&mut self, args: &[String]) -> Result<()> {
+        let current = self.git.current_branch();
+        let local = self.git.branches();
+        let remote: Vec<String> = self
+            .git
+            .remote_branches()
+            .into_iter()
+            .filter(|r| r.split_once('/').is_some_and(|(_, b)| b != "HEAD" && !local.iter().any(|l| l == b)))
+            .collect();
+        let mut choices: Vec<String> = local.iter().filter(|b| Some(*b) != current.as_ref()).cloned().collect();
+        choices.extend(remote.iter().cloned());
+        let atpoint = self.branch_at_point();
+        let default = atpoint.as_ref().filter(|a| choices.contains(a)).cloned().or_else(|| {
+            let short = atpoint.as_ref()?.split_once('/')?.1.to_string();
+            choices.contains(&short).then_some(short)
+        });
+        let table = Completion { candidates: choices, ..Default::default() };
+        let choice = self.completing_read("Checkout branch", default.as_deref(), Hist::Revision, Some(table))?;
+        let Some(choice) = choice.filter(|c| !c.is_empty()) else {
+            return Ok(());
+        };
+        let (branch, start) = if remote.contains(&choice) {
+            (choice.split_once('/').map_or(choice.clone(), |(_, b)| b.to_string()), choice.clone())
+        } else if local.contains(&choice) {
+            self.checkout_rev(&choice, args);
+            return Ok(());
+        } else {
+            let Some(start) = self.read_starting_point("Create", Some(&choice), None)? else {
+                return Ok(());
+            };
+            (choice, start)
+        };
+        let modified = !self.git.staged_files().is_empty() || !self.git.unstaged_files().is_empty();
+        if modified && !args.iter().any(|a| a == "--merge") {
+            self.set_msg("Cannot checkout when there are uncommitted changes");
+            return Ok(());
+        }
+        let mut a: Vec<&str> = vec!["checkout"];
+        a.extend(args.iter().map(String::as_str));
+        a.extend(["-b", &branch, &start]);
+        let res = self.git.git_interactive(&a);
+        if res.is_ok() {
+            if let Some((r, b)) = self.split_remote_branch(&start) {
+                let push_default = self.git.git_string(&["config", "remote.pushDefault"]).unwrap_or_default();
+                if b == branch && r != push_default.trim() {
+                    self.git.git_interactive(&["config", &format!("branch.{branch}.pushRemote"), &r])?;
+                }
+            }
+        }
+        self.done("", res.map(|_| String::new()));
+        Ok(())
+    }
+
+    /// magit-split-branch-name of the remote branch NAME: its remote and
+    /// branch (None if not a remote branch).
+    fn split_remote_branch(&self, name: &str) -> Option<(String, String)> {
+        if !self.git.git_ok(&["show-ref", "--verify", "--quiet", &format!("refs/remotes/{name}")]) {
+            return None;
+        }
+        self.git.remotes().into_iter().find_map(|r| {
+            let b = name.strip_prefix(&format!("{r}/"))?.to_string();
+            Some((r, b))
+        })
+    }
+
+    /// magit-read-starting-point: "PROMPT [BRANCH] starting at" a ref
+    /// (the upstream first), HEAD or a *_HEAD of the git directory; the
+    /// default DEFAULT, else magit--default-starting-point.
+    fn read_starting_point(&mut self, prompt: &str, branch: Option<&str>, default: Option<&str>) -> Result<Option<String>> {
+        let prompt = match branch {
+            Some(b) => format!("{prompt} {b} starting at"),
+            None => format!("{prompt} starting at"),
+        };
+        let mut candidates = self.git.refnames();
+        if let Some(u) = self.git.upstream_shortname() {
+            candidates.retain(|r| *r != u);
+            candidates.insert(0, u);
+        }
+        candidates.push("HEAD".into());
+        if let Ok(rd) = std::fs::read_dir(&self.git.gitdir) {
+            let mut heads: Vec<String> =
+                rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.ends_with("_HEAD")).collect();
+            heads.sort();
+            candidates.extend(heads);
+        }
+        let default = default.map(str::to_string).or_else(|| self.default_starting_point());
+        let table = Completion { candidates, ..Default::default() };
+        self.read_any(&prompt, default.as_deref(), Hist::Revision, table)
+    }
+
+    /// magit--default-starting-point: the local, else the remote branch
+    /// at point, the commit or stash at point, the current branch.
+    fn default_starting_point(&self) -> Option<String> {
+        let kind = self.current_line().map(|l| l.kind.clone());
+        let (local, remote) = match &kind {
+            Some(LineKind::Ref { kind: RefKind::Local, name }) => (Some(name.clone()), None),
+            Some(LineKind::Ref { kind: RefKind::Remote, name }) => (None, Some(name.clone())),
+            Some(LineKind::Commit { hash, .. }) => (self.name_local_branch(hash), self.name_remote_branch(hash)),
+            _ => (None, None),
+        };
+        local
+            .or(remote)
+            .or_else(|| self.commit_at_point().map(|c| if is_stash_ref(&c) { c } else { self.git.rev_short(&c) }))
+            .or(match kind {
+                Some(LineKind::Stash { name, .. }) => Some(name),
+                _ => None,
+            })
+            .or_else(|| self.git.current_branch())
+    }
+
+    /// magit-branch-read-args (magit-branch-read-upstream-first t): the
+    /// starting point, then the name of the new branch.
+    fn branch_read_args(&mut self, prompt: &str) -> Result<Option<(String, String)>> {
+        let Some(start) = self.read_starting_point(prompt, None, None)? else {
+            return Ok(None);
+        };
+        if !self.git.git_ok(&["rev-parse", "--verify", "-q", &start]) {
+            self.set_msg(&format!("Not a valid starting-point: {start}"));
+            return Ok(None);
+        }
+        Ok(self.branch_read_name("Name for new branch", Some(&start))?.map(|n| (n, start)))
+    }
+
+    /// magit-branch--read-name: a new branch name (the branch name of a
+    /// remote branch START-POINT suggested) with minibuffer-history; the
+    /// names of existing branches and invalid names are refused.
+    fn branch_read_name(&mut self, prompt: &str, start_point: Option<&str>) -> Result<Option<String>> {
+        let taken = self.git.branches();
+        let mut choices = Vec::new();
+        if let Some((_, b)) = start_point.and_then(|s| self.split_remote_branch(s)) {
+            choices.push(b);
+        }
+        choices.retain(|c| !taken.contains(c));
+        loop {
+            let table = Completion { candidates: choices.clone(), ..Default::default() };
+            let Some(name) = self.completing_read(prompt, None, Hist::Minibuffer, Some(table))? else {
+                return Ok(None);
+            };
+            if name.is_empty() {
+                self.set_msg("Nothing selected");
+                return Ok(None);
+            }
+            if taken.contains(&name) {
+                self.set_msg("conflicts with existing branch");
+            } else if !self.git.git_ok(&["check-ref-format", "--branch", &name]) {
+                self.set_msg("not a valid branch name");
+            } else {
+                return Ok(Some(name));
+            }
+        }
     }
 
     /// magit-read-branch-or-commit: a ref or commit, the default the
@@ -8518,6 +8771,13 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
         app.load_history(f);
     }
     app.run()
+}
+
+/// Whether REV is a stash (stash@{N}).
+fn is_stash_ref(rev: &str) -> bool {
+    rev.strip_prefix("stash@{")
+        .and_then(|r| r.strip_suffix('}'))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The instant key answering any key with its code (read-event).
