@@ -14,7 +14,7 @@ pub(super) struct Worktree {
 }
 
 /// abbreviate-file-name: the home directory as "~".
-fn abbreviate(path: &str) -> String {
+pub(super) fn abbreviate(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && (path == home || path.starts_with(&format!("{home}/"))) => {
             format!("~{}", &path[home.len()..])
@@ -24,7 +24,7 @@ fn abbreviate(path: &str) -> String {
 }
 
 /// expand-file-name of a file name read in the minibuffer.
-fn expand(path: &str, dir: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn expand(path: &str, dir: &std::path::Path) -> std::path::PathBuf {
     let path = path.trim();
     let expanded = match path.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {

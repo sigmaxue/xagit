@@ -38,6 +38,7 @@ mod remote;
 mod reshelve;
 mod bisect;
 mod notes;
+mod patch;
 mod spread;
 mod submodule;
 mod subtree;
@@ -2834,8 +2835,12 @@ impl App {
             }
             // magit-read-files of magit-modified-files, the file at point
             // the initial input
-            Reader::Files => {
-                let candidates = self.git.git_lines(&["diff-index", "-z", "--name-only", "--submodule=short", "HEAD", "--"]);
+            Reader::Files | Reader::TrackedFiles => {
+                let candidates = if *reader == Reader::Files {
+                    self.git.git_lines(&["diff-index", "-z", "--name-only", "--submodule=short", "HEAD", "--"])
+                } else {
+                    self.git.git_lines(&["ls-files", "-z", "--full-name"])
+                };
                 *self.initial_input.borrow_mut() = self.current_file_name();
                 let table = Completion { candidates, require_match: false, multiple: true };
                 let Some(input) = self.read_line_hist("Limit to file,s: ", None, Hist::Infix(arg), Some(table))? else {
@@ -2859,6 +2864,24 @@ impl App {
             }
             Reader::NotesRef => {
                 let Some(v) = self.notes_read_ref(arg, arg)? else {
+                    return Ok(None);
+                };
+                v
+            }
+            Reader::CharCase(prompt, clauses) => {
+                let labels: Vec<&str> = clauses.iter().map(|(_, l, _)| l.as_str()).collect();
+                let prompt = format!("{prompt}{}, or [C-g] to abort ", labels.join(", "));
+                let keys: Vec<char> = clauses.iter().map(|(k, _, _)| *k).collect();
+                let Some(c) = self.read_char_choice(&prompt, &keys)? else {
+                    return Ok(None);
+                };
+                match clauses.iter().find(|(k, _, _)| *k == c) {
+                    Some((_, _, v)) => v.clone(),
+                    None => return Ok(None),
+                }
+            }
+            Reader::Person | Reader::PatchBase | Reader::RangeOrCommit | Reader::ExistingDirectory => {
+                let Some(v) = self.read_patch_infix(reader, arg)? else {
                     return Ok(None);
                 };
                 v
@@ -9084,109 +9107,11 @@ impl App {
             }
 
             // ---- patches
-            "patches-format" => {
-                let Some(range) =
-                    self.read_rev("Format patches for range", Some("HEAD~3..HEAD"))?
-                else {
-                    return Ok(());
-                };
-                let Some(dir) = self.read_line_prompt("Output directory", Some("patches"))? else {
-                    return Ok(());
-                };
-                let res = self.git.patch_format(&range, &dir);
-                self.show("format-patch", res);
-            }
-            "patches-apply" | "patches-apply-worktree" => {
-                let Some(path) = self.read_line_prompt("Patch file(s), space separated", None)? else {
-                    return Ok(());
-                };
-                let files: Vec<String> = path.split_whitespace().map(str::to_string).collect();
-                let res = if cmd == "patches-apply" {
-                    self.git.am_apply(&files, args)
-                } else {
-                    match files.as_slice() {
-                        [one] => self.git.patch_apply_worktree(one),
-                        _ => Err(anyhow::anyhow!("git apply takes exactly one patch file")),
-                    }
-                };
-                self.done("patch applied", res);
-            }
-            "patches-abort" | "patches-continue" | "patches-skip" | "patches-show" => {
-                let res = match cmd {
-                    "patches-abort" => self.git.patch_am_abort(),
-                    "patches-continue" => self.git.patch_am_continue(),
-                    "patches-skip" => self.git.am_skip(),
-                    _ => self.git.patch_am_show(),
-                };
-                if cmd == "patches-show" {
-                    self.show("current patch", res);
-                } else {
-                    self.done("git am", res);
-                }
-            }
-            // magit-patch-save: write the diff of the diff / revision / stash
-            // buffer shown to a file (magit-patch-save-arguments '(exclude "--stat"))
-            "patch-save" => {
-                let (range, typearg, files) = match &self.mode {
-                    BufferMode::Diff(s) => (s.range.clone(), s.typearg.clone(), s.files.clone()),
-                    BufferMode::Revision { rev, files } => (Some(format!("{rev}^..{rev}")), None, files.clone()),
-                    BufferMode::Stash { stash } => (Some(format!("{stash}^..{stash}")), None, Vec::new()),
-                    BufferMode::Status
-                    | BufferMode::Log { .. }
-                    | BufferMode::LogSelect { .. }
-                    | BufferMode::Reflog { .. }
-                    | BufferMode::Stashes { .. }
-                    | BufferMode::Cherry { .. }
-                    | BufferMode::Refs { .. }
-                    | BufferMode::File { .. } => {
-                        self.set_msg("Only diff buffers can be saved as patches");
-                        return Ok(());
-                    }
-                };
-                let Some(file) = self.read_line_prompt("Write patch file", None)? else {
-                    return Ok(());
-                };
-                let mut a: Vec<String> = vec!["diff".into()];
-                a.extend(range);
-                a.push("-p".into());
-                a.extend(typearg);
-                a.extend(self.buf_args.iter().filter(|x| *x != "--stat").cloned());
-                a.push("--".into());
-                a.extend(files);
-                let a: Vec<&str> = a.iter().map(String::as_str).collect();
-                let out = self.git.git_output(&a)?;
-                let path = self.git.toplevel.join(&file);
-                std::fs::write(&path, out.stdout)?;
-                self.refresh();
-            }
-            "request-pull" => {
-                let default_start = self.git.upstream_shortname();
-                let Some(start) = self.read_rev("Start (first commit not to include)", default_start.as_deref())? else {
-                    return Ok(());
-                };
-                let default_url = self
-                    .git
-                    .remotes()
-                    .first()
-                    .and_then(|r| self.git.git_string(&["remote", "get-url", r]).ok());
-                let Some(url) = self.read_line_prompt("Public repository url", default_url.as_deref())? else {
-                    return Ok(());
-                };
-                let end = self.read_rev("End (default HEAD)", None)?;
-                let res = self.git.request_pull(&start, &url, end.as_deref());
-                self.show("request-pull", res);
-            }
+            "patch-create" | "patch-apply" | "patches-apply" | "patches-apply-maildir" | "patches-continue" | "patches-skip"
+            | "patches-abort" | "patch-save" | "request-pull" => self.patch_command(cmd, args)?,
 
             // ---- branch configuration
             "update-default-branch" => self.update_default_branch()?,
-            "patches-apply-maildir" => {
-                let Some(p) = self.read_line_prompt("Apply mbox or Maildir", None)? else {
-                    return Ok(());
-                };
-                let path = self.cwd.join(&p);
-                let res = self.git.am_apply(&[path.display().to_string()], args);
-                self.done("patches applied", res);
-            }
             "merge-absorb" | "merge-dissolve" => self.merge_absorb_cmd(cmd, args)?,
             "cherry-harvest" | "cherry-donate" | "cherry-spinout" | "cherry-spinoff" => {
                 self.cherry_move_cmd(cmd, args)?

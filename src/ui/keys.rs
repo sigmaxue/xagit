@@ -64,7 +64,8 @@ impl Key {
 /// "C-SPC", "<backtab>") into Key.
 pub fn key_from_label(label: &str) -> Key {
     match label {
-        "RET" | "<return>" | "return" => Key { code: "enter".into(), ctrl: false },
+        // a terminal sends C-m as RET, as Emacs translates it
+        "RET" | "<return>" | "return" | "C-m" => Key { code: "enter".into(), ctrl: false },
         "TAB" | "<tab>" | "tab" => Key { code: "tab".into(), ctrl: false },
         "ESC" | "esc" | "C-[" => Key { code: "esc".into(), ctrl: false },
         "SPC" | " " => Key { code: " ".into(), ctrl: false },

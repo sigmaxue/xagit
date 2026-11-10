@@ -30,6 +30,8 @@ pub fn man_page(name: &str) -> Option<&'static str> {
         "notes-menu" => "git-notes",
         "subtree-menu" | "subtree-import-menu" | "subtree-export-menu" => "git-subtree",
         "patches-menu" => "git-am",
+        "patch-create-menu" => "git-format-patch",
+        "patch-apply-menu" => "git-apply",
         "blame-menu" => "git-blame",
         _ => return None,
     })

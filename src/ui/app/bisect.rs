@@ -17,7 +17,7 @@ impl App {
 
     /// magit-region-values '(commit branch) t: the selected commits and
     /// branches (at least two), top to bottom.
-    fn region_revs(&self) -> Option<Vec<String>> {
+    pub(super) fn region_revs(&self) -> Option<Vec<String>> {
         let secs = self.region_sections(true)?;
         secs.iter()
             .map(|&s| match &self.buf.all[self.sec(s).start].kind {

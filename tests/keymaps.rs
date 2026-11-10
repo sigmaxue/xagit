@@ -767,19 +767,39 @@ fn remaining_extras_popup_layout() {
     assert!(matches!(action_of(&p, "-3"), Action::Switch(s) if s == "--3way"));
     assert!(matches!(action_of(&p, "m"), Action::Command(c) if c == "patches-apply-maildir"));
     assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-apply"));
-    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-apply-worktree"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patch-apply-menu"));
+    assert!(matches!(action_of(&p, "-p"), Action::Option { arg, reader: Reader::OptionalNumber } if arg == "-p"));
     let p = menu("patches-menu@progress");
+    assert_eq!(p.keys(), ["w", "s", "a"]);
     assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-continue"));
     assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "patches-skip"));
     assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-abort"));
 
     // magit-patch ("W")
     let p = menu("patch-menu");
-    assert!(matches!(action_of(&p, "c"), Action::Command(c) if c == "patches-format"));
+    assert_eq!(p.keys(), ["c", "w", "a", "s", "r"]);
+    assert!(matches!(action_of(&p, "c"), Action::Command(c) if c == "patch-create-menu"));
     assert!(matches!(action_of(&p, "w"), Action::Command(c) if c == "patches-menu"));
-    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patches-apply-worktree"));
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patch-apply-menu"));
     assert!(matches!(action_of(&p, "s"), Action::Command(c) if c == "patch-save"));
     assert!(matches!(action_of(&p, "r"), Action::Command(c) if c == "request-pull"));
+    // magit-patch-create
+    let p = menu("patch-create-menu");
+    assert_eq!(
+        p.keys(),
+        [
+            "C-m C-r", "C-m s", "C-m C-f", "C-m C-t", "C-m C-c", "C-m b", "C-m v", "C-m d i", "C-m d r", "C-m p", "C-m r",
+            "C-m l", "C-m D", "C-m n", "C-m o", "-U", "-M", "-C", "-A", "--", "-b", "-w", "c"
+        ]
+    );
+    assert!(matches!(action_of(&p, "C-m b"), Action::Option { arg, reader: Reader::PatchBase } if arg == "--base="));
+    assert!(matches!(action_of(&p, "C-m l"), Action::Switch(a) if a == "--cover-letter"));
+    assert!(matches!(action_of(&p, "--"), Action::Option { reader: Reader::TrackedFiles, .. }));
+    assert!(matches!(action_of(&p, "c"), Action::Command(c) if c == "patch-create"));
+    // magit-patch-apply
+    let p = menu("patch-apply-menu");
+    assert_eq!(p.keys(), ["-i", "-c", "-3", "a"]);
+    assert!(matches!(action_of(&p, "a"), Action::Command(c) if c == "patch-apply"));
 
     // magit-branch-configure (magit-branch.el)
     let c = menu("branch-config-menu");

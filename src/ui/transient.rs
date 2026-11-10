@@ -91,6 +91,20 @@ pub enum Reader {
     SubtreePrefix,
     /// magit-notes-read-ref: one of the notes refs, qualified
     NotesRef,
+    /// magit-read-char-case PROMPT with (KEY LABEL VALUE) clauses (the
+    /// "[C-g] to abort" part shown)
+    CharCase(String, Vec<(char, String, String)>),
+    /// magit-transient-read-person: one of the authors of HEAD (any input)
+    Person,
+    /// magit-format-patch-select-base: "auto" (the default) or a ref
+    PatchBase,
+    /// magit-read-range-or-commit
+    RangeOrCommit,
+    /// transient-read-existing-directory: an absolute directory name
+    ExistingDirectory,
+    /// Files like Reader::Files but of magit-list-files (the tracked
+    /// files)
+    TrackedFiles,
 }
 
 impl Action {
@@ -252,6 +266,9 @@ fn opt(key: &str, desc: &str, arg: &str, reader: Reader) -> MenuEntry {
 }
 fn choices(c: &[&str]) -> Reader {
     Reader::Choices(c.iter().map(|s| s.to_string()).collect())
+}
+fn char_case(prompt: &str, clauses: &[(char, &str, &str)]) -> Reader {
+    Reader::CharCase(prompt.into(), clauses.iter().map(|(k, l, v)| (*k, l.to_string(), v.to_string())).collect())
 }
 fn pick(c: &[&str]) -> Reader {
     Reader::Pick(c.iter().map(|s| s.to_string()).collect())
@@ -506,7 +523,7 @@ pub fn incompatible(name: &str) -> &'static [&'static [&'static str]] {
         "merge-menu" => &[&["--ff-only", "--no-ff"]],
         "log-menu" | "log-refresh-menu" => &[&["--merges", "--no-merges"]],
         "cherry-pick-menu" => &[&["--ff", "-x"]],
-        "patch-menu" => &[&["--subject-prefix=", "--rfc"]],
+        "patch-create-menu" => &[&["--subject-prefix=", "--rfc"]],
         _ => &[],
     }
 }
@@ -1753,10 +1770,12 @@ pub fn registry() -> BTreeMap<String, Menu> {
             name: "patches-menu".into(),
             title: "Apply patches".into(),
             groups: vec![
+                // "Arguments"
                 vec![
                     sw("-3", "Fall back on 3way merge", "--3way"),
                     sw("-R", "Reject only failed hunks", "--reject"),
-                    opt("-p", "Remove leading slashes from paths", "-p", Reader::Number { zero: false }),
+                    // magit-apply:-p (:allow-empty)
+                    opt("-p", "Remove leading slashes from paths", "-p", Reader::OptionalNumber),
                     sw("-c", "Remove text before scissors line", "--scissors"),
                     sw("-k", "Inhibit removal of email cruft", "--keep"),
                     sw("-b", "Limit removal of email cruft", "--keep-non-patch"),
@@ -1765,10 +1784,11 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     gpg_sign(),
                     signoff(),
                 ],
+                // "Apply"
                 vec![
                     cmd("m", "maildir", "patches-apply-maildir"),
                     cmd("w", "patches", "patches-apply"),
-                    cmd("a", "plain patch", "patches-apply-worktree"),
+                    cmd("a", "plain patch", "patch-apply-menu"),
                 ],
             ],
         },
@@ -1778,16 +1798,13 @@ pub fn registry() -> BTreeMap<String, Menu> {
         "patches-menu@progress".into(),
         Menu {
             name: "patches-menu@progress".into(),
-            title: "Applying patches".into(),
-            groups: vec![
-                vec![
-                    cmd("w", "Continue", "patches-continue"),
-                    cmd("s", "Skip", "patches-skip"),
-                    cmd("a", "Abort", "patches-abort"),
-                ],
-                // xagit extra
-                vec![cmd("l", "Show current patch", "patches-show")],
-            ],
+            title: "Apply patches".into(),
+            // "Actions"
+            groups: vec![vec![
+                cmd("w", "Continue", "patches-continue"),
+                cmd("s", "Skip", "patches-skip"),
+                cmd("a", "Abort", "patches-abort"),
+            ]],
         },
     );
 
@@ -1796,14 +1813,82 @@ pub fn registry() -> BTreeMap<String, Menu> {
         "patch-menu".into(),
         Menu {
             name: "patch-menu".into(),
-            title: "Patches".into(),
-            groups: vec![vec![
-                cmd("c", "Create patches", "patches-format"),
-                cmd("w", "Apply patches", "patches-menu"),
-                cmd("a", "Apply plain patch", "patches-apply-worktree"),
-                cmd("s", "Save diff as patch", "patch-save"),
-                cmd("r", "Request pull", "request-pull"),
-            ]],
+            title: "Create or apply patches".into(),
+            // "Actions"
+            groups: vec![
+                vec![cmd("c", "Create patches", "patch-create-menu"), cmd("w", "Apply patches", "patches-menu")],
+                vec![cmd("a", "Apply plain patch", "patch-apply-menu"), cmd("s", "Save diff as patch", "patch-save")],
+                vec![cmd("r", "Request pull", "request-pull")],
+            ],
+        },
+    );
+    m.insert(
+        "patch-create-menu".into(),
+        Menu {
+            name: "patch-create-menu".into(),
+            title: "Create patches".into(),
+            groups: vec![
+                // "Mail arguments"
+                vec![
+                    opt("C-m C-r", "In reply to", "--in-reply-to=", Reader::String).level(6),
+                    opt("C-m s", "Thread style", "--thread=", char_case("Thread style ", &[('d', "[d]eep", "deep"), ('s', "[s]hallow", "shallow")]))
+                        .level(6),
+                    opt("C-m C-f", "From", "--from=", Reader::Person).level(6),
+                    opt("C-m C-t", "To", "--to=", Reader::Person).level(6),
+                    opt("C-m C-c", "CC", "--cc=", Reader::Person).level(6),
+                ],
+                // "Patch arguments"
+                vec![
+                    opt("C-m b", "Insert base commit", "--base=", Reader::PatchBase),
+                    opt("C-m v", "Reroll count", "--reroll-count=", Reader::Number { zero: false }),
+                    opt("C-m d i", "Insert interdiff", "--interdiff=", Reader::Revision).level(5),
+                    opt("C-m d r", "Insert range-diff", "--range-diff=", Reader::RangeOrCommit),
+                    opt("C-m p", "Subject Prefix", "--subject-prefix=", Reader::String),
+                    sw("C-m r", "RFC subject prefix", "--rfc"),
+                    sw("C-m l", "Add cover letter", "--cover-letter"),
+                    opt(
+                        "C-m D",
+                        "Use branch description",
+                        "--cover-from-description=",
+                        char_case(
+                            "Use description as ",
+                            &[('m', "[m]essage", "message"), ('s', "[s]ubject", "subject"), ('a', "[a]uto", "auto"), ('n', "[n]othing", "none")],
+                        ),
+                    )
+                    .level(5),
+                    opt("C-m n", "Insert commentary from notes", "--notes=", Reader::NotesRef).level(5),
+                    opt("C-m o", "Output directory", "--output-directory=", Reader::ExistingDirectory),
+                ],
+                // "Diff arguments"
+                vec![
+                    opt("-U", "Context lines", "-U", Reader::Number { zero: true }),
+                    opt("-M", "Detect renames", "-M", Reader::Similarity),
+                    opt("-C", "Detect copies", "-C", Reader::Similarity),
+                    opt("-A", "Diff algorithm", "--diff-algorithm=", choices(&["default", "minimal", "patience", "histogram"])),
+                    opt("--", "Limit to files", "-- ", Reader::TrackedFiles),
+                    sw("-b", "Ignore whitespace changes", "--ignore-space-change").level(7),
+                    sw("-w", "Ignore all whitespace", "--ignore-all-space").level(7),
+                ],
+                // "Actions"
+                vec![cmd("c", "Create patches", "patch-create")],
+            ],
+        },
+    );
+    m.insert(
+        "patch-apply-menu".into(),
+        Menu {
+            name: "patch-apply-menu".into(),
+            title: "Apply the patch file".into(),
+            groups: vec![
+                // "Arguments"
+                vec![
+                    sw("-i", "Also apply to index", "--index"),
+                    sw("-c", "Only apply to index", "--cached"),
+                    sw("-3", "Fall back on 3way merge", "--3way"),
+                ],
+                // "Actions"
+                vec![cmd("a", "Apply patch", "patch-apply")],
+            ],
         },
     );
 
