@@ -1,6 +1,6 @@
 //! tests/common/mod.rs — shared test fixtures: scratch repos mirroring Magit test setup.
 
-use ngit_lib::prelude::*;
+use xagit_lib::prelude::*;
 use std::fs;
 
 /// Create an empty scratch repo (like magit's `setup` with no commits).

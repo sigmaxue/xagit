@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
+use xagit_lib::prelude::*;
 
 // =============================================================== discover
 
@@ -87,7 +87,7 @@ fn status_branch_and_ahead_behind() {
 
 #[test]
 fn branch_header_parsing() {
-    use ngit_lib::git::status::parse_branch_header as p;
+    use xagit_lib::git::status::parse_branch_header as p;
     let h = p("main...origin/main [ahead 12, behind 3]");
     assert_eq!(h.branch.as_deref(), Some("main"));
     assert_eq!(h.upstream.as_deref(), Some("origin/main"));
@@ -175,7 +175,7 @@ fn status_lists_conflicts_once_as_unmerged() {
     assert!(u[0].is_unmerged());
     assert_eq!(u[0].conflict_desc(), "");
 
-    let lines = ngit_lib::ui::view::render_status(&g, &st);
+    let lines = xagit_lib::ui::view::render_status(&g, &st);
     assert!(lines.iter().any(|l| l.text.contains("unmerged   file.txt")));
 }
 
@@ -968,7 +968,7 @@ fn stash_branch_checks_out_and_applies() {
 fn snapshot_keeps_changes_in_place() {
     let (_td, g, _head) = repo_with_commit();
     write(&g, "file.txt", "still here\n");
-    g.snapshot(ngit_lib::git::ops::SnapshotScope::Both, Untracked::No)
+    g.snapshot(xagit_lib::git::ops::SnapshotScope::Both, Untracked::No)
         .unwrap();
     assert_eq!(read(&g, "file.txt"), "still here\n");
     assert_eq!(g.stashes().len(), 1, "snapshot recorded as a stash");
@@ -1617,7 +1617,7 @@ fn rebase_autosquash_folds_fixups() {
 /// `$` shows side-effecting git calls (with failures marked), not queries.
 #[test]
 fn process_log_records_commands_not_queries() {
-    use ngit_lib::git::exec::process_log;
+    use xagit_lib::git::exec::process_log;
     let (_td, g, _head) = repo_with_commit();
     g.tag_create("proclog-marker", "HEAD", &[], None).unwrap();
     let _ = g.git_string(&["rev-parse", "--verify", "proclog-query^{commit}"]);
@@ -1672,7 +1672,7 @@ fn linear_repo() -> (TempDir, Git, [String; 3]) {
 #[test]
 fn perl_pick_editor_matches_magit() {
     assert_eq!(
-        ngit_lib::git::ops::perl_pick_editor("abc123", "edit"),
+        xagit_lib::git::ops::perl_pick_editor("abc123", "edit"),
         "perl -i -p -e '++$x if not $x and s/^pick abc123/edit abc123/'"
     );
 }
@@ -1967,13 +1967,13 @@ fn checkout_failure_preserves_local_changes_and_git_diagnostics() {
     assert!(text.contains(&g.toplevel.display().to_string()));
     assert_eq!(read(&g, "file.txt"), "keep my local changes\n");
     assert_eq!(g.current_branch().unwrap(), main);
-    assert!(ngit_lib::git::exec::process_log().iter().any(|entry| (entry.contains("would be overwritten") || entry.contains("本地修改将被检出操作覆盖")) && entry.contains("file.txt")));
+    assert!(xagit_lib::git::exec::process_log().iter().any(|entry| (entry.contains("would be overwritten") || entry.contains("本地修改将被检出操作覆盖")) && entry.contains("file.txt")));
 }
 
 #[test]
 fn checkout_unknown_branch_keeps_diagnostics_in_both_execution_paths() {
     let (_td, g, _) = repo_with_commit();
-    for result in [g.checkout("checkout-missing-ref"), g.git_with_editors_env(ngit_lib::git::exec::Editor::User, ngit_lib::git::exec::Editor::User, &[], &["checkout", "checkout-missing-ref"])] {
+    for result in [g.checkout("checkout-missing-ref"), g.git_with_editors_env(xagit_lib::git::exec::Editor::User, xagit_lib::git::exec::Editor::User, &[], &["checkout", "checkout-missing-ref"])] {
         let text = format!("{:#}", result.unwrap_err());
         assert!(((text.contains("pathspec") && text.contains("did not match")) || text.contains("路径规格")), "{text}");
         assert!(text.contains("checkout-missing-ref") && text.contains(&g.toplevel.display().to_string()));

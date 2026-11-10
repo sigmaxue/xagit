@@ -4,8 +4,8 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode, PrefixArg};
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode, PrefixArg};
 
 fn press(app: &mut App, keys: &[&str]) {
     for k in keys {

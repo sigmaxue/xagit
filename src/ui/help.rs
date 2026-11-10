@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn info_nodes() {
-        let dir = std::env::temp_dir().join(format!("ngit-help-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("xagit-help-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("m.info"),

@@ -102,7 +102,7 @@ pub struct App {
     /// pending text-mode buffer shown instead of status (diff/log/show output)
     view_text: Option<(String, String)>, // (title, content)
     view_scroll: usize,
-    /// directory ngit was started in (magit-git-command's default-directory)
+    /// directory xagit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
     /// arguments of new diff / revision / stash buffers (the current value
     /// of magit-diff, initially magit-diff-mode's "--stat --no-ext-diff")
@@ -184,7 +184,7 @@ pub enum BufferMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectAction {
     /// magit-rebase-interactive / -edit-commit / -reword-commit /
-    /// -remove-commit (CMD is the ngit command)
+    /// -remove-commit (CMD is the xagit command)
     Rebase { cmd: String, args: Vec<String> },
     /// magit-rebase-subset onto NEWBASE
     RebaseSubset { newbase: String, args: Vec<String> },
@@ -602,7 +602,7 @@ impl App {
         &self.mode
     }
 
-    /// Whether ngit is about to exit (the last buffer was buried).
+    /// Whether xagit is about to exit (the last buffer was buried).
     pub fn quitting(&self) -> bool {
         self.quit
     }
@@ -938,7 +938,7 @@ impl App {
         }
         rows.extend(popup);
         let branch = self.git.head_desc();
-        rows.push(format!("[ngit:{branch}] {}", self.message));
+        rows.push(format!("[xagit:{branch}] {}", self.message));
         rows.push("(h/? dispatch, g refresh, q quit, TAB toggle, RET visit, n/p section, C-n/C-p line)".into());
 
         let mut out = stdout();
@@ -3367,7 +3367,7 @@ impl App {
             // -------- stash
             "stash-both" | "stash-index" | "stash-worktree" | "stash-keep-index" => {
                 let untracked = self.untracked_from(active);
-                let msg = self.read_line_prompt("Stash message", Some("ngit stash"))?;
+                let msg = self.read_line_prompt("Stash message", Some("xagit stash"))?;
                 match cmd {
                     "stash-both" => g!().stash_both(msg.as_deref(), untracked)?,
                     "stash-index" => g!().stash_index(msg.as_deref())?,

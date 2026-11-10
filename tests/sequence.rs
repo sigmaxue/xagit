@@ -5,8 +5,8 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::App;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
 
 fn commit_file(g: &Git, file: &str, msg: &str) {
     write(g, file, &format!("{msg}\n"));

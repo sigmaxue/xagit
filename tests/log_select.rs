@@ -4,8 +4,8 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode, SelectAction};
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode, SelectAction};
 
 /// initial, two (two.txt), fixup! two (two.txt changed again).
 fn repo() -> (TempDir, Git) {

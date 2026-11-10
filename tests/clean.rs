@@ -5,9 +5,9 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::App;
-use ngit_lib::ui::options::Options;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
+use xagit_lib::ui::options::Options;
 
 const USE: &str = "Use this command? ([N]o, [Y]es, SPC (space bar) only once, ! use and enable all): ";
 

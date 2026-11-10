@@ -1,13 +1,13 @@
-//! User options (`~/.config/ngit/options`): magit-no-confirm and the
+//! User options (`~/.config/xagit/options`): magit-no-confirm and the
 //! confirmations of magit-confirm, including those of the abort
 //! commands and magit-bisect-reset.
 
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::App;
-use ngit_lib::ui::options::Options;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
+use xagit_lib::ui::options::Options;
 
 fn press(app: &mut App, keys: &[&str]) {
     for k in keys {
@@ -171,7 +171,7 @@ fn options_file() {
     // a missing file: the defaults
     app.load_options(&file);
     assert_eq!(app.message(), "");
-    std::fs::write(&file, "; ngit options\nmagit-no-confirm discard\nmagit-frob t\n").unwrap();
+    std::fs::write(&file, "; xagit options\nmagit-no-confirm discard\nmagit-frob t\n").unwrap();
     app.load_options(&file);
     assert!(app.message().ends_with("options:3: unknown option magit-frob"), "{}", app.message());
     write(&g, "file.txt", "changed\n");

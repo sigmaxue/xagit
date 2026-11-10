@@ -6,11 +6,11 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::App;
-use ngit_lib::ui::keys::key_from_label;
-use ngit_lib::ui::minibuf::{add_to_history, LineEditor, Step};
-use ngit_lib::ui::transient::{read_history, write_history, History, HISTORY_LIMIT};
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
+use xagit_lib::ui::keys::key_from_label;
+use xagit_lib::ui::minibuf::{add_to_history, LineEditor, Step};
+use xagit_lib::ui::transient::{read_history, write_history, History, HISTORY_LIMIT};
 
 fn press_all(app: &mut App, keys: &[&str]) {
     for k in keys {

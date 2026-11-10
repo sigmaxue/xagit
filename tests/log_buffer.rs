@@ -5,9 +5,9 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode};
-use ngit_lib::ui::logbuf::{
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode};
+use xagit_lib::ui::logbuf::{
     age, author_margin, format_shortstat, format_time, reflog_subject, Margin, MarginStyle, DEFAULT_TIME_FORMAT,
     LOG_MARGIN_WIDTH,
 };

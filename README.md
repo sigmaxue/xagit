@@ -1,8 +1,8 @@
-# ngit — Magit-style git TUI in Rust
+# xagit — Magit-style git TUI in Rust
 
-ngit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com/magit/magit) 的操作流程、快捷键和 transient 菜单。它结合 Git 命令行操作与 libgit2 只读后端，无需 Emacs 即可查看仓库状态并执行常用 Git 操作。
+xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com/magit/magit) 的操作流程、快捷键和 transient 菜单。它结合 Git 命令行操作与 libgit2 只读后端，无需 Emacs 即可查看仓库状态并执行常用 Git 操作。
 
-项目仓库：[sigmaxue/ngit](https://github.com/sigmaxue/ngit)。本项目不是 Magit 的完整替代，兼容范围与限制见下文。
+项目仓库：[sigmaxue/xagit](https://github.com/sigmaxue/xagit)。本项目不是 Magit 的完整替代，兼容范围与限制见下文。
 
 ## 目录
 
@@ -40,29 +40,29 @@ ngit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com/
 从源码构建：
 
 ```bash
-git clone https://github.com/sigmaxue/ngit.git
-cd ngit
+git clone https://github.com/sigmaxue/xagit.git
+cd xagit
 cargo build --release
 ```
 
-构建产物为 `target/release/ngit`（Windows 通常为 `ngit.exe`）。如需安装到 Cargo 的可执行文件目录：
+构建产物为 `target/release/xagit`（Windows 通常为 `xagit.exe`）。如需安装到 Cargo 的可执行文件目录：
 
 ```bash
 cargo install --path .
 ```
 
-确保 Cargo 的可执行文件目录在 `PATH` 中后，可直接运行 `ngit`。
+确保 Cargo 的可执行文件目录在 `PATH` 中后，可直接运行 `xagit`。
 
 ## 快速开始
 
 在源码目录构建后：
 
 ```bash
-./target/release/ngit                 # 查看当前仓库
-./target/release/ngit /path/to/repo   # 查看指定仓库
+./target/release/xagit                 # 查看当前仓库
+./target/release/xagit /path/to/repo   # 查看指定仓库
 ```
 
-安装后也可在任意 Git 仓库内运行 `ngit`，或运行 `ngit /path/to/repo`。CLI 只读取第一个位置参数作为路径，省略时使用当前目录；没有专用的 `--help`/`--version` 参数解析。
+安装后也可在任意 Git 仓库内运行 `xagit`，或运行 `xagit /path/to/repo`。CLI 只读取第一个位置参数作为路径，省略时使用当前目录；没有专用的 `--help`/`--version` 参数解析。
 
 1. 按 `h` 或 `?` 查看总菜单，按 `n`/`p` 在章节间移动，方向键在行间移动。
 2. 按 `TAB` 展开变更；在文件或 hunk 上按 `s` 暂存，按 `u` 取消暂存。
@@ -183,7 +183,7 @@ cargo test
 
 ## Magit 兼容范围与已知限制
 
-ngit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
+xagit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
 
 - 提交消息及 `m e` 的合并消息主要通过提示行输入；需要编辑 todo 或提交消息时使用外部编辑器，替代 Emacs 的 `git-rebase-mode`/with-editor 会话。编辑器退出后返回 TUI。
 - `e`/`E` 用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；依赖 Ediff 会话的 stage/resolve 入口仍未提供。普通暂存和冲突相关功能不因此全部缺失。
@@ -195,13 +195,13 @@ ngit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多
 
 ## 贡献
 
-欢迎在 [Issues](https://github.com/sigmaxue/ngit/issues) 提交问题或通过 Pull Request 改进代码和文档。报告问题时请提供复现步骤、Git/Rust 版本、终端环境以及相关错误输出；不要附带凭据或私有仓库敏感信息。
+欢迎在 [Issues](https://github.com/sigmaxue/xagit/issues) 提交问题或通过 Pull Request 改进代码和文档。报告问题时请提供复现步骤、Git/Rust 版本、终端环境以及相关错误输出；不要附带凭据或私有仓库敏感信息。
 
 代码改动请补充对应的 `tests/` 回归用例并运行 `cargo test`；涉及键位或行为的变更请同步更新 README。提交前可用 `git diff --check` 检查空白问题。
 
 ## 致谢
 
-感谢 [Magit](https://github.com/magit/magit) 提供的操作设计与键位参考，以及 Rust、[crossterm](https://github.com/crossterm-rs/crossterm)、[git2-rs](https://github.com/rust-lang/git2-rs) 和 libgit2 社区。ngit 是独立实现，不是 Magit 官方项目。
+感谢 [Magit](https://github.com/magit/magit) 提供的操作设计与键位参考，以及 Rust、[crossterm](https://github.com/crossterm-rs/crossterm)、[git2-rs](https://github.com/rust-lang/git2-rs) 和 libgit2 社区。xagit 是独立实现，不是 Magit 官方项目。
 
 ## 许可证
 

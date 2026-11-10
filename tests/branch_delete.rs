@@ -4,8 +4,8 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::App;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
 
 fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();

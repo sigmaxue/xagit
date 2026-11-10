@@ -4,9 +4,9 @@
 mod common;
 
 use common::*;
-use ngit_lib::git::diff::{self, Hunk};
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode};
+use xagit_lib::git::diff::{self, Hunk};
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode};
 
 fn numbered(n: usize) -> String {
     (1..=n).map(|i| format!("l{i}\n")).collect()

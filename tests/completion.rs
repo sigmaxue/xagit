@@ -7,9 +7,9 @@
 mod common;
 
 use common::*;
-use ngit_lib::ui::app::App;
-use ngit_lib::ui::keys::key_from_label;
-use ngit_lib::ui::minibuf::{completion_rows, Completion, LineEditor, Step};
+use xagit_lib::ui::app::App;
+use xagit_lib::ui::keys::key_from_label;
+use xagit_lib::ui::minibuf::{completion_rows, Completion, LineEditor, Step};
 
 fn type_keys(ed: &mut LineEditor, keys: &[&str]) -> Step {
     let mut last = Step::Continue;

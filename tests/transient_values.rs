@@ -6,8 +6,8 @@
 mod common;
 
 use common::*;
-use ngit_lib::ui::app::App;
-use ngit_lib::ui::options::Options;
+use xagit_lib::ui::app::App;
+use xagit_lib::ui::options::Options;
 
 fn press_all(app: &mut App, keys: &[&str]) {
     for k in keys {

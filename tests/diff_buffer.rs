@@ -5,9 +5,9 @@
 mod common;
 
 use common::*;
-use ngit_lib::git::diff;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode};
+use xagit_lib::git::diff;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode};
 
 fn numbered(n: usize) -> String {
     (1..=n).map(|i| format!("l{i}\n")).collect()
@@ -345,7 +345,7 @@ fn diff_menu_arguments_apply_to_the_new_buffer_only() {
 
 /// The key of the "--stat" switch in the diff transients.
 fn stat_switch_key(_app: &App) -> String {
-    use ngit_lib::ui::transient::{registry, Action};
+    use xagit_lib::ui::transient::{registry, Action};
     let menus = registry();
     let menu = &menus["diff-refresh-menu"];
     for group in &menu.groups {

@@ -357,14 +357,14 @@ pub const VALUE_COMMANDS: [(&str, &str); 5] = [
 pub const STICKY_COMMANDS: [(&str, &str); 3] =
     [("C-g", "Quit prefix or transient"), ("C-q", "Quit transient stack"), ("C-z", "Suspend transient stack")];
 
-/// transient-values-file: `~/.config/ngit/transient-values` (or under
+/// transient-values-file: `~/.config/xagit/transient-values` (or under
 /// $XDG_CONFIG_HOME).
 pub fn default_values_file() -> Option<std::path::PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(x) => std::path::PathBuf::from(x),
         None => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config"),
     };
-    Some(base.join("ngit").join("transient-values"))
+    Some(base.join("xagit").join("transient-values"))
 }
 
 /// Read transient-values: one prefix per line, its key followed by its
@@ -1067,7 +1067,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("O", "reflog other", "reflog-other"),
                     cmd("H", "reflog HEAD", "reflog-head"),
                     sub("s", "shortlog", "shortlog-menu"),
-                    // ngit extra (Magit: magit-log-buffer-file in the file dispatch)
+                    // xagit extra (Magit: magit-log-buffer-file in the file dispatch)
                     cmd("f", "file at point", "log-change"),
                 ],
             ],
@@ -1220,7 +1220,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("r", "Reset", "bisect-reset"),
                     cmd("s", "Run script", "bisect-run"),
                 ],
-                // ngit extra: Magit shows the log in the status buffer
+                // xagit extra: Magit shows the log in the status buffer
                 vec![cmd("l", "Log", "bisect-log")],
             ],
         },
@@ -1381,7 +1381,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("s", "Skip", "patches-skip"),
                     cmd("a", "Abort", "patches-abort"),
                 ],
-                // ngit extra
+                // xagit extra
                 vec![cmd("l", "Show current patch", "patches-show")],
             ],
         },
@@ -1423,7 +1423,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("a m", "branch.autoSetupMerge (cycle)", "branch-autosetup-merge"),
                     cmd("a r", "branch.autoSetupRebase (cycle)", "branch-autosetup-rebase"),
                 ],
-                // ngit extras
+                // xagit extras
                 vec![
                     cmd("s", "Show settings", "branch-config-show"),
                     cmd("U", "Unset upstream", "branch-config-unset-upstream"),

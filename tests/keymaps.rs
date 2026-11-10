@@ -1,17 +1,17 @@
 //! tests/keymaps.rs — verify every menu matches Magit's key bindings extracted
 //! from the lisp sources (magit.el, magit-branch.el, magit-commit.el, ...).
 
-use ngit_lib::ui::transient::{registry, resolve_menu, Action, RepoState};
+use xagit_lib::ui::transient::{registry, resolve_menu, Action, RepoState};
 
-fn menu(name: &str) -> ngit_lib::ui::transient::Menu {
+fn menu(name: &str) -> xagit_lib::ui::transient::Menu {
     registry().get(name).expect("menu exists").clone()
 }
 
-fn find(m: &ngit_lib::ui::transient::Menu, key: &str) -> Option<Action> {
+fn find(m: &xagit_lib::ui::transient::Menu, key: &str) -> Option<Action> {
     m.groups.iter().flatten().find(|e| e.key == key).map(|e| e.action.clone())
 }
 
-fn action_of(m: &ngit_lib::ui::transient::Menu, key: &str) -> Action {
+fn action_of(m: &xagit_lib::ui::transient::Menu, key: &str) -> Action {
     find(m, key).unwrap_or_else(|| panic!("key {key} not found in {}", m.name))
 }
 
@@ -483,7 +483,7 @@ fn menu_targets_exist() {
 /// Key translation mirrors Emacs notation.
 #[test]
 fn key_labels() {
-    use ngit_lib::ui::keys::key_from_label;
+    use xagit_lib::ui::keys::key_from_label;
     assert_eq!(key_from_label("RET").code, "enter");
     assert_eq!(key_from_label("<tab>").code, "tab");
     assert!(key_from_label("C-g").ctrl);
@@ -564,7 +564,7 @@ fn extra_features_popup_layout() {
     let n = menu("notes-menu");
     assert!(matches!(action_of(&n, "T"), Action::Command(c) if c == "notes-edit"));
 
-    // magit-ediff: "E" is dwim (shown as text diffs in ngit)
+    // magit-ediff: "E" is dwim (shown as text diffs in xagit)
     let e = menu("ediff-menu");
     for (key, target) in [
         ("E", "ediff-dwim"),
@@ -659,8 +659,8 @@ fn remaining_extras_popup_layout() {
 /// Transient keys are key sequences, as in Emacs `kbd`.
 #[test]
 fn transient_key_sequences() {
-    use ngit_lib::ui::keys::key_from_label;
-    use ngit_lib::ui::transient::{key_seq, Lookup};
+    use xagit_lib::ui::keys::key_from_label;
+    use xagit_lib::ui::transient::{key_seq, Lookup};
     let k = key_from_label;
     assert_eq!(key_seq("-a"), vec![k("-"), k("a")]);
     assert_eq!(key_seq("a m"), vec![k("a"), k("m")]);
@@ -692,8 +692,8 @@ fn transient_key_sequences() {
 /// Typing a switch is two keys ("-" then "f"); "a m" likewise.
 #[test]
 fn app_reads_multi_key_bindings() {
-    use ngit_lib::prelude::*;
-    use ngit_lib::ui::app::App;
+    use xagit_lib::prelude::*;
+    use xagit_lib::ui::app::App;
     let td = TempDir::new().unwrap();
     assert!(std::process::Command::new("git")
         .args(["init", "-q"])
@@ -765,7 +765,7 @@ fn app_reads_multi_key_bindings() {
 
 #[test]
 fn config_choices_match_magit() {
-    use ngit_lib::ui::app::{AUTOSETUP_MERGE_CHOICES, AUTOSETUP_REBASE_CHOICES, REBASE_CHOICES};
+    use xagit_lib::ui::app::{AUTOSETUP_MERGE_CHOICES, AUTOSETUP_REBASE_CHOICES, REBASE_CHOICES};
     // magit-branch.el: magit-branch.<branch>.rebase / magit-pull.rebase
     assert_eq!(REBASE_CHOICES, &["true", "merges", "interactive", "false"]);
     assert_eq!(AUTOSETUP_MERGE_CHOICES, &["always", "true", "false"]);
@@ -776,8 +776,8 @@ fn config_choices_match_magit() {
 /// there is no vi-style movement (move with n / p).
 #[test]
 fn status_buffer_direct_keys() {
-    use ngit_lib::ui::app::{status_binding, Binding};
-    use ngit_lib::ui::keys::key_from_label;
+    use xagit_lib::ui::app::{status_binding, Binding};
+    use xagit_lib::ui::keys::key_from_label;
     let b = |l: &str| status_binding(&key_from_label(l));
     assert_eq!(b("k"), Some(Binding::Command("discard")));
     assert_eq!(b("K"), Some(Binding::Command("untrack")));
@@ -846,8 +846,8 @@ fn status_buffer_direct_keys() {
 /// Pressing keys in the App opens the layout Magit would show.
 #[test]
 fn app_opens_in_progress_menu_variants() {
-    use ngit_lib::prelude::*;
-    use ngit_lib::ui::app::App;
+    use xagit_lib::prelude::*;
+    use xagit_lib::ui::app::App;
     let td = TempDir::new().unwrap();
     let run = |args: &[&str]| {
         assert!(std::process::Command::new("git")

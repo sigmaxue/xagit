@@ -551,7 +551,7 @@ impl Git {
     pub fn reset_worktree(&self, commit: &str) -> Result<()> {
         use std::process::Command;
         // Equivalent of magit-with-temp-index + checkout-index --all --force
-        let index_file = self.gitdir.join("ngit-tmp-index");
+        let index_file = self.gitdir.join("xagit-tmp-index");
         let env = format!("GIT_INDEX_FILE={}", index_file.display());
         let read_tree = Command::new("git")
             .envs(env_vars(&env))
@@ -683,7 +683,7 @@ impl Git {
     pub fn stash_worktree(&self, msg: Option<&str>, untracked: Untracked) -> Result<()> {
         let m = msg
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "ngit-stash-worktree".into());
+            .unwrap_or_else(|| "xagit-stash-worktree".into());
         // remember the staged tree so we can restore it afterwards
         let had_staged = !self.staged_files().is_empty();
         let staged_tree = if had_staged {
@@ -712,7 +712,7 @@ impl Git {
     pub fn stash_keep_index(&self, msg: Option<&str>, untracked: Untracked) -> Result<()> {
         let m = msg
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "ngit-stash-keep-index".into());
+            .unwrap_or_else(|| "xagit-stash-keep-index".into());
         self.stash_both(Some(&m), untracked)?;
         // stash@{0}^2 is the index-state commit recorded by git stash
         if self.rev_parse("stash@{0}^2").is_ok() {

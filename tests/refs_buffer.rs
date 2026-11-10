@@ -6,8 +6,8 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode};
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode};
 
 fn press(app: &mut App, keys: &[&str]) {
     for k in keys {
@@ -314,8 +314,8 @@ fn buffer_name() {
     assert!(matches!(app.mode(), BufferMode::Refs { .. }), "{}", app.message());
 }
 
-fn options(text: &str) -> ngit_lib::ui::options::Options {
-    let (o, e) = ngit_lib::ui::options::Options::parse(text);
+fn options(text: &str) -> xagit_lib::ui::options::Options {
+    let (o, e) = xagit_lib::ui::options::Options::parse(text);
     assert!(e.is_empty(), "{e:?}");
     o
 }

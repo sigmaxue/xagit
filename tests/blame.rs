@@ -5,9 +5,9 @@
 mod common;
 
 use common::*;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::{App, BufferMode};
-use ngit_lib::ui::blame::SEPARATOR;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::{App, BufferMode};
+use xagit_lib::ui::blame::SEPARATOR;
 
 fn commit(g: &Git, content: &str, msg: &str) {
     write(g, "f.txt", content);

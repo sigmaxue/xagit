@@ -1,4 +1,4 @@
-//! ngit — a Magit-style git TUI in Rust.
+//! xagit — a Magit-style git TUI in Rust.
 //!
 //! Library root so integration tests (tests/) can exercise the git command
 //! layer and the transient menu definitions directly.

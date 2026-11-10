@@ -1,5 +1,5 @@
 //! User options (the defcustoms of Magit), read from
-//! `~/.config/ngit/options`. Each line is an option name followed by its
+//! `~/.config/xagit/options`. Each line is an option name followed by its
 //! value, `#` or `;` starting a comment:
 //!
 //! ```text
@@ -279,10 +279,10 @@ fn actions(values: &[&str]) -> Result<Option<Vec<String>>, String> {
     }
 }
 
-/// `~/.config/ngit/options`
+/// `~/.config/xagit/options`
 pub fn default_options_file() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join(".config/ngit/options"))
+    Some(std::path::PathBuf::from(home).join(".config/xagit/options"))
 }
 
 #[cfg(test)]

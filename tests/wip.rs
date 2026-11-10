@@ -6,10 +6,10 @@
 mod common;
 
 use common::*;
-use ngit_lib::git::wip::Wip;
-use ngit_lib::prelude::*;
-use ngit_lib::ui::app::App;
-use ngit_lib::ui::options::Options;
+use xagit_lib::git::wip::Wip;
+use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
+use xagit_lib::ui::options::Options;
 
 fn press(app: &mut App, keys: &[&str]) {
     for k in keys {
