@@ -391,7 +391,59 @@ pub fn prefix_value(name: &str) -> &'static [&'static str] {
         "patches-menu" => &["--3way"],
         "rebase-menu" => &["--autostash"],
         "blame-menu" => &["-w"],
+        "fetch-modules-menu" => &["--verbose", "--jobs=4"],
         _ => &[],
+    }
+}
+
+/// The `:incompatible` arguments of Magit's transient prefixes: setting
+/// one of a group unsets the others.
+pub fn incompatible(name: &str) -> &'static [&'static [&'static str]] {
+    match name.split('@').next().unwrap_or(name) {
+        "pull-menu" => &[&["--ff-only", "--rebase=true", "--rebase=merges", "--rebase=interactive"]],
+        "merge-menu" => &[&["--ff-only", "--no-ff"]],
+        "log-menu" | "log-refresh-menu" => &[&["--merges", "--no-merges"]],
+        "cherry-pick-menu" => &[&["--ff", "-x"]],
+        "patch-menu" => &[&["--subject-prefix=", "--rfc"]],
+        _ => &[],
+    }
+}
+
+/// transient-infix-set of transient-argument: after the infix ENTRY of
+/// MENU is set to VALUE (its argument with the value of an option), the
+/// arguments incompatible with its argument or VALUE are unset in ACTIVE.
+pub fn unset_incompatible(menu: &Menu, entry: &MenuEntry, value: &str, active: &mut BTreeMap<String, bool>) {
+    let arg = match &entry.action {
+        Action::Switch(a) | Action::Option { arg: a, .. } => a.as_str(),
+        _ => value,
+    };
+    let mut incomp: Vec<&str> = Vec::new();
+    let xs: &[&str] = if arg == value { &[arg] } else { &[arg, value] };
+    for g in incompatible(&menu.name) {
+        for x in xs {
+            if g.contains(x) {
+                incomp.extend(g.iter().filter(|y| *y != x));
+            }
+        }
+    }
+    if incomp.is_empty() {
+        return;
+    }
+    let set: Vec<String> = active.iter().filter(|(_, on)| **on).map(|(k, _)| k.clone()).collect();
+    for k in set {
+        if k == value {
+            continue;
+        }
+        let karg = menu.groups.iter().flatten().find_map(|e| match &e.action {
+            Action::Switch(a) if *a == k => Some(a.clone()),
+            Action::Option { arg, .. } if option_matches(arg, &k) => Some(arg.clone()),
+            Action::Switches(args) if args.contains(&k) => Some(k.clone()),
+            _ => None,
+        });
+        let karg = karg.unwrap_or_else(|| k.clone());
+        if incomp.contains(&k.as_str()) || incomp.contains(&karg.as_str()) {
+            active.remove(&k);
+        }
     }
 }
 
@@ -836,14 +888,38 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 vec![
                     sw("-p", "Prune deleted branches", "--prune"),
                     sw("-t", "Fetch all tags", "--tags"),
+                    sw("-u", "Fetch full history", "--unshallow").level(7),
                     sw("-F", "Force", "--force"),
                 ],
+                // Fetch from (the descriptions of p and u are set when
+                // the menu is shown)
                 vec![
-                    cmd("u", "from upstream", "fetch-upstream"),
+                    cmd("p", "pushRemote", "fetch-from-pushremote"),
+                    cmd("u", "upstream", "fetch-from-upstream"),
                     cmd("e", "elsewhere", "fetch-other"),
                     cmd("a", "all remotes", "fetch-all"),
-                    cmd("o", "another branch", "fetch-branch"),
                 ],
+                vec![
+                    cmd("o", "another branch", "fetch-branch"),
+                    cmd("r", "explicit refspec", "fetch-refspec"),
+                    cmd("m", "submodules", "fetch-modules"),
+                ],
+                vec![cmd("C", "variables...", "branch-config-menu")],
+            ],
+        },
+    );
+    // magit-fetch-modules (with a prefix argument)
+    m.insert(
+        "fetch-modules-menu".into(),
+        Menu {
+            name: "fetch-modules-menu".into(),
+            title: "Fetch all populated submodules".into(),
+            groups: vec![
+                vec![
+                    sw("-v", "verbose", "--verbose"),
+                    opt("-j", "number of jobs", "--jobs=", Reader::Number { zero: false }),
+                ],
+                vec![cmd("m", "fetch modules", "fetch-modules-run")],
             ],
         },
     );
@@ -857,13 +933,22 @@ pub fn registry() -> BTreeMap<String, Menu> {
             groups: vec![
                 vec![
                     sw("-f", "Fast-forward only", "--ff-only"),
-                    sw("-r", "Rebase local commits", "--rebase"),
-                    sw("-A", "Autostash", "--autostash"),
+                    opt("-r", "Rebase local commits", "--rebase=", choices(&["true", "merges", "interactive", "false"])),
+                    sw("-A", "Autostash", "--autostash").level(7),
                     sw("-F", "Force", "--force"),
                 ],
+                // Pull into BRANCH from (the descriptions of p and u are
+                // set when the menu is shown)
                 vec![
-                    cmd("u", "from upstream", "pull-upstream"),
-                    cmd("e", "elsewhere", "pull-other"),
+                    cmd("p", "pushRemote", "pull-from-pushremote"),
+                    cmd("u", "@{upstream}", "pull-from-upstream"),
+                    cmd("e", "elsewhere", "pull-branch"),
+                ],
+                // Pull into UPSTREAM from
+                vec![cmd("U", "upstream's upstream", "pull-into-upstream").level(7)],
+                vec![
+                    cmd("r", "branch.<branch>.rebase", "branch-config-rebase"),
+                    cmd("C", "variables...", "branch-config-menu"),
                 ],
             ],
         },
@@ -881,7 +966,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-F", "Force", "--force"),
                     sw("-h", "Disable hooks", "--no-verify"),
                     sw("-n", "Dry run", "--dry-run"),
-                    sw("-u", "Set upstream", "--set-upstream"),
+                    sw("-u", "Set upstream", "--set-upstream").level(5),
                     sw("-T", "Include all tags", "--tags"),
                     sw("-t", "Include related annotated tags", "--follow-tags"),
                 ],
@@ -913,8 +998,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     sw("-f", "Fast-forward only", "--ff-only"),
                     sw("-n", "No fast-forward", "--no-ff"),
                     merge_strategy("-s"),
-                    sw("-b", "Ignore changes in amount of whitespace", "-Xignore-space-change"),
-                    sw("-w", "Ignore whitespace when comparing lines", "-Xignore-all-space"),
+                    sw("-b", "Ignore changes in amount of whitespace", "-Xignore-space-change").level(5),
+                    sw("-w", "Ignore whitespace when comparing lines", "-Xignore-all-space").level(5),
                 ],
                 vec![
                     cmd("m", "Merge", "merge-plain"),
@@ -1341,7 +1426,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 ],
                 vec![
                     cmd("l", "List modules", "submodule-list"),
-                    cmd("f", "Fetch modules", "submodule-fetch"),
+                    cmd("f", "Fetch modules", "fetch-modules"),
                 ],
             ],
         },

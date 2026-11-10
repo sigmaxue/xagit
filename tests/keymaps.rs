@@ -182,9 +182,28 @@ fn fetch_popup_layout() {
     assert!(matches!(action_of(&m, "-p"), Action::Switch(s) if s == "--prune"));
     assert!(matches!(action_of(&m, "-t"), Action::Switch(s) if s == "--tags"));
     assert!(matches!(action_of(&m, "-F"), Action::Switch(s) if s == "--force"));
-    assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "fetch-upstream"));
-    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "fetch-other"));
-    assert!(matches!(action_of(&m, "a"), Action::Command(c) if c == "fetch-all"));
+    assert!(matches!(action_of(&m, "-u"), Action::Switch(s) if s == "--unshallow"));
+    for (key, target) in [
+        ("p", "fetch-from-pushremote"),
+        ("u", "fetch-from-upstream"),
+        ("e", "fetch-other"),
+        ("a", "fetch-all"),
+        ("o", "fetch-branch"),
+        ("r", "fetch-refspec"),
+        ("m", "fetch-modules"),
+        ("C", "branch-config-menu"),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "f {key}");
+    }
+    assert_eq!(m.keys(), ["-p", "-t", "-u", "-F", "p", "u", "e", "a", "o", "r", "m", "C"]);
+    let levels: Vec<u8> = m.groups.iter().flatten().map(|e| e.level).collect();
+    assert_eq!(levels, [1, 1, 7, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+
+    let fm = menu("fetch-modules-menu");
+    assert!(matches!(action_of(&fm, "-v"), Action::Switch(s) if s == "--verbose"));
+    assert!(matches!(action_of(&fm, "-j"), Action::Option { arg, .. } if arg == "--jobs="));
+    assert!(matches!(action_of(&fm, "m"), Action::Command(c) if c == "fetch-modules-run"));
+    assert_eq!(xagit_lib::ui::transient::prefix_value("fetch-modules-menu"), ["--verbose", "--jobs=4"]);
 }
 
 /// magit-pull.el:42 magit-pull prefix
@@ -192,10 +211,22 @@ fn fetch_popup_layout() {
 fn pull_popup_layout() {
     let m = menu("pull-menu");
     assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "--ff-only"));
-    assert!(matches!(action_of(&m, "-r"), Action::Switch(s) if s == "--rebase"));
+    assert!(matches!(action_of(&m, "-r"),
+        Action::Option { arg, reader: xagit_lib::ui::transient::Reader::Choices(c) } if arg == "--rebase=" && *c == ["true", "merges", "interactive", "false"]));
     assert!(matches!(action_of(&m, "-A"), Action::Switch(s) if s == "--autostash"));
-    assert!(matches!(action_of(&m, "u"), Action::Command(c) if c == "pull-upstream"));
-    assert!(matches!(action_of(&m, "e"), Action::Command(c) if c == "pull-other"));
+    for (key, target) in [
+        ("p", "pull-from-pushremote"),
+        ("u", "pull-from-upstream"),
+        ("e", "pull-branch"),
+        ("U", "pull-into-upstream"),
+        ("r", "branch-config-rebase"),
+        ("C", "branch-config-menu"),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "F {key}");
+    }
+    assert_eq!(m.keys(), ["-f", "-r", "-A", "-F", "p", "u", "e", "U", "r", "C"]);
+    let levels: Vec<u8> = m.groups.iter().flatten().map(|e| e.level).collect();
+    assert_eq!(levels, [1, 1, 7, 1, 1, 1, 1, 7, 1, 1]);
 }
 
 /// magit-push.el magit-push prefix
@@ -219,12 +250,16 @@ fn push_popup_layout() {
     assert!(matches!(action_of(&m, "T"), Action::Command(c) if c == "push-tag"));
     assert!(matches!(action_of(&m, "t"), Action::Command(c) if c == "push-tags"));
     assert!(matches!(action_of(&m, "C"), Action::Command(c) if c == "branch-config-menu"));
+    let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
+    assert_eq!(level("-u"), 5);
 }
 
 /// magit-merge.el:37 magit-merge prefix
 #[test]
 fn merge_popup_layout() {
     let m = menu("merge-menu");
+    let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
+    assert_eq!((level("-b"), level("-w"), level("-s")), (5, 5, 1));
     assert!(matches!(action_of(&m, "-f"), Action::Switch(s) if s == "--ff-only"));
     assert!(matches!(action_of(&m, "-n"), Action::Switch(s) if s == "--no-ff"));
     assert!(matches!(action_of(&m, "m"), Action::Command(c) if c == "merge-plain"));
@@ -553,7 +588,7 @@ fn extra_features_popup_layout() {
         ("d", "submodule-unpopulate"),
         ("k", "submodule-remove"),
         ("l", "submodule-list"),
-        ("f", "submodule-fetch"),
+        ("f", "fetch-modules"),
     ] {
         assert!(matches!(action_of(&s, key), Action::Command(c) if c == target), "o {key}");
     }
@@ -724,8 +759,12 @@ fn app_reads_multi_key_bindings() {
     assert_eq!(app.current_menu(), Some("push-menu"));
     // after an undefined sequence the next key starts afresh
     app.press("-").unwrap();
+    app.press("n").unwrap();
+    assert_eq!(app.active_switches(), vec!["--dry-run".to_string()]);
+    // -u (--set-upstream) is at level 5
+    app.press("-").unwrap();
     app.press("u").unwrap();
-    assert_eq!(app.active_switches(), vec!["--set-upstream".to_string()]);
+    assert_eq!(app.active_switches(), vec!["--dry-run".to_string()]);
     app.press("C-g").unwrap();
     assert_eq!(app.current_menu(), None);
 
