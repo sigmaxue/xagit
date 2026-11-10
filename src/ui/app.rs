@@ -37,6 +37,7 @@ mod gitvar;
 mod remote;
 mod reshelve;
 mod bisect;
+mod notes;
 mod spread;
 mod submodule;
 mod subtree;
@@ -2071,6 +2072,7 @@ impl App {
             sequencer: self.git.pick_or_revert_in_progress(),
             am: self.git.am_in_progress(),
             bisect: self.git.bisect_in_progress(),
+            notes_merging: self.notes_merging(),
         }
     }
 
@@ -2851,6 +2853,12 @@ impl App {
                 let default = self.branch_or_commit_at_point().or_else(|| self.git.current_branch());
                 let table = Completion { candidates, ..Default::default() };
                 let Some(v) = self.read_any(arg, default.as_deref(), Hist::Infix(arg), table)? else {
+                    return Ok(None);
+                };
+                v
+            }
+            Reader::NotesRef => {
+                let Some(v) = self.notes_read_ref(arg, arg)? else {
                     return Ok(None);
                 };
                 v
@@ -7568,24 +7576,6 @@ impl App {
         Ok(self.completing_read(prompt, default.as_deref(), Hist::Revision, Some(table))?.filter(|t| !t.is_empty()))
     }
 
-    /// magit-notes-read-ref: a notes ref (without refs/notes/), the
-    /// default core.notesRef; the full ref returned.
-    fn notes_read_ref(&mut self, prompt: &str) -> Result<Option<String>> {
-        let candidates: Vec<String> = self
-            .git
-            .git_lines(&["for-each-ref", "--format=%(refname)", "refs/notes"])
-            .iter()
-            .filter_map(|r| r.strip_prefix("refs/notes/").map(str::to_string))
-            .collect();
-        let default = self.config("core.notesRef").map(|d| d.strip_prefix("refs/notes/").map_or(d.clone(), str::to_string));
-        let table = Completion { candidates, require_match: true, multiple: false };
-        let read = self.completing_read(prompt, default.as_deref(), Hist::Minibuffer, Some(table))?;
-        let Some(r) = read.filter(|r| !r.is_empty()) else {
-            return Ok(None);
-        };
-        Ok(Some(if r.starts_with("refs/") { r } else { format!("refs/notes/{r}") }))
-    }
-
     /// magit-git-push: push BRANCH to the remote branch TARGET
     /// ("REMOTE/NAME"), qualified with refs/heads/ unless it exists.
     fn git_push(&mut self, branch: &str, target: &str, args: &[String]) {
@@ -7689,7 +7679,7 @@ impl App {
             }
             // magit-push-tag / magit-push-notes-ref: git push REMOTE REF ARGS
             "push-tag" | "push-notes-ref" => {
-                let r = if cmd == "push-tag" { self.read_tag("Push tag")? } else { self.notes_read_ref("Push notes")? };
+                let r = if cmd == "push-tag" { self.read_tag("Push tag")? } else { self.notes_read_ref("Push notes", "push-notes-ref")? };
                 let Some(r) = r else {
                     return Ok(());
                 };
@@ -9044,40 +9034,8 @@ impl App {
             | "submodule-sync" | "submodule-unpopulate" | "submodule-remove" => self.submodule_command(cmd, args)?,
 
             // ---- notes
-            "notes-list" => {
-                let res = self.git.notes_list();
-                self.show("notes", res);
-            }
-            "notes-edit" => {
-                let Some(rev) = self.read_rev("Note for revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                let Some(msg) = self.read_line_prompt("Note text (one line)", None)? else {
-                    return Ok(());
-                };
-                let res = self.git.notes_add(&rev, &msg);
-                self.done("note saved", res);
-            }
-            "notes-show" => {
-                let Some(rev) = self.read_rev("Show note for revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                let res = self.git.notes_show(&rev);
-                self.show(&format!("notes {rev}"), res);
-            }
-            "notes-remove" => {
-                let Some(rev) = self.read_rev("Remove note from revision", Some("HEAD"))? else {
-                    return Ok(());
-                };
-                if !self.yes_no(&format!("Remove note from {rev}?"))? {
-                    return Ok(());
-                }
-                let res = self.git.notes_remove(&rev);
-                self.done("note removed", res);
-            }
-            "notes-prune" => {
-                let res = self.git.notes_prune();
-                self.done("notes pruned", res);
+            "notes-edit" | "notes-remove" | "notes-merge" | "notes-merge-commit" | "notes-merge-abort" | "notes-prune" => {
+                self.notes_command(cmd, args)?
             }
 
             // ---- ediff (text diff buffers instead of Emacs ediff sessions)

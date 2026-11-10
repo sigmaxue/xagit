@@ -573,6 +573,7 @@ fn in_progress_menus_are_selected_by_repo_state() {
     assert_eq!(resolve_menu("revert-menu", st(|s| s.sequencer = true)), "revert-menu@progress");
     assert_eq!(resolve_menu("patches-menu", st(|s| s.am = true)), "patches-menu@progress");
     assert_eq!(resolve_menu("bisect-menu", st(|s| s.bisect = true)), "bisect-menu@progress");
+    assert_eq!(resolve_menu("notes-menu", st(|s| s.notes_merging = true)), "notes-menu@progress");
     // a state only affects its own menu
     assert_eq!(resolve_menu("rebase-menu", st(|s| s.merge = true)), "rebase-menu");
     assert_eq!(resolve_menu("commit-menu", st(|s| s.merge = true)), "commit-menu");
@@ -687,6 +688,12 @@ fn extra_features_popup_layout() {
 
     let n = menu("notes-menu");
     assert!(matches!(action_of(&n, "T"), Action::Command(c) if c == "notes-edit"));
+    assert_eq!(n.keys(), ["c", "d", "C", "D", "-n", "-r", "-s", "T", "r", "m", "p"]);
+    assert!(matches!(action_of(&n, "-r"), Action::Option { arg, reader: Reader::NotesRef } if arg == "--ref="));
+    assert!(matches!(action_of(&n, "C"), Action::Command(c) if c == "global-core.notesRef"));
+    let n = menu("notes-menu@progress");
+    assert_eq!(n.keys(), ["d", "C", "D", "c", "a"]);
+    assert!(matches!(action_of(&n, "c"), Action::Command(c) if c == "notes-merge-commit"));
 
     // magit-ediff: "E" is dwim (shown as text diffs in xagit)
     let e = menu("ediff-menu");

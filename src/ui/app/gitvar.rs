@@ -35,6 +35,12 @@ pub(super) enum VarKind {
     Description,
     /// magit--git-branch:upstream: branch.B.merge and branch.B.remote
     Upstream,
+    /// magit-core.notesRef (GLOBAL: magit-global-core.notesRef): one
+    /// value read with magit-notes-read-ref, unset when set
+    NotesRef { global: bool },
+    /// magit-notes.displayRef (GLOBAL: magit-global-notes.displayRef):
+    /// the values read with magit-notes-read-refs
+    NotesRefs { global: bool },
 }
 
 #[derive(Debug)]
@@ -136,7 +142,34 @@ const VARS: &[GitVar] = &[
             default: Some("create"),
         },
     },
+    GitVar { command: "core.notesRef", variable: "core.notesRef", scope: VarScope::None, kind: VarKind::NotesRef { global: false } },
+    GitVar {
+        command: "notes.displayRef",
+        variable: "notes.displayRef",
+        scope: VarScope::None,
+        kind: VarKind::NotesRefs { global: false },
+    },
+    GitVar {
+        command: "global-core.notesRef",
+        variable: "core.notesRef",
+        scope: VarScope::None,
+        kind: VarKind::NotesRef { global: true },
+    },
+    GitVar {
+        command: "global-notes.displayRef",
+        variable: "notes.displayRef",
+        scope: VarScope::None,
+        kind: VarKind::NotesRefs { global: true },
+    },
 ];
+
+/// The location argument of V (--global or --local).
+fn location(v: &GitVar) -> &'static str {
+    match v.kind {
+        VarKind::NotesRef { global: true } | VarKind::NotesRefs { global: true } => "--global",
+        _ => "--local",
+    }
+}
 
 /// The git variable infix COMMAND.
 pub(super) fn lookup(command: &str) -> Option<&'static GitVar> {
@@ -212,13 +245,13 @@ impl App {
                     remote.as_deref().unwrap_or("unset")
                 )
             }
-            VarKind::Multi | VarKind::Urls { .. } => match self.config_values("--local", &var).as_slice() {
+            VarKind::Multi | VarKind::Urls { .. } | VarKind::NotesRefs { .. } => match self.config_values(location(v), &var).as_slice() {
                 [] => format!("{var} unset"),
                 [one] => format!("{var} {one}"),
                 many => format!("{var} {}", many.iter().map(|v| format!("\n     {v}")).collect::<String>()),
             },
-            VarKind::Text | VarKind::Description => {
-                let value = self.config_value("--local", &var);
+            VarKind::Text | VarKind::Description | VarKind::NotesRef { .. } => {
+                let value = self.config_value(location(v), &var);
                 let first = value.as_deref().and_then(|v| v.lines().next());
                 format!("{var} {}", first.unwrap_or("unset"))
             }
@@ -394,6 +427,28 @@ impl App {
                     set_all(self, &values)?;
                 }
             }
+            VarKind::NotesRef { global } => match self.config_value(location(v), &var) {
+                Some(_) => {
+                    let _ = self.git.git_ok(&["config", location(v), "--unset", &var]);
+                }
+                None => {
+                    let prompt = format!("Set {} core.notesRef", if global { "global" } else { "local" });
+                    let Some(r) = self.notes_read_ref(&prompt, &var)? else {
+                        return Ok(());
+                    };
+                    self.git.git_interactive(&["config", location(v), &var, &r])?;
+                }
+            },
+            VarKind::NotesRefs { global } => {
+                let prompt = format!("Set {} notes.displayRef", if global { "global" } else { "local" });
+                let Some(refs) = self.notes_read_refs(&prompt, &var)? else {
+                    return Ok(());
+                };
+                let _ = self.git.git_ok(&["config", location(v), "--unset-all", &var]);
+                for r in &refs {
+                    self.git.git_interactive(&["config", location(v), "--add", &var, r])?;
+                }
+            }
             VarKind::Choices { .. } => {
                 let value = self.config_value("--local", &var);
                 let choices = self.var_choices(v);
@@ -427,8 +482,8 @@ impl App {
         // transient-infix-set: "Unset VAR" outside a transient
         if menu.is_none() && !matches!(v.kind, VarKind::Description | VarKind::Upstream) {
             let unset = match v.kind {
-                VarKind::Multi | VarKind::Urls { .. } => self.config_values("--local", &var).is_empty(),
-                _ => self.config_value("--local", &var).is_none(),
+                VarKind::Multi | VarKind::Urls { .. } | VarKind::NotesRefs { .. } => self.config_values(location(v), &var).is_empty(),
+                _ => self.config_value(location(v), &var).is_none(),
             };
             if unset {
                 self.set_msg(&format!("Unset {var}"));

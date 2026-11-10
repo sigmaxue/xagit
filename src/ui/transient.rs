@@ -89,6 +89,8 @@ pub enum Reader {
     Revision,
     /// magit-subtree-read-prefix: a directory relative to the toplevel
     SubtreePrefix,
+    /// magit-notes-read-ref: one of the notes refs, qualified
+    NotesRef,
 }
 
 impl Action {
@@ -409,6 +411,42 @@ pub fn log_refresh_menu(full: bool) -> Menu {
     }
 }
 
+/// magit-notes (MERGING: magit-notes-merging-p).
+fn notes_menu(merging: bool) -> Menu {
+    let mut groups = vec![
+        // "Configure local settings"
+        vec![cmd("c", "core.notesRef", "core.notesRef"), cmd("d", "notes.displayRef", "notes.displayRef")],
+        // "Configure global settings"
+        vec![cmd("C", "core.notesRef", "global-core.notesRef"), cmd("D", "notes.displayRef", "global-notes.displayRef")],
+    ];
+    if merging {
+        // "c" is bound to the latter of the two suffixes with that key
+        groups[0].remove(0);
+        groups.push(vec![cmd("c", "Commit merge", "notes-merge-commit"), cmd("a", "Abort merge", "notes-merge-abort")]);
+    } else {
+        groups.extend([
+            // "Arguments for prune"
+            vec![sw("-n", "Dry run", "--dry-run")],
+            // "Arguments for edit and remove"
+            vec![opt("-r", "Manipulate ref", "--ref=", Reader::NotesRef)],
+            // "Arguments for merge"
+            vec![opt("-s", "Merge strategy", "--strategy=", pick(&["manual", "ours", "theirs", "union", "cat_sort_uniq"]))],
+            // "Actions"
+            vec![
+                cmd("T", "Edit", "notes-edit"),
+                cmd("r", "Remove", "notes-remove"),
+                cmd("m", "Merge", "notes-merge"),
+                cmd("p", "Prune", "notes-prune"),
+            ],
+        ]);
+    }
+    Menu {
+        name: if merging { "notes-menu@progress" } else { "notes-menu" }.into(),
+        title: "Notes".into(),
+        groups,
+    }
+}
+
 /// Repository state behind Magit's `:if` predicates that swap menu suffixes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RepoState {
@@ -418,6 +456,8 @@ pub struct RepoState {
     pub sequencer: bool,
     pub am: bool,
     pub bisect: bool,
+    /// magit-notes-merging-p
+    pub notes_merging: bool,
 }
 
 /// Pick the layout Magit would show: `<name>@progress` while the matching
@@ -429,6 +469,7 @@ pub fn resolve_menu(name: &str, st: RepoState) -> String {
         "cherry-pick-menu" | "revert-menu" => st.sequencer,
         "patches-menu" => st.am,
         "bisect-menu" => st.bisect,
+        "notes-menu" => st.notes_merging,
         _ => false,
     };
     if busy {
@@ -1630,20 +1671,8 @@ pub fn registry() -> BTreeMap<String, Menu> {
     );
 
     // ------------------------------------------------ magit-notes (T)
-    m.insert(
-        "notes-menu".into(),
-        Menu {
-            name: "notes-menu".into(),
-            title: "Notes".into(),
-            groups: vec![vec![
-                cmd("T", "Edit", "notes-edit"),
-                cmd("s", "Show", "notes-show"),
-                cmd("r", "Remove", "notes-remove"),
-                cmd("l", "List", "notes-list"),
-                cmd("p", "Prune", "notes-prune"),
-            ]],
-        },
-    );
+    m.insert("notes-menu".into(), notes_menu(false));
+    m.insert("notes-menu@progress".into(), notes_menu(true));
 
     // ------------------------------------------------ magit-ediff (E)
     // No Emacs ediff session in a terminal: show the corresponding diff text
