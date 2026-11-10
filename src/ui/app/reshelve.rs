@@ -15,6 +15,38 @@ fn adjust(time: i64, offset: i64) -> i64 {
 }
 
 impl App {
+    /// magit-commit-reshelve: the committer date of HEAD (and the author
+    /// date if the user is its author, unless with a prefix argument)
+    /// changed to a date read, the current time the initial input, the
+    /// old date the history's latest element. ARGS are the commit
+    /// arguments.
+    pub(super) fn commit_reshelve(&mut self, args: &[String]) -> Result<()> {
+        // magit-rev-author-p
+        let author = |f: &str| self.git.git_string(&["log", "-1", &format!("--format={f}"), "HEAD"]).unwrap_or_default();
+        let is_author = self.config("user.name").is_some_and(|n| n == author("%an").trim_end())
+            || self.config("user.email").is_some_and(|e| e == author("%ae").trim_end());
+        let update_author = is_author && self.prefix_arg.is_none();
+        let format = format!("--format={}", if update_author { "%ad" } else { "%cd" });
+        let old = self.git.git_string(&["log", "-1", &format, "--date=format:%F %T %z", "HEAD"]).unwrap_or_default();
+        add_to_history(self.infix_history.borrow_mut().entry(HISTORY.into()).or_default(), old.trim_end(), true);
+        let now = crate::ui::logbuf::format_time("%F %T %z", crate::ui::logbuf::now().floor() as i64);
+        *self.initial_input.borrow_mut() = Some(now);
+        let prompt = if update_author { "Change author and committer dates to: " } else { "Change committer date to: " };
+        let Some(date) = self.read_line_hist(prompt, None, Hist::Infix(HISTORY), None)? else {
+            return Ok(());
+        };
+        add_to_history(self.infix_history.borrow_mut().entry(HISTORY.into()).or_default(), &date, true);
+        let mut a: Vec<String> = vec!["commit".into(), "--amend".into(), "--no-edit".into()];
+        if update_author {
+            a.push(format!("--date={date}"));
+        }
+        a.extend(args.iter().cloned());
+        let strs: Vec<&str> = a.iter().map(String::as_str).collect();
+        let res = self.git.git_interactive_env(&[("GIT_COMMITTER_DATE", date.as_str())], &strs);
+        self.done("", res.map(|()| String::new()));
+        Ok(())
+    }
+
     /// magit-reshelve-since without a commit: the branch checked out, the
     /// backup ref of an earlier run overridden only if confirmed, then the
     /// commit selected from the log. KEYID is the value of --gpg-sign= of

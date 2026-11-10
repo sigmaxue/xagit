@@ -135,6 +135,22 @@ fn commit_popup_layout() {
     assert!(matches!(action_of(&m, "W"), Action::Command(c) if c == "commit-revise"));
     assert!(matches!(action_of(&m, "F"), Action::Command(c) if c == "commit-instant-fixup"));
     assert!(matches!(action_of(&m, "S"), Action::Command(c) if c == "commit-instant-squash"));
+    let level = |k: &str| m.groups.iter().flatten().find(|e| e.key == k).unwrap().level;
+    for (key, target, l) in [
+        ("d", "commit-reshelve", 0),
+        ("R", "rebase-reword-commit", 0),
+        ("x", "commit-autofixup", 6),
+        ("X", "commit-absorb-modules", 6),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "c {key}");
+        assert_eq!(level(key), l, "c {key}");
+    }
+    // magit-commit-autofixup
+    let a = menu("commit-autofixup-menu");
+    assert!(matches!(action_of(&a, "-c"), Action::Option { arg, .. } if arg == "--context="));
+    assert!(matches!(action_of(&a, "-s"), Action::Option { arg, .. } if arg == "--strict="));
+    assert!(matches!(action_of(&a, "-v"), Action::Switch(s) if s == "-vv"));
+    assert!(matches!(action_of(&a, "x"), Action::Command(c) if c == "commit-autofixup-run"));
 }
 
 /// magit-branch.el:215 magit-branch prefix

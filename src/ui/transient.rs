@@ -447,6 +447,7 @@ pub fn prefix_value(name: &str) -> &'static [&'static str] {
         "rebase-menu" => &["--autostash"],
         "blame-menu" => &["-w"],
         "fetch-modules-menu" => &["--verbose", "--jobs=4"],
+        "commit-autofixup-menu" => &["-vv"],
         _ => &[],
     }
 }
@@ -856,19 +857,51 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     opt("-C", "Reuse commit message", "--reuse-message=", Reader::String),
                     opt("-c", "Reedit commit message", "--reedit-message=", Reader::String),
                 ],
+                // "Create"
+                vec![cmd("c", "Commit", "commit-create")],
+                // "Edit HEAD"
                 vec![
-                    cmd("c", "Commit", "commit-create"),
                     cmd("e", "Extend", "commit-extend"),
                     cmd("a", "Amend", "commit-amend"),
                     cmd("w", "Reword", "commit-reword"),
+                    cmd("d", "Reshelve", "commit-reshelve").level(0),
+                ],
+                // "Edit"
+                vec![
                     cmd("f", "Fixup", "commit-fixup"),
                     cmd("s", "Squash", "commit-squash"),
                     cmd("A", "Alter", "commit-alter"),
                     cmd("n", "Augment", "commit-augment"),
                     cmd("W", "Revise", "commit-revise"),
+                ],
+                // "Edit and rebase"
+                vec![
                     cmd("F", "Instant fixup", "commit-instant-fixup"),
                     cmd("S", "Instant squash", "commit-instant-squash"),
+                    cmd("R", "Reword past", "rebase-reword-commit").level(0),
                 ],
+                // "Spread across commits"
+                vec![
+                    cmd("x", "Modified files", "commit-autofixup").level(6),
+                    cmd("X", "Updated modules", "commit-absorb-modules").level(6),
+                ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-commit-autofixup (c C-u x)
+    m.insert(
+        "commit-autofixup-menu".into(),
+        Menu {
+            name: "commit-autofixup-menu".into(),
+            title: "Spread staged or unstaged changes across recent commits".into(),
+            groups: vec![
+                vec![
+                    opt("-c", "Diff context lines", "--context=", Reader::Number { zero: true }),
+                    opt("-s", "Strictness", "--strict=", Reader::Number { zero: true }),
+                    sw("-v", "Increase verbosity", "-vv"),
+                ],
+                vec![cmd("x", "Absorb", "commit-autofixup-run")],
             ],
         },
     );

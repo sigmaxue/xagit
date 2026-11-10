@@ -36,6 +36,7 @@ use std::io::{stdout, Write};
 mod gitvar;
 mod remote;
 mod reshelve;
+mod spread;
 mod gitignore;
 mod stash;
 mod tag;
@@ -209,6 +210,10 @@ pub enum SelectAction {
     CommitSquash { option: String, args: Vec<String>, edit: bool, rebase: bool },
     /// magit-reshelve-since, signing with KEYID
     ReshelveSince { keyid: Option<String> },
+    /// magit-commit-autofixup with ARGS
+    Autofixup { args: Vec<String> },
+    /// magit-commit-absorb-modules
+    AbsorbModules,
 }
 
 impl BufferMode {
@@ -3280,6 +3285,8 @@ impl App {
                     self.log_select(SelectAction::RebaseAutosquash { args: args.clone() }, Some(msg), None);
                 }
             },
+            "commit-reshelve" => self.commit_reshelve(&args)?,
+            "commit-autofixup" | "commit-autofixup-run" | "commit-absorb-modules" => self.spread_command(cmd, &args)?,
             // magit-reshelve-since: the key of --gpg-sign= of the rebase
             // arguments
             "reshelve-since" => {
@@ -4250,6 +4257,8 @@ impl App {
                 self.commit_squash(&option, &commit, &args, edit, rebase)
             }
             SelectAction::ReshelveSince { keyid } => self.reshelve_since(&commit, keyid.as_deref()),
+            SelectAction::Autofixup { args } => self.autofixup(&commit, &args),
+            SelectAction::AbsorbModules => self.absorb_modules(&commit),
         }
     }
 
