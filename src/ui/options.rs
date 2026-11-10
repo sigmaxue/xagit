@@ -29,6 +29,8 @@
 //! magit-openpgp-default-signing-key 0123ABCD...
 //! magit-remote-add-set-remote.pushDefault ask-if-unset
 //! magit-reshelve-since-committer-only nil
+//! magit-read-worktree-directory-function magit-read-worktree-directory-sibling
+//! magit-read-worktree-offsite-directory ~/.local/share/wtrees/
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -136,6 +138,25 @@ pub struct Options {
     pub remote_add_set_push_default: SetPushDefault,
     /// magit-reshelve-since-committer-only
     pub reshelve_since_committer_only: bool,
+    /// magit-read-worktree-directory-function
+    pub read_worktree_directory: WorktreeDirectory,
+    /// magit-read-worktree-offsite-directory
+    pub read_worktree_offsite_directory: std::path::PathBuf,
+}
+
+/// The functions of magit-read-worktree-directory-function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeDirectory {
+    /// magit-read-worktree-directory: in the worktree, no initial input
+    Plain,
+    /// magit-read-worktree-directory-nested: in the worktree, COMMIT
+    Nested,
+    /// magit-read-worktree-directory-sibling (the default): next to the
+    /// worktree, PREFIX_COMMIT
+    Sibling,
+    /// magit-read-worktree-directory-offsite: in
+    /// magit-read-worktree-offsite-directory, PREFIX_COMMIT
+    Offsite,
 }
 
 /// The values of magit-remote-add-set-remote.pushDefault.
@@ -195,6 +216,11 @@ impl Default for Options {
             openpgp_default_signing_key: None,
             remote_add_set_push_default: SetPushDefault::AskIfUnset,
             reshelve_since_committer_only: false,
+            read_worktree_directory: WorktreeDirectory::Sibling,
+            read_worktree_offsite_directory: match std::env::var_os("XDG_DATA_HOME") {
+                Some(d) => std::path::PathBuf::from(d).join("wtrees"),
+                None => expand_home("~/.local/share/wtrees"),
+            },
         }
     }
 }
@@ -305,6 +331,32 @@ impl Options {
                     _ => Some("expected a string".into()),
                 },
                 "disabled-command-function" => boolean(&values).map(|b| o.disabled_command_function = b).err(),
+                "magit-read-worktree-directory-function" => match values.as_slice() {
+                    ["magit-read-worktree-directory"] => {
+                        o.read_worktree_directory = WorktreeDirectory::Plain;
+                        None
+                    }
+                    ["magit-read-worktree-directory-nested"] => {
+                        o.read_worktree_directory = WorktreeDirectory::Nested;
+                        None
+                    }
+                    ["magit-read-worktree-directory-sibling"] => {
+                        o.read_worktree_directory = WorktreeDirectory::Sibling;
+                        None
+                    }
+                    ["magit-read-worktree-directory-offsite"] => {
+                        o.read_worktree_directory = WorktreeDirectory::Offsite;
+                        None
+                    }
+                    _ => Some("expected one of the magit-read-worktree-directory functions".into()),
+                },
+                "magit-read-worktree-offsite-directory" => match values.as_slice() {
+                    [d] => {
+                        o.read_worktree_offsite_directory = expand_home(d.trim_matches('"'));
+                        None
+                    }
+                    _ => Some("expected a directory".into()),
+                },
                 "magit-reshelve-since-committer-only" => {
                     boolean(&values).map(|b| o.reshelve_since_committer_only = b).err()
                 }

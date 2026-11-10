@@ -40,6 +40,7 @@ mod spread;
 mod gitignore;
 mod stash;
 mod tag;
+mod worktree;
 
 pub struct App {
     pub git: Git,
@@ -629,6 +630,11 @@ impl App {
             BufferMode::Diff(spec) => spec.typ.as_str(),
             _ => "committed",
         }
+    }
+
+    /// The top-level directory of the repository shown.
+    pub fn toplevel(&self) -> &std::path::Path {
+        &self.git.toplevel
     }
 
     /// The major mode of the buffer shown.
@@ -9046,37 +9052,8 @@ impl App {
             }
 
             // ---- worktree
-            "worktree-list" => {
-                let res = self.git.worktree_list();
-                self.show("worktrees", res);
-            }
-            "worktree-checkout" | "worktree-branch" => {
-                let Some(path) = self.read_line_prompt("Worktree path", None)? else {
-                    return Ok(());
-                };
-                let is_new = cmd == "worktree-branch";
-                let branch = self.read_line_prompt(
-                    if is_new { "New branch name" } else { "Checkout branch/revision (empty = HEAD)" },
-                    None,
-                )?;
-                let res = self.git.worktree_add(&path, branch.as_deref(), is_new, None);
-                self.done("worktree added", res);
-            }
-            "worktree-move" => {
-                let paths = self.git.worktree_paths();
-                let Some(from) = self.pick("Move worktree", &paths, None)?.cloned() else {
-                    return Ok(());
-                };
-                let Some(to) = self.read_line_prompt("New path", None)? else {
-                    return Ok(());
-                };
-                let res = self.git.worktree_move(&from, &to);
-                self.done("worktree moved", res);
-            }
-            "worktree-delete" => self.worktree_delete()?,
-            "worktree-prune" => {
-                let res = self.git.worktree_prune();
-                self.done("worktrees pruned", res);
+            "worktree-checkout" | "worktree-branch" | "worktree-move" | "worktree-delete" | "worktree-status" => {
+                self.worktree_command(cmd)?
             }
 
             // ---- submodule

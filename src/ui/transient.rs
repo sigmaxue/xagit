@@ -1560,17 +1560,15 @@ pub fn registry() -> BTreeMap<String, Menu> {
         "worktree-menu".into(),
         Menu {
             name: "worktree-menu".into(),
-            title: "Worktree".into(),
+            title: "Act on a worktree".into(),
             groups: vec![
+                // "Create new"
+                vec![cmd("b", "worktree", "worktree-checkout"), cmd("c", "branch and worktree", "worktree-branch")],
+                // "Commands"
                 vec![
-                    cmd("b", "Checkout", "worktree-checkout"),
-                    cmd("c", "Branch", "worktree-branch"),
-                    cmd("m", "Move", "worktree-move"),
-                    cmd("k", "Delete", "worktree-delete"),
-                ],
-                vec![
-                    cmd("p", "Prune", "worktree-prune"),
-                    cmd("l", "List", "worktree-list"),
+                    cmd("m", "Move worktree", "worktree-move"),
+                    cmd("k", "Delete worktree", "worktree-delete"),
+                    cmd("g", "Visit worktree", "worktree-status"),
                 ],
             ],
         },
