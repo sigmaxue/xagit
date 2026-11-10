@@ -15,10 +15,16 @@ static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 const PROCESS_LOG_MAX: usize = 200;
 
 pub(crate) fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
+    record_process(dir, &command_label(args), ok, code, stderr);
+}
+
+/// Like `record`, for a program that is not git (magit--shell-command).
+/// LABEL is the command line as it was typed.
+pub fn record_process(dir: &Path, label: &str, ok: bool, code: Option<i32>, stderr: &str) {
     let mut entry = format!(
         "{} {}  [{}]",
         if ok { " " } else { "!" },
-        command_label(args),
+        sanitize(label),
         match code {
             Some(c) => format!("exit {c}"),
             None => "signal".into(),

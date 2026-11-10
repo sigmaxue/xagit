@@ -154,7 +154,12 @@ pub enum Lookup<'a> {
 /// "-a" is "-" then "a", "a m" is "a" then "m", "C-c" and "<tab>" are one key.
 pub fn key_seq(label: &str) -> Vec<Key> {
     if label.len() > 1 && label.contains(' ') {
-        label.split(' ').filter(|s| !s.is_empty()).map(key_from_label).collect()
+        // " m" is SPC then m (the leading empty piece is the space key),
+        // "C-m C-r" is two keys as in kbd.
+        label
+            .split(' ')
+            .map(|s| if s.is_empty() { key_from_label(" ") } else { key_from_label(s) })
+            .collect()
     } else if label.len() == 2
         && (label.starts_with('-') || label.starts_with('=') || label.starts_with('+') || label.chars().all(|c| c.is_ascii_lowercase()))
     {
@@ -1537,11 +1542,27 @@ pub fn registry() -> BTreeMap<String, Menu> {
         "run-menu".into(),
         Menu {
             name: "run-menu".into(),
-            title: "Run git or another command".into(),
-            groups: vec![vec![
-                cmd("!", "in repository root", "git-command"),
-                cmd("p", "in working directory", "git-command-cwd"),
-            ]],
+            title: "Run git or another command, or launch a graphical utility".into(),
+            groups: vec![
+                // "Run git subcommand"
+                vec![
+                    cmd("!", "in repository root", "git-command-topdir"),
+                    cmd("p", "in working directory", "git-command"),
+                ],
+                // "Run shell command"
+                vec![
+                    cmd("s", "in repository root", "shell-command-topdir"),
+                    cmd("S", "in working directory", "shell-command"),
+                ],
+                // "Launch"
+                vec![
+                    cmd("k", "gitk", "run-gitk"),
+                    cmd("a", "gitk --all", "run-gitk-all"),
+                    cmd("b", "gitk --branches", "run-gitk-branches"),
+                    cmd("g", "git gui", "run-git-gui"),
+                    cmd("m", "git mergetool --gui", "git-mergetool"),
+                ],
+            ],
         },
     );
 
@@ -1731,15 +1752,21 @@ pub fn registry() -> BTreeMap<String, Menu> {
     m.insert("notes-menu@progress".into(), notes_menu(true));
 
     // ------------------------------------------------ magit-ediff (E)
-    // No Emacs ediff session in a terminal: show the corresponding diff text
-    // in the existing text buffer instead.
+    // No Emacs ediff session in a terminal: the "Show" suffixes display the
+    // corresponding diff text, and the stage/resolve suffixes invoke
+    // interactive git commands instead (git add -p / git mergetool).
     m.insert(
         "ediff-menu".into(),
         Menu {
             name: "ediff-menu".into(),
             title: "Ediff (text diff view)".into(),
             groups: vec![
-                vec![cmd("E", "Dwim", "ediff-dwim")],
+                vec![cmd("E", "Dwim", "ediff-dwim"), cmd("s", "Stage", "ediff-stage")],
+                vec![
+                    cmd("m", "Resolve rest", "ediff-resolve-rest"),
+                    cmd("M", "Resolve all conflicts", "ediff-resolve-all"),
+                    cmd("t", "Resolve using mergetool", "ediff-mergetool"),
+                ],
                 vec![
                     cmd("u", "Show unstaged", "ediff-unstaged"),
                     cmd("i", "Show staged", "ediff-staged"),
@@ -1750,6 +1777,29 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("r", "Show range", "ediff-range"),
                     cmd("z", "Show stash", "ediff-stash"),
                 ],
+            ],
+        },
+    );
+
+    // ------------------------------------------------ magit-git-mergetool
+    // The transient of `E t' and `! m' with a prefix argument. Its four
+    // boolean suffixes are global git variables, not command-line options.
+    m.insert(
+        "mergetool-menu".into(),
+        Menu {
+            name: "mergetool-menu".into(),
+            title: "Resolve conflicts using git mergetool".into(),
+            groups: vec![
+                vec![
+                    opt("-t", "Override mergetool", "--tool=", Reader::Pick(Vec::new())),
+                    cmd("=t", "merge.guitool", "merge.guitool"),
+                    cmd("=T", "merge.tool", "merge.tool"),
+                    cmd("-r", "mergetool.hideResolved", "mergetool.hideResolved"),
+                    cmd("-b", "mergetool.keepBackup", "mergetool.keepBackup"),
+                    cmd("-k", "mergetool.keepTemporaries", "mergetool.keepTemporaries"),
+                    cmd("-w", "mergetool.writeToTemp", "mergetool.writeToTemp"),
+                ],
+                vec![cmd(" m", "Invoke mergetool", "git-mergetool-invoke")],
             ],
         },
     );

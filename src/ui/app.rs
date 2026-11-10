@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{stdout, Write};
 
 mod gitvar;
+mod run;
 mod remote;
 mod reshelve;
 mod bisect;
@@ -1820,6 +1821,17 @@ impl App {
             let refs = matches!(self.mode, BufferMode::Refs { .. });
             self.menus.insert(name.clone(), show_refs_menu(refs));
         }
+        // magit--read-mergetool: the --tool= choices are read from git
+        if name == "mergetool-menu" {
+            let tools = run::mergetool_tools(&self.git);
+            if let Some(m) = self.menus.get_mut(&name) {
+                for e in m.groups.iter_mut().flatten() {
+                    if matches!(&e.action, Action::Option { arg, .. } if arg == "--tool=") {
+                        e.action = Action::Option { arg: "--tool=".into(), reader: Reader::Pick(tools.clone()) };
+                    }
+                }
+            }
+        }
         // the Wiplog group :if-non-nil magit-wip-mode
         if name == "log-menu" {
             if let Some(m) = self.menus.get_mut(&name) {
@@ -1876,7 +1888,11 @@ impl App {
             self.var_scopes.remove(&name);
         }
         let dynamic = self.menu_states(&name);
-        let inapt = if name == "status-jump-menu" { self.status_jump_states() } else { Vec::new() };
+        let inapt = match name.as_str() {
+            "status-jump-menu" => self.status_jump_states(),
+            "ediff-menu" => self.ediff_inapt_states(),
+            _ => Vec::new(),
+        };
         let gpg_format = self.config("gpg.format");
         let preset: Vec<String> = match self.menus.get_mut(&name) {
             Some(m) => {
@@ -1886,9 +1902,13 @@ impl App {
                         e.desc.clone_from(desc);
                         e.hidden |= !shown;
                     }
-                    // :inapt-if-not of the section jumpers
+                    // :inapt-if-not of the section jumpers and the ediff
+                    // stage/resolve suffixes (an empty description keeps
+                    // the one of the menu)
                     if let Some((_, desc, inapt)) = inapt.iter().find(|(k, _, _)| *k == e.key) {
-                        e.desc.clone_from(desc);
+                        if !desc.is_empty() {
+                            e.desc.clone_from(desc);
+                        }
                         e.inapt = *inapt;
                     }
                     // magit:--gpg-sign: "Sign using " gpg.format
@@ -3554,22 +3574,11 @@ impl App {
             // -------- ignore / misc
             "ignore" | "ignore-subdir" | "ignore-gitdir" | "ignore-system" | "skip-worktree" | "no-skip-worktree"
             | "assume-unchanged" | "no-assume-unchanged" => self.gitignore_command(cmd)?,
-            "git-command" | "git-command-cwd" => {
-                let Some(line) = self.read_line_prompt("git command (args after 'git')", Some("status"))? else {
-                    return Ok(());
-                };
-                let parts: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
-                let strs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-                let out = if cmd == "git-command-cwd" {
-                    g!().git_string_in(&self.cwd, &strs)
-                } else {
-                    g!().git_string(&strs)
-                };
-                match out {
-                    Ok(o) => self.view_text = Some((format!("git {}", line), o)),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
-                }
-                self.refresh();
+            // magit-run (!), magit-ediff (E) and magit-git-mergetool
+            "git-command" | "git-command-topdir" | "shell-command" | "shell-command-topdir" | "run-gitk"
+            | "run-gitk-all" | "run-gitk-branches" | "run-git-gui" | "git-mergetool" | "git-mergetool-invoke"
+            | "ediff-mergetool" | "ediff-resolve-rest" | "ediff-resolve-all" | "ediff-stage" => {
+                self.run_menu_command(cmd, &args)?
             }
             // magit-show-refs: the menu in the refs buffer or with a
             // prefix argument, else the refs compared with HEAD

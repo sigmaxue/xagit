@@ -91,11 +91,11 @@ cargo install --path .
 | `a` / `v` | apply / reverse | 把光标处变更（或 stash）应用到工作区 / 在工作区反向应用 |
 | `K` | file-untrack | `git rm --cached` |
 | `x` | reset-quickly | `git reset --mixed`（前缀参数为 --hard） |
-| `:` / `Q` | git-command | 交互式 git 命令 |
-| `!` | run 菜单 | 运行 git 命令 |
+| `:` / `Q` | git-command | 读取完整命令行（初始输入 `git `），在启动目录执行 |
+| `!` | run 菜单 | `!`/`p` 在仓库根目录/启动目录运行 git 命令，`s`/`S` 运行任意 shell 命令，`k`/`a`/`b` 启动 gitk（默认/--all/--branches），`g` 启动 git gui，`m` 用 mergetool 解决冲突 |
 | `$` | process-buffer | 显示最近执行的 git 命令（含退出码与 stderr，失败行以 `!` 开头；查询类命令不记录） |
 | `B` / `Z` / `%` / `o` / `O` / `T` | bisect / worktree / worktree / submodule / subtree / notes | 对应菜单 |
-| `e` / `E` | ediff dwim / ediff 菜单 | 文本 diff 视图 |
+| `e` / `E` | ediff dwim / ediff 菜单 | 文本 diff 视图；`E s` 用 `git add -p` 选择性暂存，`E m`/`E M` 用 `git mergetool` 解决冲突，`E t` 用 `git mergetool --gui`；`! m` 与 `E t` 相同 |
 | `D` / `L` | diff-refresh / log-refresh | 修改当前 diff / log 视图的参数，`g` 按新参数重新显示 |
 | `V` | revert 菜单 | `V` 生成 revert 提交、`v` 只在工作区反向应用 |
 | `H` / `J` / `Y` | section info / display buffer / cherries | 当前行信息、状态缓冲区文本、cherry 视图 |
@@ -119,18 +119,18 @@ cargo install --path .
 
 子菜单参考 Magit transient 定义实现键位与参数开关。merge / rebase / cherry-pick / revert / am / bisect 菜单按仓库状态选择入口：操作进行中时显示 continue / skip / abort 等后缀，平时显示发起操作的后缀。例如：
 
-- **Commit (`c`)**：`-a/-e/-v/-n/-R` 参数；`c` 提交、`e` Extend（--amend --no-edit）、`a` Amend、`w` Reword、`f` Fixup、`s` Squash、`F` Instant fixup、`S` Instant squash；level 0（默认不显示，可用 `transient-level magit-commit d 1` 打开）：`d` Reshelve（修改 HEAD 的提交者日期，自己是作者且未带 `C-u` 时同时修改作者日期；初始值为当前时间，`M-p` 取原日期）、`R` Reword past（同 `r w`）；level 6 的“Spread across commits”：`x` 用 `git-autofixup` 把改动分散为 fixup 提交（从 log 中选基准提交，初始停在与 upstream 的 merge-base；带 `C-u` 打开参数菜单 `-c` context、`-s` strict、`-v`(-vv，默认开)）、`X` 为每个已更新的子模块创建 `fixup! <最近修改它的提交>` 提交
+- **Commit (`c`)**：`-a/-e/-v/-n/-R` 参数；`c` 提交、`e` Extend（--amend --no-edit）、`a` Amend、`w` Reword、`f` Fixup、`s` Squash、`F` Instant fixup、`S` Instant squash；level 0（默认不显示，可用 `transient-level magit-commit d 1` 打开）：`d` Reshelve（修改 HEAD 的提交者日期，自己是作者且未带 `C-u` 时同时修改作者日期；初始值为当前时间，`M-p` 取原日期）、`R` Reword past（同 `r w`）；level 6 的"Spread across commits"：`x` 用 `git-autofixup` 把改动分散为 fixup 提交（从 log 中选基准提交，初始停在与 upstream 的 merge-base；带 `C-u` 打开参数菜单 `-c` context、`-s` strict、`-v`(-vv，默认开)）、`X` 为每个已更新的子模块创建 `fixup! <最近修改它的提交>` 提交
 - **Stash (`z`)**：与 Magit 一样不用 `git stash push`，而是用 `commit-tree` 构造 stash 提交后写入 `refs/stash`，再移除对应改动：`z` both、`i` index（只存暂存区改动，反向应用到暂存区和工作区，未暂存改动保留）、`w` worktree（暂存区保留，stash 的第一个父提交为 "pre-stash index"）、`x` keeping index；消息为空时使用 `On <分支>: <hash> <subject>`；`-u/-a` 或菜单内 `C-u`/`C-u C-u` 包含未跟踪/忽略文件；merge 冲突中 stash both 会先确认；没有对应改动时提示 `No staged/unstaged/local changes to save`。`Z/I/W` snapshot（消息 `WIP on ...`，不移除改动）、`r` 提交到 wip ref；`P` push（level 5，子菜单 `git stash push`：`--` 限定文件（候选为已修改文件，逗号分隔）、`-u/-a/-k/-K`）；`a/p` apply/pop：先 `stash apply --index`，失败再不带 `--index`，仍失败时若相关文件有未暂存改动则询问 `[s]` 暂存后 `git apply --3way` / `[r]` `--reject` / `[c]` 取消；`k` drop；`l/v` list/show；`b` 新分支（`git stash branch`）、`B` 在当前分支处建分支并应用 stash、`f` 生成 `0001-<subject>.patch`
 - **Reset (`X`)**：`b` 重置分支、`f` 从某个版本检出文件（候选含目录，如 `dir/`）；`m/s/h/k/i/w` mixed/soft/hard/keep/index/worktree
 - **Tag (`t`)**：`t` 创建（名称可补全已有 tag，`C-u` 时加 `--annotate`，消息由编辑器输入）、`r` release（按 `v1.2`/`version-1.2`/`release/1.2` 等格式找出版本最高的 release tag：HEAD 的提交信息为 `Release version V` 时直接用 V，否则以上一个 tag 为初始输入读取；带 `-a/-s/-u` 时消息取上一个 release 的消息并替换版本号；第一个 release 加 `--edit`，完成后打开 refs 缓冲区）、`k` 删除（多选时逐个列出确认）、`p` prune（读取远端，分别确认删除只存在于本地的 tag 和只存在于远端的 tag）
 - **Worktree (`Z` / `%`)**：`b` 在新 worktree 中 checkout（候选排除已在其他 worktree 检出的分支）、`c` 新建分支并放到新 worktree（同 `b c` 先读起点再读名称）；目录按 `magit-read-worktree-directory-function` 读取，默认 `-sibling`：初始值为当前 worktree 旁边的 `<名称前缀>_<分支，/ 换成 ->`，也可设为 `magit-read-worktree-directory`、`-nested`（当前 worktree 内）、`-offsite`（`magit-read-worktree-offsite-directory`，默认 `~/.local/share/wtrees/`）；创建后切换到新 worktree 的 status。`m` 移动（主 worktree 不可移动；移动当前 worktree 时 status 跟随过去）、`k` 删除（主 worktree、加锁的 worktree 拒绝；有未提交改动时按 danger 确认，可移到回收站）、`g` 打开另一个 worktree 的 status
 - **Ignore (`i`)**：`t` 写入顶层 `.gitignore`、`s` 写入子目录的 `.gitignore`（先读取目录）、`p` 写入 `$GIT_DIR/info/exclude`、`g` 写入 `core.excludesFile`（描述中显示该文件）；规则候选为未跟踪文件/目录（`/path`）及其扩展名（`*.ext`、`dir/*.ext`），默认取当前文件；写入 `.gitignore` 后自动暂存。level 7：`w/W` skip-worktree、`u/U` assume-unchanged（只有一个候选时不询问）
-- **Fetch (`f`)**：`-p` prune、`-t` 全部 tag、`-F` force（`-u --unshallow` 在 level 7）；`p` 从 pushRemote（未设置或无效时先读取并设置 `branch.<b>.pushRemote`）、`u` 从“当前”远端（upstream 的远端，否则唯一的远端，否则主远端；都没有时不显示）、`e` 其他远端、`a` 全部远端（`fetch --all`）、`o` 某远端或 url 的一个分支、`r` 显式 refspec（候选来自 `ls-remote`）、`m` submodules（`fetch --recurse-submodules --verbose --jobs=4`；带 `C-u` 时打开它的菜单）、`C` 配置。`p`/`u` 的描述随仓库状态变化，例如 `pushRemote, setting that`
+- **Fetch (`f`)**：`-p` prune、`-t` 全部 tag、`-F` force（`-u --unshallow` 在 level 7）；`p` 从 pushRemote（未设置或无效时先读取并设置 `branch.<b>.pushRemote`）、`u` 从"当前"远端（upstream 的远端，否则唯一的远端，否则主远端；都没有时不显示）、`e` 其他远端、`a` 全部远端（`fetch --all`）、`o` 某远端或 url 的一个分支、`r` 显式 refspec（候选来自 `ls-remote`）、`m` submodules（`fetch --recurse-submodules --verbose --jobs=4`；带 `C-u` 时打开它的菜单）、`C` 配置。`p`/`u` 的描述随仓库状态变化，例如 `pushRemote, setting that`
 - **Pull (`F`)**：`-f` ff-only、`-r` rebase（选项：true/merges/interactive/false）、`-F` force（`-A` autostash 在 level 7）；`p` 从 pushRemote、`u` 从 upstream（未设置时先读取并设置）、`e` 某个远程分支、`U`（level 7）把作为 upstream 的本地分支更新到它自己的 upstream、`r` `branch.<b>.rebase`（git 变量后缀，见下）、`C` 配置；detached HEAD 时不显示 `p/u/r`
 - 与 Transient 的 `:incompatible` 一致，打开某个参数时会清除与它互斥的参数：pull 的 `--ff-only` 与 `--rebase=true|merges|interactive`、merge 的 `--ff-only` 与 `--no-ff`、cherry-pick 的 `--ff` 与 `-x`
 - **Push (`P`)**：`-f` force-with-lease、`-F` force、`-h` no-verify、`-n` dry-run、`-u` set-upstream（level 5）、`-T` 全部 tag、`-t` follow-tags、`-o` push-options（level 5，可多值，用逗号分隔；候选来自 `magit-push-options`，默认 `skip-ci ci.skip`）；`p` 推到 pushRemote（未设置或无效时先读取并设置；`set-and-push` 不在 `magit-no-confirm` 中时还要确认）、`u` 推到 upstream（未设置时读取任意 `REMOTE/BRANCH`，以 `--set-upstream` 推送）、`e` 把当前分支推到某个 `REMOTE/BRANCH`、`o` 推送其他分支或提交、`r` 显式 refspec（逗号分隔多个）、`m` matching、`T` 推一个 tag、`t` 推全部 tag、`n` 推一个 notes ref（level 6）、`C` 配置；`p/u` 的描述随状态变化（如 `origin/topic, creating it`），detached HEAD 时不显示 `p/u/e`
 - **Merge (`m`)**：`m` merge、`e` 编辑消息后合并（`--no-ff`）、`n` 不提交、`a` absorb（若 push 目标存在先 `--force-with-lease` 推送，再 `merge --no-edit`，然后删除分支；对主分支会先确认）、`p` 预览（`git merge-tree`，不改动工作区）、`s` squash、`d` dissolve（切到目标分支并 absorb 原分支）；`-X` strategy-option、`-b`/`-w` 忽略空白、`-A` diff 算法（`-Xdiff-algorithm=`）在 level 5；合并进行中：`m` 提交合并、`a` 放弃
-- **Rebase (`r`)**：`-r` 为选项 `--rebase-merges=`（no-rebase-cousins / rebase-cousins）；level 7 的 `-s` strategy、`-X` strategy-option、`=X` diff 算法、`-f` force-rebase、`-x` exec；`p` onto pushRemote（同 pull 的规则）、`u` onto upstream（未设置时读取并设置）、`e` elsewhere（任意分支或提交）、`i` interactive、`s` subset（`rebase --onto <新基> <起点>^`）、`m` 修改某个提交（todo 中改为 `edit`）、`w` reword、`k` 删除某个提交、`f` autosquash、`t` 修改日期（level 6，`magit-reshelve-since`：从 log 中选一个提交，读取它的新日期（初始值使各提交到现在每个相隔一分钟，历史中有“父提交之后一分钟”），之后的提交依次晚一分钟，用 `git filter-branch` 改写作者与提交者日期；`magit-reshelve-since-committer-only` 为 `t` 时只改提交者日期；使用 rebase 菜单的 `--gpg-sign=` 签名；detached HEAD 时拒绝，已有 `refs/original` 备份时先确认）；会改写已发布提交（`origin/master`）或范围内含 merge 时，按当前实现先确认；rebase 进行中：`r` continue、`s` skip、`e` 编辑 todo（`rebase --edit-todo`）、`a` abort
+- **Rebase (`r`)**：`-r` 为选项 `--rebase-merges=`（no-rebase-cousins / rebase-cousins）；level 7 的 `-s` strategy、`-X` strategy-option、`=X` diff 算法、`-f` force-rebase、`-x` exec；`p` onto pushRemote（同 pull 的规则）、`u` onto upstream（未设置时读取并设置）、`e` elsewhere（任意分支或提交）、`i` interactive、`s` subset（`rebase --onto <新基> <起点>^`）、`m` 修改某个提交（todo 中改为 `edit`）、`w` reword、`k` 删除某个提交、`f` autosquash、`t` 修改日期（level 6，`magit-reshelve-since`：从 log 中选一个提交，读取它的新日期（初始值使各提交到现在每个相隔一分钟，历史中有"父提交之后一分钟"），之后的提交依次晚一分钟，用 `git filter-branch` 改写作者与提交者日期；`magit-reshelve-since-committer-only` 为 `t` 时只改提交者日期；使用 rebase 菜单的 `--gpg-sign=` 签名；detached HEAD 时拒绝，已有 `refs/original` 备份时先确认）；会改写已发布提交（`origin/master`）或范围内含 merge 时，按当前实现先确认；rebase 进行中：`r` continue、`s` skip、`e` 编辑 todo（`rebase --edit-todo`）、`a` abort
 - **Cherry-pick (`A`)**：`h` harvest（把其他分支上的提交搬到当前分支，并从原分支移除）、`m` squash 合并、`d` donate（把当前分支上的提交搬到其他分支）、`n` spinout / `s` spinoff（用这些提交新建分支；spinoff 会切换过去）。被移走的提交是源分支 tip 时用 `update-ref` 回退源分支，否则用 `rebase -i` 删掉；进行中时 `A` continue、`s` skip、`a` abort
 - 签名参数与 Magit 一致：commit、merge、rebase、cherry-pick、revert、am 都有 `-S --gpg-sign=`（level 5，描述随 `gpg.format` 变为 `Sign using ssh` 等）和 `+s --signoff`（level 6）；commit 另有 level 7 的 `-D --date=`。`-S` 与 tag 的 `-u --local-user=` 按 magit-read-gpg-signing-key 读取：`gpg.format` 不是 openpgp 时取空值；只有一个可签名的 secret key 或设置了 `magit-openpgp-default-signing-key` 时直接使用（带 `C-u` 时仍会询问）
 - **Revert (`V`)**：进行中时 `V` continue、`s` skip、`a` abort
@@ -146,7 +146,11 @@ cargo install --path .
 - **git 变量后缀**（`b`、`F r`、`b C`、`M`、`M C` 中的变量键，对应 Magit 的 `magit--git-variable`）：描述显示变量名和当前值（未设置时为 `unset`）；可选值类显示为 `[a|(b)|c|fallback]`，当前值加括号，最后一项依次取 `global:值`、后备变量（如 `pull.rebase:true`、`remote.pushDefault:origin`）或 `default:值`，变量未设置时它加括号。按键后设置变量，菜单保持打开并刷新描述：可选值从未设置开始依次切换，最后一个之后变回未设置；带 `C-u` 时从候选中选择（选后备项即取消设置）；单值变量未设置时读取、已设置时取消；多值变量（`remote.<r>.fetch`、url）用逗号分隔，当前值作为初始输入。`b`、`F` 的作用域是当前分支，`M` 是当前远端；没有作用域（如 detached HEAD）时这些键不显示。从 `b` 进入 `b C`、从 `M` 进入 `M C`，或者带 `C-u` 进入时，会先读取要配置的分支/远端（`Configure branch` / `Configure remote`）
 - **Remote (`M`)**：变量组 `u` `remote.<r>.url`、`U` `.fetch`、`s` `.pushurl`、`S` `.push`、`O` `.tagOpt`（--no-tags/--tags）、`h` `.followRemoteHEAD`（create/always/warn）；url 与 pushurl 通过 `git remote set-url [--push] --add/--delete` 增删，二者共用输入历史。`-f` 默认打开（添加后 fetch）；`a` 添加（url 初始值由 origin 的 url 把 owner 换成新远端名得到；按 `magit-remote-add-set-remote.pushDefault` 决定是否设置 `remote.pushDefault`，默认 `ask-if-unset`，可设为 `ask`、`nil` 或某个远端名）、`r` 改名、`k` 删除（改名/删除会同步修改 `remote.pushDefault` 与各分支的 `pushRemote`）、`C` 配置菜单、`p` prune 失效的远程分支、`P` 清理失效的 refspec（连同它们创建的远程分支；全部失效时可选择换成默认 refspec 或删除远端）、`z` unshallow（level 7；唯一的非通配 refspec 会询问是否换成标准 refspec）、`d u` 更新默认分支
 
-菜单键按 Emacs `kbd` 的写法逐键输入：`-f` 是先按 `-` 再按 `f`，`a m` 是先按 `a` 再按 `m`。只按了前缀时菜单会保持打开，等待后续按键；键序列没有定义时显示未绑定提示；`q` / `C-g` 退出菜单。
+- **Run (`!`)**：`!`/`p` 读取完整命令行（初始输入 `git `），`s`/`S` 读取任意 shell 命令；`!`/`s` 在仓库根目录、`p`/`S` 在启动目录用 `$SHELL -c` 执行，`GIT_PAGER=cat`，输出显示在文本视图并记入 `$` 进程日志；`k`/`a`/`b`/`g` 在后台启动图形程序。
+- **Ediff (`E`)**：`E/u/i/w/c/r/z` 显示对应的文本 diff；`s` 用 `git add -p` 选择性暂存一个已跟踪文件；`m`/`M` 用 `git mergetool` 解决当前冲突；`t` 用 `git mergetool --gui`。`s` 在没有改动时、`m`/`M` 在没有未解决冲突时显示为括号内的 inapt 后缀（按下只提示 `Inapt command`）。
+- **mergetool 参数**：在 `E`/`!` 菜单里先按 `C-u` 再按 `t`/`m` 时，打开 Magit 的 `magit-git-mergetool` 参数菜单：`-t` 覆盖 `--tool=`，`=t`/`=T` 设置全局 `merge.guitool`/`merge.tool`，`-r`/`-b`/`-k`/`-w` 切换全局 `mergetool.hideResolved`/`keepBackup`/`keepTemporaries`/`writeToTemp`，`SPC m`（先按空格键再按 `m`）执行 `git mergetool --gui ARGS -- FILE`。没有未解决冲突时提示 `There are no unresolved conflicts`。
+
+菜单键按 Emacs `kbd` 的写法逐键输入：`-f` 是先按 `-` 再按 `f`，`a m` 是先按 `a` 再按 `m`（中间的空格只是记法分隔符）。mergetool 菜单的 `SPC m` 是例外：先按空格键，再按 `m`。只按了前缀时菜单会保持打开，等待后续按键；键序列没有定义时显示未绑定提示；`q` / `C-g` 退出菜单。
 
 `r i`、`r w`、进行中的 `r e` 会暂时离开 TUI，打开 git 配置的编辑器（`GIT_SEQUENCE_EDITOR` / `GIT_EDITOR` / `core.editor`）编辑 todo 或提交消息，编辑器退出后回到 TUI。`r m`、`r k` 和 cherry 搬移按当前实现，用 perl 脚本改写 todo，不需要手动编辑，所以系统里要有 `perl`。
 
@@ -192,20 +196,20 @@ cargo test
 - `status_buffer.rs`、`diff_buffer.rs`：章节、hunk、region、暂存/取消暂存、apply/reverse 与 diff 参数作用域。
 - `log_buffer.rs`、`log_select.rs`、`refs_buffer.rs`、`blame.rs`、`smerge.rs`：日志、选择、引用、blame 与冲突交互。
 - `completion.rs`、`history.rs`、`transient_args.rs`、`transient_values.rs`、`options.rs`、`wip.rs`：补全、历史、参数持久化、配置及 WIP 行为。
+- `run.rs`、`status_jump.rs`：run/ediff/mergetool 命令与进程日志、状态跳转与 imenu。
 
-这里描述的是现有测试覆盖范围，不是本次运行结果，也不保证与 Magit 全等。本次仅修改文档，未运行测试，不提供测试通过数量或覆盖率声明。
+这里描述的是现有测试覆盖范围，不是对 Magit 全等的保证，也不代表所有平台已经验证。
 
 ## Magit 兼容范围与已知限制
 
 xagit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
 
 - 提交消息及 `m e` 的合并消息主要通过提示行输入；需要编辑 todo 或提交消息时使用外部编辑器，替代 Emacs 的 `git-rebase-mode`/with-editor 会话。编辑器退出后返回 TUI。
-- `e`/`E` 用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；依赖 Ediff 会话的 stage/resolve 入口仍未提供。普通暂存和冲突相关功能不因此全部缺失。
-- 部分命令用统一文本视图替代 Magit 专用 buffer，不能据此推断完全没有结构化视图：项目已有专门的 status、diff、log、refs、blame 等模块。
+- `e`/`E` 用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；`E s` 用 `git add -p` 替代 Ediff 的选择性暂存，`E m`/`E M`/`E t` 用 `git mergetool` 替代 Ediff 的冲突解决会话，效果取决于本机配置的 merge 工具，不等同于 Emacs 的三方 Ediff。
+- 部分命令用统一文本视图替代 Magit 专用 buffer，不能据此推断完全没有结构化视图：项目已有专门的 status、diff、log、refs、blame 等模块。`!` 的 shell 命令与 `E t` 的 `git mergetool --gui` 同步捕获输出显示在文本视图，而不是 Magit 的异步 process buffer；`E m`/`E M` 与 `E s` 会把终端交给 merge 工具或 `git add -p`，`gitk`、`git gui` 等图形程序只在后台启动，不会嵌入 TUI。
 - refs 候选、最近提交列表及提示行输入与 Magit 的历史/log 选择交互不同。例如部分 rebase 操作从最近 30 个提交中选择，cherry 搬移可输入 commit 或 `A..B` 区间。
-- `D`/`L` 用于当前视图参数调整，按 `g` 刷新；现有测试断言 diff/log 参数修改只影响所显示的 buffer，新视图仍使用默认参数。旧的“运行内所有 diff/log 共享参数”说明不适用于当前实现。
+- `D`/`L` 用于当前视图参数调整，按 `g` 刷新；现有测试断言 diff/log 参数修改只影响所显示的 buffer，新视图仍使用默认参数。旧的"运行内所有 diff/log 共享参数"说明不适用于当前实现。
 - stash 采用原生 `git stash`，而 Magit 有自己的 stash 构造逻辑；现有测试不能证明所有场景的净效果一致，尚未通过全面的真实差分验证。
-- 测试中的键位与仓库状态断言只是兼容性证据，不等于与 Magit 全等，也不代表所有平台已经验证。
 
 ## 贡献
 

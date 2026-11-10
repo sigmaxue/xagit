@@ -33,6 +33,7 @@ pub fn man_page(name: &str) -> Option<&'static str> {
         "patch-create-menu" => "git-format-patch",
         "patch-apply-menu" => "git-apply",
         "blame-menu" => "git-blame",
+        "mergetool-menu" => "git-mergetool",
         _ => return None,
     })
 }
@@ -58,6 +59,7 @@ pub fn prefix_command(name: &str) -> String {
         "patches-menu" => return "magit-am".into(),
         "branch-config-menu" => return "magit-branch-configure".into(),
         "margin-settings-menu" => return "magit-margin-settings".into(),
+        "mergetool-menu" => return "magit-git-mergetool".into(),
         n => n.trim_end_matches("-menu"),
     };
     format!("magit-{base}")

@@ -515,12 +515,46 @@ fn log_popup_layout() {
     assert!(matches!(action_of(&r, "g"), Action::Command(c) if c == "log-refresh"));
 }
 
-/// magit-run prefix ("!")
+/// magit-run prefix ("!"), magit.el:418-431
 #[test]
 fn run_popup_layout() {
     let m = menu("run-menu");
-    assert!(matches!(action_of(&m, "!"), Action::Command(c) if c == "git-command"));
-    assert!(matches!(action_of(&m, "p"), Action::Command(c) if c == "git-command-cwd"));
+    assert_eq!(m.keys(), ["!", "p", "s", "S", "k", "a", "b", "g", "m"]);
+    for (key, target) in [
+        ("!", "git-command-topdir"),
+        ("p", "git-command"),
+        ("s", "shell-command-topdir"),
+        ("S", "shell-command"),
+        ("k", "run-gitk"),
+        ("a", "run-gitk-all"),
+        ("b", "run-gitk-branches"),
+        ("g", "run-git-gui"),
+        ("m", "git-mergetool"),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == target), "! {key}");
+    }
+}
+
+/// magit-git-mergetool transient (magit-extras.el:46-70)
+#[test]
+fn mergetool_popup_layout() {
+    let m = menu("mergetool-menu");
+    assert_eq!(m.keys(), ["-t", "=t", "=T", "-r", "-b", "-k", "-w", " m"]);
+    assert!(matches!(action_of(&m, "-t"), Action::Option { arg, reader: Reader::Pick(_) } if arg == "--tool="));
+    for (key, var) in [
+        ("=t", "merge.guitool"),
+        ("=T", "merge.tool"),
+        ("-r", "mergetool.hideResolved"),
+        ("-b", "mergetool.keepBackup"),
+        ("-k", "mergetool.keepTemporaries"),
+        ("-w", "mergetool.writeToTemp"),
+        (" m", "git-mergetool-invoke"),
+    ] {
+        assert!(matches!(action_of(&m, key), Action::Command(c) if c == var), "E t {key}");
+    }
+    // " m" is SPC then m (kbd), not a single key
+    assert!(matches!(m.lookup(&xagit_lib::ui::transient::key_seq(" ")), xagit_lib::ui::transient::Lookup::Prefix));
+    assert!(matches!(action_of(&m, " m"), Action::Command(c) if c == "git-mergetool-invoke"));
 }
 
 /// magit-sequence.el:140 magit-cherry-pick prefix
@@ -700,10 +734,16 @@ fn extra_features_popup_layout() {
     assert_eq!(n.keys(), ["d", "C", "D", "c", "a"]);
     assert!(matches!(action_of(&n, "c"), Action::Command(c) if c == "notes-merge-commit"));
 
-    // magit-ediff: "E" is dwim (shown as text diffs in xagit)
+    // magit-ediff (magit-ediff.el:117-131): "E" is dwim (shown as text
+    // diffs in xagit), the stage/resolve suffixes use git commands
     let e = menu("ediff-menu");
+    assert_eq!(e.keys(), ["E", "s", "m", "M", "t", "u", "i", "w", "c", "r", "z"]);
     for (key, target) in [
         ("E", "ediff-dwim"),
+        ("s", "ediff-stage"),
+        ("m", "ediff-resolve-rest"),
+        ("M", "ediff-resolve-all"),
+        ("t", "ediff-mergetool"),
         ("u", "ediff-unstaged"),
         ("i", "ediff-staged"),
         ("w", "ediff-worktree"),

@@ -31,6 +31,13 @@ pub(super) enum VarKind {
     /// magit--git-variable:choices: cycled through, read with a prefix
     /// argument; FALLBACK and DEFAULT shown after them
     Choices { choices: VarChoices, fallback: Option<&'static str>, default: Option<&'static str> },
+    /// magit--git-variable:boolean with :global t (magit-git-mergetool):
+    /// the choices "true"/"false", shown with DEFAULT when unset
+    Boolean { default: &'static str },
+    /// magit--git-variable with :reader magit--read-mergetool and :global t:
+    /// a value read from the tools of `git mergetool --tool-help', unset
+    /// when set
+    Mergetool,
     /// magit-branch.<branch>.description: a suffix editing it (exits)
     Description,
     /// magit--git-branch:upstream: branch.B.merge and branch.B.remote
@@ -161,12 +168,40 @@ const VARS: &[GitVar] = &[
         scope: VarScope::None,
         kind: VarKind::NotesRefs { global: true },
     },
+    // magit-git-mergetool's global git variables (magit-extras.el)
+    GitVar { command: "merge.guitool", variable: "merge.guitool", scope: VarScope::None, kind: VarKind::Mergetool },
+    GitVar { command: "merge.tool", variable: "merge.tool", scope: VarScope::None, kind: VarKind::Mergetool },
+    GitVar {
+        command: "mergetool.hideResolved",
+        variable: "mergetool.hideResolved",
+        scope: VarScope::None,
+        kind: VarKind::Boolean { default: "false" },
+    },
+    GitVar {
+        command: "mergetool.keepBackup",
+        variable: "mergetool.keepBackup",
+        scope: VarScope::None,
+        kind: VarKind::Boolean { default: "true" },
+    },
+    GitVar {
+        command: "mergetool.keepTemporaries",
+        variable: "mergetool.keepTemporaries",
+        scope: VarScope::None,
+        kind: VarKind::Boolean { default: "false" },
+    },
+    GitVar {
+        command: "mergetool.writeToTemp",
+        variable: "mergetool.writeToTemp",
+        scope: VarScope::None,
+        kind: VarKind::Boolean { default: "false" },
+    },
 ];
 
 /// The location argument of V (--global or --local).
 fn location(v: &GitVar) -> &'static str {
     match v.kind {
-        VarKind::NotesRef { global: true } | VarKind::NotesRefs { global: true } => "--global",
+        VarKind::NotesRef { global: true } | VarKind::NotesRefs { global: true } | VarKind::Boolean { .. }
+        | VarKind::Mergetool => "--global",
         _ => "--local",
     }
 }
@@ -206,19 +241,25 @@ impl App {
         match v.kind {
             VarKind::Choices { choices: VarChoices::List(l), .. } => l.iter().map(|s| s.to_string()).collect(),
             VarKind::Choices { choices: VarChoices::Remotes, .. } => self.git.remotes(),
+            VarKind::Boolean { .. } => vec!["true".into(), "false".into()],
             _ => Vec::new(),
         }
     }
 
     /// magit--git-variable-list-choices: the value shown after the
     /// choices, the global value (global:V), the value of the fallback
-    /// variable (FALLBACK:V), else the default (default:V).
+    /// variable (FALLBACK:V), else the default (default:V). A variable
+    /// whose location is global has no "global:" alternative.
     fn var_fallback(&self, v: &GitVar, var: &str) -> Option<String> {
-        let VarKind::Choices { fallback, default, .. } = v.kind else {
-            return None;
+        let (fallback, default) = match v.kind {
+            VarKind::Choices { fallback, default, .. } => (fallback, default),
+            VarKind::Boolean { default } => (None, Some(default)),
+            _ => return None,
         };
-        if let Some(g) = self.config_value("--global", var) {
-            return Some(format!("global:{g}"));
+        if location(v) != "--global" {
+            if let Some(g) = self.config_value("--global", var) {
+                return Some(format!("global:{g}"));
+            }
         }
         if let Some(f) = fallback {
             if let Some(fv) = self.config(f) {
@@ -250,13 +291,13 @@ impl App {
                 [one] => format!("{var} {one}"),
                 many => format!("{var} {}", many.iter().map(|v| format!("\n     {v}")).collect::<String>()),
             },
-            VarKind::Text | VarKind::Description | VarKind::NotesRef { .. } => {
+            VarKind::Text | VarKind::Description | VarKind::NotesRef { .. } | VarKind::Mergetool => {
                 let value = self.config_value(location(v), &var);
                 let first = value.as_deref().and_then(|v| v.lines().next());
                 format!("{var} {}", first.unwrap_or("unset"))
             }
-            VarKind::Choices { .. } => {
-                let value = self.config_value("--local", &var);
+            VarKind::Choices { .. } | VarKind::Boolean { .. } => {
+                let value = self.config_value(location(v), &var);
                 let mut choices = self.var_choices(v);
                 if let Some(val) = value.as_ref().filter(|val| !choices.contains(val)) {
                     choices.insert(0, val.clone());
@@ -340,10 +381,11 @@ impl App {
             },
         };
         let var = Self::var_name(v, &scope);
+        let loc = location(v);
         let set_all = |s: &Self, values: &[String]| -> Result<()> {
-            let _ = s.git.git_ok(&["config", "--local", "--unset-all", &var]);
+            let _ = s.git.git_ok(&["config", loc, "--unset-all", &var]);
             for val in values {
-                s.git.git_interactive(&["config", "--local", "--add", &var, val])?;
+                s.git.git_interactive(&["config", loc, "--add", &var, val])?;
             }
             Ok(())
         };
@@ -370,9 +412,9 @@ impl App {
                     self.git.git_interactive(&["branch", "--set-upstream-to", &up, &scope])?;
                 }
             }
-            VarKind::Text => match self.config_value("--local", &var) {
+            VarKind::Text => match self.config_value(loc, &var) {
                 Some(_) => {
-                    let _ = self.git.git_ok(&["config", "--local", "--unset", &var]);
+                    let _ = self.git.git_ok(&["config", loc, "--unset", &var]);
                 }
                 None => {
                     let Some(val) = self.read_line_hist(&var, None, Hist::Infix(&var), None)? else {
@@ -380,7 +422,25 @@ impl App {
                     };
                     if !val.is_empty() {
                         add_to_history(self.infix_history.borrow_mut().entry(var.clone()).or_default(), &val, true);
-                        self.git.git_interactive(&["config", "--local", &var, &val])?;
+                        self.git.git_interactive(&["config", loc, &var, &val])?;
+                    }
+                }
+            },
+            // magit-merge.guitool / magit-merge.tool: the tool is read
+            // from `git mergetool --tool-help' (magit--read-mergetool).
+            VarKind::Mergetool => match self.config_value(loc, &var) {
+                Some(_) => {
+                    let _ = self.git.git_ok(&["config", loc, "--unset", &var]);
+                }
+                None => {
+                    let tools = super::run::mergetool_tools(&self.git);
+                    let table = Completion { candidates: tools, require_match: true, multiple: false };
+                    let prompt = format!("Set `{var}' to");
+                    let Some(val) = self.completing_read(&prompt, None, Hist::Infix(&var), Some(table))? else {
+                        return Ok(());
+                    };
+                    if !val.is_empty() {
+                        self.git.git_interactive(&["config", loc, &var, &val])?;
                     }
                 }
             },
@@ -449,8 +509,8 @@ impl App {
                     self.git.git_interactive(&["config", location(v), "--add", &var, r])?;
                 }
             }
-            VarKind::Choices { .. } => {
-                let value = self.config_value("--local", &var);
+            VarKind::Choices { .. } | VarKind::Boolean { .. } => {
+                let value = self.config_value(loc, &var);
                 let choices = self.var_choices(v);
                 let new = if self.prefix_arg.is_some() {
                     let unset = self.var_fallback(v, &var).unwrap_or_else(|| "(unset)".into());
@@ -472,9 +532,9 @@ impl App {
                     }
                 };
                 match new {
-                    Some(n) => self.git.git_interactive(&["config", "--local", &var, &n])?,
+                    Some(n) => self.git.git_interactive(&["config", loc, &var, &n])?,
                     None => {
-                        let _ = self.git.git_ok(&["config", "--local", "--unset", &var]);
+                        let _ = self.git.git_ok(&["config", loc, "--unset", &var]);
                     }
                 }
             }
