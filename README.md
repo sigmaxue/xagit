@@ -71,9 +71,11 @@ cargo install --path .
 ```bash
 ./target/release/xagit                 # 查看当前仓库
 ./target/release/xagit /path/to/repo   # 查看指定仓库
+./target/release/xagit --help          # 查看命令行用法与常用按键
+./target/release/xagit --version       # 查看版本（v1.0.0）
 ```
 
-安装后也可在任意 Git 仓库内运行 `xagit`，或运行 `xagit /path/to/repo`。CLI 只读取第一个位置参数作为路径，省略时使用当前目录；没有专用的 `--help`/`--version` 参数解析。
+安装后也可在任意 Git 仓库内运行 `xagit`，或运行 `xagit /path/to/repo`。CLI 只读取第一个位置参数作为路径，省略时使用当前目录；`--help` 与 `--version` 可放在任意参数位置，它们在启动界面前把结果打印到标准输出并以退出码 0 结束，不要求当前目录是 Git 仓库，两者同时给出时以 `--help` 优先。`--version` 输出 `v1.0.0`，版本号取自 `Cargo.toml` 的 `CARGO_PKG_VERSION`（包版本同为 `1.0.0`），不是单独硬编码。
 
 1. 按 `h` 或 `?` 查看总菜单，按 `n`/`p` 在章节间移动，方向键在行间移动。
 2. 按 `TAB` 展开变更；在文件或 hunk 上按 `s` 暂存，按 `u` 取消暂存。
@@ -209,7 +211,7 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 
 ```
 src/
-├── main.rs            # 入口：解析路径 → Git::discover → App
+├── main.rs            # 入口：--help / --version / 解析路径 → Git::discover → App
 ├── lib.rs             # 库入口（供测试引用）
 ├── git/
 │   ├── exec.rs        # git 进程封装（全局参数/进程内查询短路/进程日志）
@@ -253,6 +255,7 @@ cargo test
 - `log_buffer.rs`、`log_select.rs`、`refs_buffer.rs`、`blame.rs`、`smerge.rs`：日志、选择、引用、blame 与冲突交互。
 - `completion.rs`、`history.rs`、`transient_args.rs`、`transient_values.rs`、`options.rs`、`wip.rs`：补全、历史、参数持久化、配置及 WIP 行为。
 - `run.rs`、`status_jump.rs`：run/ediff/mergetool 命令与进程日志、状态跳转与 imenu。
+- `help.rs`：命令行 `--help`/`--version` 的输出与退出码、优先级及路径参数不受影响。
 
 这里描述的是现有测试覆盖范围，不是对 Magit 全等的保证，也不代表所有平台已经验证。
 
