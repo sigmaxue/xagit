@@ -12,6 +12,28 @@ pub struct MenuEntry {
     pub key: String,          // "z" / "C-c" style label
     pub desc: String,
     pub action: Action,
+    /// the level of the suffix (transient--default-child-level 1)
+    pub level: u8,
+    /// not used at the level of the prefix (set when it is shown)
+    pub hidden: bool,
+}
+
+impl MenuEntry {
+    /// The suffix at LEVEL, like `(LEVEL "key" ...)` in a prefix.
+    pub fn level(mut self, level: u8) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// Whether the entry's infix takes the argument A.
+    fn takes(&self, a: &str) -> bool {
+        match &self.action {
+            Action::Switch(sw) => sw == a,
+            Action::Option { arg, .. } => option_matches(arg, a),
+            Action::Switches(args) => args.iter().any(|x| x == a),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +132,7 @@ impl Menu {
     /// Match a (possibly partial) key sequence.
     pub fn lookup(&self, typed: &[Key]) -> Lookup<'_> {
         let mut prefix = false;
-        for e in self.groups.iter().flatten() {
+        for e in self.groups.iter().flatten().filter(|e| !e.hidden) {
             let seq = key_seq(&e.key);
             if seq == typed {
                 return Lookup::Found(e);
@@ -137,14 +159,37 @@ impl Menu {
         v
     }
 
-    /// Render like Magit's transient popup, in columns; an infix that is
+    /// transient--use-level-p: hide the suffixes not at a level from 1
+    /// to LEVEL (the level of the prefix); LEVELS overrides the level of
+    /// the suffixes by key.
+    pub fn set_level(&mut self, level: u8, levels: &BTreeMap<String, u8>) {
+        for e in self.groups.iter_mut().flatten() {
+            let l = levels.get(&e.key).copied().unwrap_or(e.level);
+            e.hidden = l == 0 || l > level;
+        }
+    }
+
+    /// Whether the argument A belongs to a hidden infix only (its value
+    /// isn't used then).
+    pub fn hidden_arg(&self, a: &str) -> bool {
+        let mut es = self.groups.iter().flatten().filter(|e| e.takes(a));
+        es.clone().next().is_some() && es.all(|e| e.hidden)
+    }
+
+    /// Render like Magit's transient popup, in columns (the groups
+    /// without a suffix at the prefix's level omitted); an infix that is
     /// set is followed by its value, as in "-n Limit number of commits (-n256)".
     pub fn render(&self, active: &BTreeMap<String, bool>) -> String {
         let mut out = String::new();
-        let ncols = self.groups.len();
-        let cells: Vec<Vec<String>> = self.groups.iter().map(|g| g.iter().map(|e| display(e, active)).collect()).collect();
+        let cells: Vec<Vec<String>> = self
+            .groups
+            .iter()
+            .map(|g| g.iter().filter(|e| !e.hidden).map(|e| display(e, active)).collect::<Vec<_>>())
+            .filter(|g| !g.is_empty())
+            .collect();
+        let ncols = cells.len();
         let widths: Vec<usize> = cells.iter().map(|g| g.iter().map(|d| d.chars().count()).max().unwrap_or(0)).collect();
-        let nrows = self.groups.iter().map(|g| g.len()).max().unwrap_or(0);
+        let nrows = cells.iter().map(Vec::len).max().unwrap_or(0);
         for row in 0..nrows {
             let mut line = String::new();
             for (c, w) in widths.iter().enumerate().take(ncols) {
@@ -166,13 +211,19 @@ fn display(e: &MenuEntry, active: &BTreeMap<String, bool>) -> String {
 }
 
 fn opt(key: &str, desc: &str, arg: &str, reader: Reader) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Option { arg: arg.into(), reader } }
+    MenuEntry {
+        key: key.into(),
+        desc: desc.into(),
+        action: Action::Option { arg: arg.into(), reader },
+        level: 1,
+        hidden: false,
+    }
 }
 fn choices(c: &[&str]) -> Reader {
     Reader::Choices(c.iter().map(|s| s.to_string()).collect())
 }
 fn switches(key: &str, desc: &str, args: &[&str]) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switches(args.iter().map(|s| s.to_string()).collect()) }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switches(args.iter().map(|s| s.to_string()).collect()), level: 1, hidden: false }
 }
 /// magit-merge:--strategy ("-s" for merge, "=s" for cherry-pick and revert)
 fn merge_strategy(key: &str) -> MenuEntry {
@@ -194,13 +245,13 @@ fn margin_details() -> MenuEntry {
 }
 
 fn cmd(key: &str, desc: &str, command: &str) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Command(command.into()) }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Command(command.into()), level: 1, hidden: false }
 }
 fn sw(key: &str, desc: &str, switch: &str) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switch(switch.into()) }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Switch(switch.into()), level: 1, hidden: false }
 }
 fn sub(key: &str, desc: &str, menu: &str) -> MenuEntry {
-    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Submenu(menu.into()) }
+    MenuEntry { key: key.into(), desc: desc.into(), action: Action::Submenu(menu.into()), level: 1, hidden: false }
 }
 
 /// magit-diff argument switches shared by `d` and `D` (default level).
@@ -729,13 +780,20 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("P", "remote.pushDefault", "remote-pushdefault"),
                     cmd("B", "Update default branch", "update-default-branch"),
                 ],
+                // Arguments
+                vec![
+                    sw("-m", "Automatically merge conflicting local modifications", "--merge").level(6),
+                    sw("-r", "Recurse submodules when checking out an existing branch", "--recurse-submodules").level(7),
+                ],
                 vec![
                     cmd("b", "branch/revision", "checkout"),
                     cmd("l", "local branch", "branch-checkout"),
                     cmd("c", "new branch", "branch-and-checkout"),
                     cmd("s", "new spin-off", "branch-spinoff"),
+                    cmd("w", "new worktree", "worktree-checkout").level(5),
                     cmd("n", "new branch", "branch-create"),
                     cmd("S", "new spin-out", "branch-spinout"),
+                    cmd("W", "new worktree", "worktree-branch").level(5),
                     cmd("m", "rename", "branch-rename"),
                     cmd("x", "reset", "branch-reset"),
                     cmd("k", "delete", "branch-delete"),

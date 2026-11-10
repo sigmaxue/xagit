@@ -18,6 +18,13 @@
 //! magit-wip-namespace refs/wip/
 //! enable-command magit-clean
 //! disabled-command-function nil
+//! transient-default-level 4
+//! transient-level magit-branch 6
+//! transient-level magit-branch -r 6
+//! magit-branch-prefer-remote-upstream master main
+//! magit-branch-adjust-remote-upstream-alist origin/master (master next maint)
+//! magit-branch-adjust-remote-upstream-alist origin/maint \`hotfix/
+//! magit-branch-name-suggestions feature/ fix/
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
@@ -28,8 +35,18 @@
 //! and disable-command (Emacs' `(put COMMAND 'disabled nil|t)`) enable
 //! or disable a command (magit-clean is disabled); with
 //! disabled-command-function nil disabled commands just run.
+//!
+//! transient-level sets the level of a prefix (by the name of its Magit
+//! command) or of one of its suffixes (by its key), like the levels
+//! saved in Transient's levels file; the suffixes above the level of
+//! their prefix (default transient-default-level) are not shown. Each
+//! magit-branch-adjust-remote-upstream-alist line adds an entry: the
+//! upstream and a regexp, or a parenthesized list of the branches not
+//! using it. magit-branch-prefer-remote-upstream and
+//! magit-branch-name-suggestions take a list (or `nil`).
 
 use super::regexp::Regexp;
+use std::collections::BTreeMap;
 
 /// The actions of magit-no-confirm (magit--confirm-actions).
 pub const CONFIRM_ACTIONS: &[&str] = &[
@@ -93,6 +110,38 @@ pub struct Options {
     pub disabled_command_function: bool,
     /// the commands whose `disabled` property is set
     pub disabled_commands: Vec<String>,
+    /// transient-default-level
+    pub transient_default_level: u8,
+    /// the levels of the prefixes (transient-levels: PREFIX . t)
+    pub prefix_levels: BTreeMap<String, u8>,
+    /// the levels of suffixes: by prefix and key
+    pub suffix_levels: BTreeMap<String, BTreeMap<String, u8>>,
+    /// magit-branch-prefer-remote-upstream: branch names, or regexps
+    /// (those that aren't valid branch names)
+    pub branch_prefer_remote_upstream: Vec<String>,
+    /// magit-branch-adjust-remote-upstream-alist
+    pub branch_adjust_remote_upstream: Vec<(String, UpstreamRule)>,
+    /// magit-branch-name-suggestions
+    pub branch_name_suggestions: Vec<String>,
+}
+
+/// The RULE of an entry of magit-branch-adjust-remote-upstream-alist.
+#[derive(Debug, Clone)]
+pub enum UpstreamRule {
+    /// the branches matching it use the upstream
+    Matching(Regexp),
+    /// all the branches but these use the upstream
+    Except(Vec<String>),
+}
+
+impl UpstreamRule {
+    /// Whether the branch NAME (its remote stripped) uses the upstream.
+    pub fn applies(&self, name: &str) -> bool {
+        match self {
+            UpstreamRule::Matching(re) => re.is_match(name),
+            UpstreamRule::Except(names) => !names.iter().any(|n| n == name),
+        }
+    }
 }
 
 impl Default for Options {
@@ -110,6 +159,12 @@ impl Default for Options {
             wip: crate::git::wip::Wip::default(),
             disabled_command_function: true,
             disabled_commands: vec!["magit-clean".into()],
+            transient_default_level: 4,
+            prefix_levels: BTreeMap::new(),
+            suffix_levels: BTreeMap::new(),
+            branch_prefer_remote_upstream: Vec::new(),
+            branch_adjust_remote_upstream: Vec::new(),
+            branch_name_suggestions: Vec::new(),
         }
     }
 }
@@ -126,6 +181,11 @@ impl Options {
                 || (self.wip_mode
                     && member("safe-with-wip")
                     && ["discard", "reverse", "stage-all-changes", "unstage-all-changes"].contains(&action)))
+    }
+
+    /// The level of the prefix COMMAND (a Magit command name).
+    pub fn prefix_level(&self, command: &str) -> u8 {
+        self.prefix_levels.get(command).copied().unwrap_or(self.transient_default_level)
     }
 
     /// Whether running COMMAND calls disabled-command-function.
@@ -222,6 +282,50 @@ impl Options {
                     }
                     _ => Some("expected a command".into()),
                 },
+                "transient-default-level" => match values.as_slice() {
+                    [n] => level(n, false).map(|n| o.transient_default_level = n).err(),
+                    _ => Some("expected a level".into()),
+                },
+                "transient-level" => match values.as_slice() {
+                    [prefix, n] => level(n, false).map(|n| _ = o.prefix_levels.insert(prefix.to_string(), n)).err(),
+                    [prefix, key @ .., n] if !key.is_empty() => level(n, true)
+                        .map(|n| _ = o.suffix_levels.entry(prefix.to_string()).or_default().insert(key.join(" "), n))
+                        .err(),
+                    _ => Some("expected a prefix, optionally a key, and a level".into()),
+                },
+                "magit-branch-prefer-remote-upstream" => {
+                    o.branch_prefer_remote_upstream = list(&values);
+                    None
+                }
+                "magit-branch-name-suggestions" => {
+                    o.branch_name_suggestions = list(&values);
+                    None
+                }
+                "magit-branch-adjust-remote-upstream-alist" => match values.as_slice() {
+                    ["nil"] => {
+                        o.branch_adjust_remote_upstream.clear();
+                        None
+                    }
+                    [upstream, rule @ ..] if !rule.is_empty() => {
+                        let rule = rule.join(" ");
+                        match rule.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+                            Some(names) => {
+                                let names = names.split_whitespace().map(str::to_string).collect();
+                                o.branch_adjust_remote_upstream.push((upstream.to_string(), UpstreamRule::Except(names)));
+                                None
+                            }
+                            None if rule.contains(' ') => Some("expected a regexp or a list".into()),
+                            None => match Regexp::new(&rule) {
+                                Ok(r) => {
+                                    o.branch_adjust_remote_upstream.push((upstream.to_string(), UpstreamRule::Matching(r)));
+                                    None
+                                }
+                                Err(e) => Some(format!("invalid regexp {rule}: {e}")),
+                            },
+                        }
+                    }
+                    _ => Some("expected an upstream and a rule".into()),
+                },
                 "magit-refs-filter-alist" => match values.as_slice() {
                     ["nil"] => {
                         o.refs_filter.clear();
@@ -248,6 +352,23 @@ impl Options {
             }
         }
         (o, errors)
+    }
+}
+
+/// A level from 1 (with ZERO from 0) to 7.
+fn level(n: &str, zero: bool) -> Result<u8, String> {
+    match n.parse::<u8>() {
+        Ok(n) if n <= 7 && (zero || n >= 1) => Ok(n),
+        _ => Err(format!("invalid level {n}")),
+    }
+}
+
+/// A list of strings, `nil` the empty list.
+fn list(values: &[&str]) -> Vec<String> {
+    if values == ["nil"] {
+        Vec::new()
+    } else {
+        values.iter().map(|v| v.to_string()).collect()
     }
 }
 

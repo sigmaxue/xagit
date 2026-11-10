@@ -190,3 +190,152 @@ fn branch_and_checkout() {
     assert_eq!(head(&g), "from-stash", "{}", app.message());
     assert_eq!(read(&g, "file.txt"), "stashed\n");
 }
+
+fn with_options(g: &Git, text: &str) -> App {
+    let mut app = App::new(g.clone());
+    let (o, e) = xagit_lib::ui::options::Options::parse(text);
+    assert!(e.is_empty(), "{e:?}");
+    app.set_options(o);
+    app
+}
+
+fn popup(app: &mut App) -> String {
+    app.press("b").unwrap();
+    let p = app.transient_popup().join("\n");
+    app.press("C-g").unwrap();
+    p
+}
+
+#[test]
+fn levels() {
+    let (_u, _td, g) = with_remote();
+    // level 4: neither -m (6), -r (7) nor w/W (5)
+    let mut app = App::new(g.clone());
+    let p = popup(&mut app);
+    assert!(!p.contains("--merge") && !p.contains("Recurse submodules") && !p.contains("new worktree"), "{p}");
+    assert!(p.contains("b branch/revision"));
+    // a hidden suffix isn't bound
+    press(&mut app, &["b", "-", "m"]);
+    assert!(!app.menu_keys().contains(&"-m".to_string()));
+    app.press("C-g").unwrap();
+    // transient-default-level 5: the worktree commands
+    let p = popup(&mut with_options(&g, "transient-default-level 5"));
+    assert!(p.contains("w new worktree") && p.contains("W new worktree") && !p.contains("-m Automatically"), "{p}");
+    // the prefix at level 6: -m too; -r at level 6 too
+    let p = popup(&mut with_options(&g, "transient-level magit-branch 6"));
+    assert!(p.contains("-m Automatically merge conflicting local modifications") && !p.contains("-r Recurse"), "{p}");
+    let p = popup(&mut with_options(&g, "transient-level magit-branch 6\ntransient-level magit-branch -r 6"));
+    assert!(p.contains("-r Recurse submodules when checking out an existing branch"), "{p}");
+    // level 0: never shown
+    let p = popup(&mut with_options(&g, "transient-level magit-branch b 0"));
+    assert!(!p.contains("branch/revision"), "{p}");
+    // other prefixes keep the default level
+    let (o, e) = xagit_lib::ui::options::Options::parse("transient-level magit-branch 8\ntransient-default-level 0\ntransient-level x");
+    assert_eq!(e.len(), 3, "{e:?}");
+    assert_eq!(o.prefix_level("magit-branch"), 4);
+}
+
+#[test]
+fn merge_argument() {
+    let (_u, _td, g) = with_remote();
+    write(&g, "file.txt", "dirty\n");
+    git(&g, &["update-ref", "refs/remotes/origin/other", "origin/feature"]);
+    // -m: checked out with --merge despite the uncommitted changes
+    let level6 = "transient-level magit-branch 6";
+    let mut app = with_options(&g, level6);
+    app.script_answers(&["origin/feature"]);
+    press(&mut app, &["b", "-", "m", "l"]);
+    assert_eq!(head(&g), "feature", "{}", app.message());
+    assert_eq!(read(&g, "file.txt"), "dirty\n");
+    // the value set (C-x s) isn't used while -m is hidden
+    press(&mut app, &["b", "-", "m", "C-x", "s", "C-g"]);
+    assert_eq!(app.current_menu(), None);
+    app.set_options(Default::default());
+    app.script_answers(&["origin/other"]);
+    press(&mut app, &["b", "l"]);
+    assert_eq!(app.message(), "Cannot checkout when there are uncommitted changes", "{:?}", app.prompts());
+    // at level 6 again it is
+    let (o, _) = xagit_lib::ui::options::Options::parse(level6);
+    app.set_options(o);
+    app.script_answers(&["origin/other"]);
+    press(&mut app, &["b", "l"]);
+    assert_eq!(head(&g), "other", "{}", app.message());
+}
+
+fn upstream(g: &Git, b: &str) -> String {
+    g.git_string(&["rev-parse", "--abbrev-ref", &format!("{b}@{{upstream}}")]).unwrap_or_default().trim().to_string()
+}
+
+#[test]
+fn adjust_remote_upstream() {
+    let (_u, _td, g) = with_remote();
+    // the branches but master and next: master
+    let mut app = with_options(&g, "magit-branch-adjust-remote-upstream-alist master (master next)");
+    app.script_answers(&["origin/feature"]);
+    press(&mut app, &["b", "l"]);
+    assert_eq!(upstream(&g, "feature"), "master");
+    // the first rule whose upstream exists and that matches
+    let text = "magit-branch-adjust-remote-upstream-alist nope ^f\n\
+                magit-branch-adjust-remote-upstream-alist master \\`hotfix/\n\
+                magit-branch-adjust-remote-upstream-alist topic ^fea";
+    let mut app = with_options(&g, text);
+    app.script_answers(&["origin/feature", "f2"]);
+    press(&mut app, &["b", "c"]);
+    assert_eq!(upstream(&g, "f2"), "topic", "{}", app.message());
+    // not for local starting points; b n too
+    app.script_answers(&["master", "f3"]);
+    press(&mut app, &["b", "n"]);
+    assert_eq!(upstream(&g, "f3"), "");
+    git(&g, &["update-ref", "refs/remotes/origin/hotfix/a", "origin/feature"]);
+    let mut app = with_options(&g, "magit-branch-adjust-remote-upstream-alist master \\`hotfix/");
+    app.script_answers(&["origin/hotfix/a", "h"]);
+    press(&mut app, &["b", "n"]);
+    assert_eq!(upstream(&g, "h"), "master");
+    // a rule not matching
+    app.script_answers(&["origin/feature", "f4"]);
+    press(&mut app, &["b", "n"]);
+    assert_eq!(upstream(&g, "f4"), "origin/feature");
+}
+
+#[test]
+fn prefer_remote_upstream() {
+    let (_u, _td, g) = with_remote();
+    git(&g, &["branch", "-q", "-u", "origin/master", "master"]);
+    git(&g, &["config", "branch.autoSetupMerge", "always"]);
+    // not opted in: the local branch is the upstream
+    let mut app = App::new(g.clone());
+    app.script_answers(&["master", "x"]);
+    press(&mut app, &["b", "n"]);
+    assert_eq!(upstream(&g, "x"), "master");
+    // opted in (by name, by regexp): its upstream
+    let mut app = with_options(&g, "magit-branch-prefer-remote-upstream main master");
+    app.script_answers(&["master", "y"]);
+    press(&mut app, &["b", "c"]);
+    assert_eq!(upstream(&g, "y"), "origin/master", "{}", app.message());
+    let mut app = with_options(&g, "magit-branch-prefer-remote-upstream ^ma*");
+    app.script_answers(&["master", "z"]);
+    press(&mut app, &["b", "n"]);
+    assert_eq!(upstream(&g, "z"), "origin/master");
+    // not when the remote branch can't be fast-forwarded to it
+    git(&g, &["checkout", "-q", "master"]);
+    git(&g, &["reset", "-q", "--hard", "HEAD"]);
+    git(&g, &["update-ref", "refs/remotes/origin/master", "origin/topic"]);
+    app.script_answers(&["master", "w"]);
+    press(&mut app, &["b", "n"]);
+    assert_eq!(upstream(&g, "w"), "master");
+}
+
+#[test]
+fn name_suggestions() {
+    let (_u, _td, g) = with_remote();
+    let mut app = with_options(&g, "magit-branch-name-suggestions feature/ fix/");
+    app.script_answers(&["master"]);
+    app.script_keys(&["f", "i", "TAB", "o", "n", "e", "RET"]);
+    press(&mut app, &["b", "n"]);
+    assert!(g.branches().contains(&"fix/one".to_string()), "{}", app.message());
+    // the branch name of a remote starting point first
+    app.script_answers(&["origin/feature"]);
+    app.script_keys(&["f", "e", "a", "t", "u", "r", "e", "TAB", "RET"]);
+    press(&mut app, &["b", "n"]);
+    assert!(g.branches().contains(&"feature".to_string()), "{:?}", g.branches());
+}

@@ -1807,9 +1807,22 @@ impl App {
             ("show-refs-menu", BufferMode::Refs { .. }) => &self.buf_args,
             _ => &default,
         };
+        // the suffixes at the prefix's level (the values of the others
+        // unused)
+        let prefix = help::prefix_command(name.split('@').next().unwrap_or(&name));
+        let level = self.options.prefix_level(&prefix);
+        let no_levels = BTreeMap::new();
+        let levels = self.options.suffix_levels.get(&prefix).unwrap_or(&no_levels);
+        let preset: Vec<String> = match self.menus.get_mut(&name) {
+            Some(m) => {
+                m.set_level(level, levels);
+                preset.iter().filter(|a| !m.hidden_arg(a)).cloned().collect()
+            }
+            None => preset.to_vec(),
+        };
         let active: BTreeMap<String, bool> = preset.iter().map(|a| (a.clone(), true)).collect();
         // transient--history-init: the current value, then those used before
-        let value = preset.to_vec();
+        let value = preset;
         let mut hist = vec![value.clone()];
         hist.extend(self.history.get(&key).into_iter().flatten().filter(|v| **v != value).cloned());
         self.menu_history = (hist, 0);
@@ -2006,7 +2019,7 @@ impl App {
     pub fn menu_keys(&self) -> Vec<String> {
         self.current_menu()
             .and_then(|n| self.menus.get(n))
-            .map(|m| m.groups.iter().flatten().map(|e| e.key.clone()).collect())
+            .map(|m| m.groups.iter().flatten().filter(|e| !e.hidden).map(|e| e.key.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -2927,7 +2940,9 @@ impl App {
                     let mut a: Vec<&str> = vec!["checkout"];
                     a.extend(args.iter().map(String::as_str));
                     a.extend(["-b", &name, &start]);
-                    g!().git_interactive(&a)
+                    let res = g!().git_interactive(&a);
+                    self.branch_maybe_adjust_upstream(&name, &start);
+                    res
                 };
                 self.done("", res.map(|_| String::new()));
             }
@@ -2937,6 +2952,7 @@ impl App {
                     return Ok(());
                 };
                 let res = g!().git_interactive(&["branch", &name, &start]);
+                self.branch_maybe_adjust_upstream(&name, &start);
                 self.done("", res.map(|_| String::new()));
             }
             "branch-spinoff" => {
@@ -5338,6 +5354,7 @@ impl App {
         a.extend(["-b", &branch, &start]);
         let res = self.git.git_interactive(&a);
         if res.is_ok() {
+            self.branch_maybe_adjust_upstream(&branch, &start);
             if let Some((r, b)) = self.split_remote_branch(&start) {
                 let push_default = self.git.git_string(&["config", "remote.pushDefault"]).unwrap_or_default();
                 if b == branch && r != push_default.trim() {
@@ -5424,9 +5441,11 @@ impl App {
     /// names of existing branches and invalid names are refused.
     fn branch_read_name(&mut self, prompt: &str, start_point: Option<&str>) -> Result<Option<String>> {
         let taken = self.git.branches();
-        let mut choices = Vec::new();
+        let mut choices = self.options.branch_name_suggestions.clone();
         if let Some((_, b)) = start_point.and_then(|s| self.split_remote_branch(s)) {
-            choices.push(b);
+            if !choices.contains(&b) {
+                choices.insert(0, b);
+            }
         }
         choices.retain(|c| !taken.contains(c));
         loop {
@@ -6999,17 +7018,59 @@ impl App {
             .filter(|u| !u.is_empty())
     }
 
-    /// magit-get-indirect-upstream-branch (forced): the upstream of
-    /// BRANCH if it is the remote branch of the same name and can be
-    /// fast-forwarded to BRANCH.
-    fn indirect_upstream_branch(&self, branch: &str) -> Option<String> {
+    /// magit-get-indirect-upstream-branch: the upstream of BRANCH if it
+    /// is the remote branch of the same name and can be fast-forwarded to
+    /// BRANCH, unless FORCE only if BRANCH matches
+    /// magit-branch-prefer-remote-upstream (a member that is a valid
+    /// branch name exactly, else as a regexp).
+    fn indirect_upstream_branch(&self, branch: &str, force: bool) -> Option<String> {
         let remote = self.git.git_string(&["config", &format!("branch.{branch}.remote")]).ok()?;
         if remote.is_empty() || remote == "." {
+            return None;
+        }
+        let opted_in = |p: &String| {
+            if self.git.git_ok(&["check-ref-format", "--branch", p]) {
+                p == branch
+            } else {
+                super::regexp::Regexp::new(p).is_ok_and(|re| re.is_match(branch))
+            }
+        };
+        if !force && !self.options.branch_prefer_remote_upstream.iter().any(opted_in) {
             return None;
         }
         let upstream = self.upstream_branch(branch)?;
         (upstream.strip_prefix(&format!("{remote}/")) == Some(branch) && self.git.is_ancestor(&upstream, branch))
             .then_some(upstream)
+    }
+
+    /// magit-branch-p: whether NAME is a local or remote branch.
+    fn is_branch(&self, name: &str) -> bool {
+        ["refs/heads/", "refs/remotes/"]
+            .iter()
+            .any(|p| self.git.git_ok(&["show-ref", "--verify", "--quiet", &format!("{p}{name}")]))
+    }
+
+    /// magit-branch-maybe-adjust-upstream: when BRANCH has an upstream,
+    /// the indirect upstream of START-POINT (magit-branch-prefer-remote-
+    /// upstream) becomes its upstream; else for the remote branch
+    /// START-POINT the first existing upstream of
+    /// magit-branch-adjust-remote-upstream-alist whose rule matches its
+    /// name (the remote stripped).
+    fn branch_maybe_adjust_upstream(&self, branch: &str, start: &str) {
+        let upstream = self
+            .upstream_branch(branch)
+            .and_then(|_| self.indirect_upstream_branch(start, false))
+            .or_else(|| {
+                let (_, name) = self.split_remote_branch(start)?;
+                self.options
+                    .branch_adjust_remote_upstream
+                    .iter()
+                    .find(|(up, rule)| self.is_branch(up) && rule.applies(&name))
+                    .map(|(up, _)| up.clone())
+            });
+        if let Some(u) = upstream {
+            let _ = self.git.git_interactive(&["branch", &format!("--set-upstream-to={u}"), branch]);
+        }
     }
 
     /// The default of magit-read-branch-prefer-other: of the branches at
@@ -7179,12 +7240,9 @@ impl App {
                 return Ok(());
             }
         }
-        // magit-branch-p
-        let is_branch = ["refs/heads/", "refs/remotes/"]
-            .iter()
-            .any(|p| self.git.git_ok(&["show-ref", "--verify", "--quiet", &format!("{p}{to}")]));
-        if self.prefix_arg.is_some() && is_branch {
+        if self.prefix_arg.is_some() && self.is_branch(&to) {
             self.git.git_interactive(&["branch", &format!("--set-upstream-to={to}"), &branch])?;
+            self.branch_maybe_adjust_upstream(&branch, &to);
         }
         self.refresh();
         Ok(())
@@ -7279,7 +7337,7 @@ impl App {
         }
         let branch = branches.remove(0);
         if self.git.current_branch().as_deref() == Some(branch.as_str()) {
-            let mut target = self.indirect_upstream_branch(&branch);
+            let mut target = self.indirect_upstream_branch(&branch, true);
             if target.is_none() || target.as_deref() == Some(branch.as_str()) {
                 target = self.git.main_branch();
             }
