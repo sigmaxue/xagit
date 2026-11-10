@@ -4,6 +4,7 @@
 //! `chmod` / `rename` pseudo-hunks) and hunk sections; revision buffers
 //! also have the headers, the commit message and the notes.
 
+use super::theme::Face;
 use super::view::{hunk_ident, push_branch, Builder, LineKind, StatusBuffer};
 use crate::git::diff::{self, FileDiff};
 use crate::git::Git;
@@ -260,6 +261,13 @@ impl RefLabeler {
     }
 
     pub fn format(&mut self, g: &Git, decoration: &str) -> String {
+        self.format_faces(g, decoration).0
+    }
+
+    /// `format`, and the faces of the labels (byte ranges of the result):
+    /// magit-head, magit-branch-current, -local, -remote, magit-tag and
+    /// the bisect state.
+    pub fn format_faces(&mut self, g: &Git, decoration: &str) -> (String, Vec<(usize, usize, Face)>) {
         let current = self.current.clone();
         let target = self.target.clone();
         let (mut state, mut head, mut upstream) = (None, None, None);
@@ -268,7 +276,7 @@ impl RefLabeler {
             let r = r.strip_prefix("tag: ").unwrap_or(r);
             let r = r.strip_prefix("HEAD -> ").unwrap_or(r);
             if r == "HEAD" {
-                head = Some("@".to_string());
+                head = Some(("@".to_string(), Face::Head));
             } else if let Some(t) = r.strip_prefix("refs/tags/") {
                 tags.push(t.to_string());
             } else if let Some(b) = r.strip_prefix("refs/heads/") {
@@ -276,7 +284,7 @@ impl RefLabeler {
             } else if let Some(b) = r.strip_prefix("refs/remotes/") {
                 remotes.push(b.to_string());
             } else if let Some(b) = r.strip_prefix("refs/bisect/") {
-                state = Some(b.split('-').next().unwrap_or(b).to_string());
+                state = Some((b.split('-').next().unwrap_or(b).to_string(), Face::Bisect));
             } else {
                 other.push(r.to_string());
             }
@@ -289,9 +297,9 @@ impl RefLabeler {
                 prefix = format!("{}/", push.split('/').next().unwrap_or(""));
             }
             if current.as_deref() == Some(name.as_str()) {
-                head = Some(format!("{prefix}{name}"));
+                head = Some((format!("{prefix}{name}"), Face::BranchCurrent));
             } else if target.as_deref() == Some(name.as_str()) {
-                upstream = Some(format!("{prefix}{name}"));
+                upstream = Some((format!("{prefix}{name}"), Face::BranchLocal));
             } else {
                 combined.push(format!("{prefix}{name}"));
             }
@@ -299,21 +307,30 @@ impl RefLabeler {
         if let (None, Some(t)) = (&upstream, &target) {
             if remotes.contains(t) {
                 remotes.retain(|r| r != t);
-                upstream = Some(t.clone());
+                upstream = Some((t.clone(), Face::BranchRemote));
             } else if combined.contains(t) {
                 combined.retain(|r| r != t);
-                upstream = Some(t.clone());
+                upstream = Some((t.clone(), Face::BranchLocal));
             }
         }
-        let mut all: Vec<String> = Vec::new();
+        let mut all: Vec<(String, Face)> = Vec::new();
         all.extend(state);
         all.extend(head);
         all.extend(upstream);
-        all.extend(tags);
-        all.extend(combined);
-        all.extend(remotes);
-        all.extend(other);
-        all.join(" ")
+        all.extend(tags.into_iter().map(|t| (t, Face::Tag)));
+        all.extend(combined.into_iter().map(|b| (b, Face::BranchLocal)));
+        all.extend(remotes.into_iter().map(|r| (r, Face::BranchRemote)));
+        all.extend(other.into_iter().map(|o| (o, Face::Dim)));
+        let mut out = String::new();
+        let mut faces = Vec::with_capacity(all.len());
+        for (name, face) in all {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            faces.push((out.len(), out.len() + name.len(), face));
+            out.push_str(&name);
+        }
+        (out, faces)
     }
 }
 
@@ -394,9 +411,12 @@ pub fn build_revision(g: &Git, rev: &str, args: &[String], files: &[String]) -> 
     let deco = g
         .git_string(&["show", "--no-patch", "--decorate=full", "--format=%D", &commit, "--"])
         .unwrap_or_default();
-    let labels = format_ref_labels(g, deco.trim());
+    let (labels, mut faces) = RefLabeler::new(g).format_faces(g, deco.trim());
     let heading = if labels.is_empty() { full.clone() } else { format!("{labels} {full}") };
+    let start = heading.len() - full.len();
+    faces.push((start, heading.len(), Face::Hash));
     b.heading_hide(heading, LineKind::Info, "headers", 0, true, false);
+    b.faces(faces);
     let fmt = "Author:     %aN <%aE>%nAuthorDate: %ad%nCommit:     %cN <%cE>%nCommitDate: %cd";
     for l in rev_format(g, fmt, &commit).lines() {
         b.line(l.to_string(), LineKind::Info, "headers", false, 0);

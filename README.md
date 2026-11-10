@@ -10,6 +10,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - [要求](#要求)
 - [安装与构建](#安装与构建)
 - [快速开始](#快速开始)
+- [界面与终端](#界面与终端)
 - [常用快捷键与多键解释](#常用快捷键与多键解释)
 - [测试与开发](#测试与开发)
 - [Magit 兼容范围与已知限制](#magit-兼容范围与已知限制)
@@ -28,7 +29,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 
 - Rust 工具链与 Cargo：项目使用 Rust 2021 edition，未声明最低 Rust 版本（MSRV）。建议使用当前稳定版。
 - Git 命令行程序需位于 `PATH`；提交前需配置 Git 用户身份，远端操作需自行配置认证。
-- 支持交互式终端的环境；本文不声明已验证的平台列表。
+- 支持 Linux 与 macOS 的交互式终端（终端能力与配色见[界面与终端](#界面与终端)）；Windows 未验证。
 - `git2` 依赖涉及本地 C 代码构建，需要可用的 C 编译工具链；当前配置关闭默认特性，不要求系统安装 libgit2/OpenSSL。
 - 需要手动编辑 rebase todo 或提交消息时，配置可用的外部编辑器；Git 按 `GIT_SEQUENCE_EDITOR`、`GIT_EDITOR`、`core.editor` 等规则选择编辑器。
 - `r m`、`r k` 及部分 cherry 搬移操作使用 Perl 脚本改写 todo，需要 `perl`。
@@ -70,6 +71,33 @@ cargo install --path .
 4. 按 `q` 返回上一视图；顶层状态视图中按 `q` 退出。
 
 注意：`k` 是丢弃变更，不是向上移动。hard reset、强制推送、删除与历史改写等操作可能丢失数据，请检查目标、提示和参数，必要时先备份。
+
+## 界面与终端
+
+界面自上而下分为：标题栏（`xagit` 标记、当前视图，右侧为仓库名与 HEAD）、正文、transient 弹窗（以分隔线与正文隔开）、状态栏（视图模式、消息、光标位置）和按键提示栏（按宽度显示能放下的提示）。
+
+- 正文沿用 Magit 的语义配色：区块标题、hash、当前/本地/远程分支、标签、文件状态（modified/new file/deleted…）、hunk 头和增删行各有颜色；日志图按列着色。
+- 光标所在行有背景和左侧光标条，光标所在 section 整体浅色高亮（magit-section-highlight），region 另有选区底色。
+- 子 section 按层级缩进；`Head:`/`Merge:`/`Author:` 等头部信息保持表格对齐。
+- 中文、日文、韩文与 emoji 按两列宽计算：截断、右侧边栏（作者/时间）和弹窗多列都按显示宽度对齐；tab 按 8 列展开，控制字符显示为 `^M` 这类记法。
+- 不覆盖终端自身的背景色和前景色，只给高亮、差异行和两条栏着色。每帧整行重绘并使用同步更新，避免闪烁；窗口大小变化后自动重新布局；程序异常退出时也会恢复终端。
+
+终端能力按环境变量自动检测，Linux 与 macOS 规则相同：
+
+| 能力 | 检测 | 说明 |
+| --- | --- | --- |
+| 24 位真彩色 | `COLORTERM=truecolor`/`24bit`，或 iTerm2、WezTerm、kitty、Ghostty、Alacritty、foot、VS Code、VTE 系终端（GNOME Terminal 等） | 完整配色 |
+| 256 色 | `TERM=*-256color`、`xterm*`、`screen*`/`tmux*`，以及 macOS 自带 Terminal.app | 颜色就近映射到 256 色 |
+| 16 色 | Linux 控制台（`TERM=linux`）等 | 不使用背景底色，栏与选区改用反显 |
+| 无色 | `NO_COLOR`（任意非空值）或 `TERM=dumb` | 只用粗体、反显、下划线区分 |
+
+可用环境变量覆盖检测结果：
+
+- `XAGIT_COLOR=truecolor|256|16|never`：指定色深（优先于 `NO_COLOR`）。
+- `XAGIT_THEME=dark|light`：选择深色或浅色配色。未设置时依次参考 `COLORFGBG`；在 macOS Terminal.app 中跟随系统外观（其默认描述文件随系统深浅色切换）；否则使用深色。
+- `XAGIT_ASCII=1`：使用 ASCII 字形（`>`、`v`、`|`、`-`）代替 `▸ ▾ ▌ ─`。Linux 控制台和 Linux 上非 UTF-8 的 locale（如 `LANG=C`）会自动使用 ASCII。
+
+macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta 发送。Terminal.app：设置 → 描述文件 → 键盘 → 勾选「将 Option 键用作 Meta 键」；iTerm2：Profiles → Keys → Left/Right Option key 设为 `Esc+`。在 tmux 中使用真彩色时，需要让 tmux 透传（如 `set -as terminal-features ",*:RGB"`），或设置 `XAGIT_COLOR=256`。
 
 ## 常用快捷键与多键解释
 
@@ -180,7 +208,10 @@ src/
     ├── keys.rs        # 按键解析（Emacs 标记 ↔ 事件）
     ├── transient.rs   # 全部 transient 菜单（数据化，可测试）
     ├── view.rs        # 状态缓冲区渲染（Head/Push/Untracked/Unstaged/Staged/Stashes）
-    └── app.rs         # 事件循环 + 命令分发 + 提示交互
+    ├── paint.rs       # 样式行、按行类型的语义着色、整行绘制
+    ├── theme.rs       # face 与深/浅配色、终端色深/背景/字形探测与降级
+    ├── width.rs       # 终端显示宽度（CJK/emoji/组合字符/tab）
+    └── app.rs         # 事件循环 + 命令分发 + 提示交互 + 界面布局
 ```
 
 ### 测试

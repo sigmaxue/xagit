@@ -166,12 +166,7 @@ impl Margin {
         let mut s = String::new();
         if self.details {
             let w = self.details_width;
-            if author.chars().count() > w {
-                s.push_str(&truncate(author, w.saturating_sub(1)));
-                s.push('…');
-            } else {
-                s.push_str(&format!("{author:<w$}"));
-            }
+            s.push_str(&super::width::pad_right(&super::width::ellipsize(author, w), w));
             s.push(' ');
         }
         let date: f64 = date.split_whitespace().next().and_then(|d| d.parse().ok()).unwrap_or(0.0);
@@ -188,7 +183,7 @@ impl Margin {
                 }
             }
         }
-        truncate(&s, width)
+        super::width::truncate(&s, width).to_string()
     }
 
     /// magit-log-format-margin for REV: its shortstat if that style is
@@ -460,9 +455,12 @@ fn wash_log(
             text.push_str(c.hash);
             text.push(' ');
         }
+        let mut faces = Vec::new();
         if !c.refs.is_empty() {
-            let refs = labels.format(g, c.refs);
+            let (refs, f) = labels.format_faces(g, c.refs);
             if !refs.is_empty() {
+                let shift = text.len();
+                faces.extend(f.into_iter().map(|(a, b, face)| (a + shift, b + shift, face)));
                 text.push_str(&refs);
                 text.push(' ');
             }
@@ -480,6 +478,7 @@ fn wash_log(
         if is_diff {
             // the diffstat and diffs become the body of the commit section
             b.heading_hide(text, kind, &id, depth, true, false);
+            b.faces(faces);
             b.margin(margin);
             let body = cont[1..].join("\n");
             let files = insert_diff(b, c.hash, &body, depth + 1, false, true);
@@ -487,6 +486,7 @@ fn wash_log(
             continue;
         }
         b.line(text, kind.clone(), &id, true, depth);
+        b.faces(faces);
         b.margin(margin);
         if cont.is_empty() {
             continue;

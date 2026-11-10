@@ -8,6 +8,7 @@
 //! HIDE argument Magit passes to `magit-insert-section`.
 
 use super::logbuf::{commit_limit, now, section_log, shortstats, wash_section_log, LogSection, Margin};
+use super::theme::Face;
 use crate::git::diff::FileDiff;
 use crate::git::status::{FileEntry, Status};
 use crate::git::Git;
@@ -62,6 +63,9 @@ pub struct BufferLine {
     /// text of the right margin (magit-make-margin-overlay), e.g. the
     /// author and age of a commit in log buffers
     pub margin: String,
+    /// faces of byte ranges of TEXT known to the inserter (the ref
+    /// labels of a commit line); the painter infers the others from KIND
+    pub faces: Vec<(usize, usize, super::theme::Face)>,
 }
 
 /// A section of the buffer (magit-section): its heading line, extent,
@@ -275,6 +279,7 @@ impl Builder {
             pos: self.lines.len(),
             hide: false,
             margin: String::new(),
+            faces: Vec::new(),
         });
     }
 
@@ -282,6 +287,13 @@ impl Builder {
     pub(crate) fn margin(&mut self, text: String) {
         if let Some(l) = self.lines.last_mut() {
             l.margin = text;
+        }
+    }
+
+    /// Add FACES (byte ranges of its text) to the line inserted last.
+    pub(crate) fn faces(&mut self, faces: Vec<(usize, usize, super::theme::Face)>) {
+        if let Some(l) = self.lines.last_mut() {
+            l.faces.extend(faces);
         }
     }
 
@@ -359,6 +371,7 @@ impl Builder {
             let id = format!("{ident}/{}", c.hash);
             let kind = LineKind::Commit { section: section.into(), hash: c.hash.clone() };
             self.line(c.text.clone(), kind, &id, true, 1);
+            self.faces(c.faces.clone());
             let m = self.log_margin.format(&c.hash, &c.author, &c.date, now, &stats);
             self.margin(m);
         }
@@ -557,13 +570,29 @@ pub fn next_tag(g: &Git, current: Option<&str>) -> Option<(String, usize)> {
 // ---------------------------------------------------------------- logs
 
 /// Ref labels like Magit's log lines: "HEAD -> main" shows as "main",
-/// "tag: v1" as "v1".
-fn ref_labels(d: &str) -> String {
-    d.split(", ")
-        .filter(|r| !r.is_empty() && *r != "HEAD")
-        .map(|r| r.strip_prefix("HEAD -> ").or_else(|| r.strip_prefix("tag: ")).unwrap_or(r))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// "tag: v1" as "v1". Returns the labels and their faces (byte ranges of
+/// the labels): the current branch, tags, branches of REMOTES, others
+/// local branches.
+fn ref_labels(d: &str, remotes: &[String]) -> (String, Vec<(usize, usize, Face)>) {
+    let mut out = String::new();
+    let mut faces = Vec::new();
+    for r in d.split(", ").filter(|r| !r.is_empty() && *r != "HEAD") {
+        let (name, face) = if let Some(b) = r.strip_prefix("HEAD -> ") {
+            (b, Face::BranchCurrent)
+        } else if let Some(t) = r.strip_prefix("tag: ") {
+            (t, Face::Tag)
+        } else if r.split_once('/').is_some_and(|(remote, _)| remotes.iter().any(|x| x == remote)) {
+            (r, Face::BranchRemote)
+        } else {
+            (r, Face::BranchLocal)
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        faces.push((out.len(), out.len() + name.len(), face));
+        out.push_str(name);
+    }
+    (out, faces)
 }
 
 /// A commit line of a log section.
@@ -574,6 +603,8 @@ pub struct LogCommit {
     pub author: String,
     /// author date, seconds since the epoch
     pub date: String,
+    /// the faces of the refs in TEXT
+    pub faces: Vec<(usize, usize, Face)>,
 }
 
 /// magit--insert-log for status sections.
@@ -584,14 +615,17 @@ pub fn log_lines(g: &Git, range: Option<&str>, limit: usize, extra: &[&str]) -> 
     a.extend(range);
     a.push("--");
     let Ok(out) = g.git_string(&a) else { return Vec::new() };
+    let remotes = g.remotes();
     out.lines()
         .filter_map(|l| {
             let mut p = l.splitn(6, '\0');
             let (full, h, d) = (p.next()?, p.next()?, p.next()?);
             let (author, date, s) = (p.next()?, p.next()?, p.next().unwrap_or(""));
-            let refs = ref_labels(d);
+            let (refs, faces) = ref_labels(d, &remotes);
+            let shift = h.len() + 1;
+            let faces = faces.into_iter().map(|(a, b, f)| (a + shift, b + shift, f)).collect();
             let text = if refs.is_empty() { format!("{h} {s}") } else { format!("{h} {refs} {s}") };
-            Some(LogCommit { hash: full.to_string(), text, author: author.to_string(), date: date.to_string() })
+            Some(LogCommit { hash: full.to_string(), text, author: author.to_string(), date: date.to_string(), faces })
         })
         .collect()
 }

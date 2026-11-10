@@ -4,6 +4,7 @@
 //! definitions extracted from lisp sources.
 
 use super::keys::{key_from_label, Key};
+use super::width::str_width;
 use std::collections::BTreeMap;
 
 /// One entry in a transient menu: either an argument switch or an action.
@@ -230,31 +231,101 @@ impl Menu {
     /// set is followed by its value, as in "-n Limit number of commits (-n256)".
     pub fn render(&self, active: &BTreeMap<String, bool>) -> String {
         let mut out = String::new();
-        let cells: Vec<Vec<String>> = self
-            .groups
-            .iter()
-            .map(|g| {
-                g.iter()
-                    .filter(|e| !e.hidden)
-                    .flat_map(|e| display(e, active).split('\n').map(str::to_string).collect::<Vec<_>>())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|g| !g.is_empty())
-            .collect();
-        let ncols = cells.len();
-        let widths: Vec<usize> = cells.iter().map(|g| g.iter().map(|d| d.chars().count()).max().unwrap_or(0)).collect();
-        let nrows = cells.iter().map(Vec::len).max().unwrap_or(0);
-        for row in 0..nrows {
-            let mut line = String::new();
-            for (c, w) in widths.iter().enumerate().take(ncols) {
-                let d = cells[c].get(row).map_or("", String::as_str);
-                line.push_str(&format!("{d:<w$}", w = w + 3));
+        for row in self.render_cells(active) {
+            for (text, _) in row {
+                out.push_str(&text);
             }
-            out.push_str(line.trim_end());
             out.push('\n');
         }
         out
     }
+
+    /// The rows of `render`, as pieces of text and what they are (for
+    /// the faces of the popup). Columns are aligned by display width, so
+    /// that descriptions in CJK scripts line up too.
+    pub fn render_cells(&self, active: &BTreeMap<String, bool>) -> Vec<Vec<(String, Cell)>> {
+        let cols: Vec<Vec<Vec<(String, Cell)>>> = self
+            .groups
+            .iter()
+            .map(|g| g.iter().filter(|e| !e.hidden).flat_map(|e| display_cells(e, active)).collect::<Vec<_>>())
+            .filter(|g| !g.is_empty())
+            .collect();
+        let line_width = |l: &[(String, Cell)]| l.iter().map(|(t, _)| str_width(t)).sum::<usize>();
+        let widths: Vec<usize> = cols.iter().map(|g| g.iter().map(|l| line_width(l)).max().unwrap_or(0)).collect();
+        let nrows = cols.iter().map(Vec::len).max().unwrap_or(0);
+        let mut rows = Vec::with_capacity(nrows);
+        for row in 0..nrows {
+            let mut line: Vec<(String, Cell)> = Vec::new();
+            for (c, w) in widths.iter().enumerate() {
+                let cell = cols[c].get(row).map_or(&[][..], Vec::as_slice);
+                line.extend(cell.iter().cloned());
+                let pad = w + 3 - line_width(cell);
+                line.push((" ".repeat(pad), Cell::Pad));
+            }
+            // the line without trailing whitespace
+            while let Some((t, _)) = line.last_mut() {
+                let trimmed = t.trim_end().len();
+                if trimmed == 0 {
+                    line.pop();
+                } else {
+                    t.truncate(trimmed);
+                    break;
+                }
+            }
+            rows.push(line);
+        }
+        rows
+    }
+}
+
+/// What a piece of a rendered popup row is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cell {
+    Key,
+    Desc,
+    /// the value of an infix that is set
+    Value,
+    /// an inapt suffix, "(KEY DESC)"
+    Inapt,
+    Pad,
+}
+
+/// The lines of `display` E, in pieces.
+fn display_cells(e: &MenuEntry, active: &BTreeMap<String, bool>) -> Vec<Vec<(String, Cell)>> {
+    let text = display(e, active);
+    if e.inapt {
+        return text.split('\n').map(|l| vec![(l.to_string(), Cell::Inapt)]).collect();
+    }
+    let value = e.action.value_in(active).map(|v| format!(" ({v})"));
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last = lines.len() - 1;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut cells = Vec::new();
+            let mut rest = *l;
+            if i == 0 {
+                if let Some(r) = rest.strip_prefix(e.key.as_str()) {
+                    cells.push((e.key.clone(), Cell::Key));
+                    rest = r;
+                }
+            }
+            let value = value.as_deref().filter(|v| i == last && rest.ends_with(v));
+            if let Some(v) = value {
+                rest = &rest[..rest.len() - v.len()];
+            }
+            if !rest.is_empty() {
+                cells.push((rest.to_string(), Cell::Desc));
+            }
+            if let Some(v) = value {
+                cells.push((" (".into(), Cell::Desc));
+                cells.push((v[2..v.len() - 1].to_string(), Cell::Value));
+                cells.push((")".into(), Cell::Desc));
+            }
+            cells
+        })
+        .collect()
 }
 
 fn display(e: &MenuEntry, active: &BTreeMap<String, bool>) -> String {
