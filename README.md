@@ -5,7 +5,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 项目仓库：[sigmaxue/xagit](https://github.com/sigmaxue/xagit)。本项目不是 Magit 的完整替代，兼容范围与限制见下文。
 
 ## 目录
-
+- [界面](#界面)
 - [特性](#特性)
 - [要求](#要求)
 - [安装与构建](#安装与构建)
@@ -18,12 +18,21 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - [致谢](#致谢)
 - [许可证](#许可证)
 
+## 界面
+<img width="1723" height="892" alt="image" src="https://github.com/user-attachments/assets/943a2818-0761-4e50-9b8a-7d57461ff78d" />
+
+<img width="1721" height="888" alt="image" src="https://github.com/user-attachments/assets/16066043-1b13-4331-b503-f80d9b64d2f4" />
+
 ## 特性
 
 - 状态视图支持 section（章节）、文件、hunk（差异块）及 region（选中区域）操作，包括暂存、取消暂存、丢弃、应用与反向应用。可用操作取决于当前视图及变更类型。
 - 提供分支、提交、远端、fetch/pull/push、merge/rebase、tag、stash、reset、cherry-pick 与 revert 菜单；进行中操作按仓库状态提供 continue/skip/abort 等入口。
 - 支持 diff、log、refs、blame、补全、历史选择及 transient 参数；支持多键序列与 Ctrl/Meta 按键。
 - 包含 bisect、worktree、submodule、subtree、notes、patch/am 与分支配置功能，以及进程日志视图。
+  
+
+  
+
 
 ## 要求
 
