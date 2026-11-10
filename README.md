@@ -13,6 +13,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - [界面与终端](#界面与终端)
 - [常用快捷键与多键解释](#常用快捷键与多键解释)
 - [测试与开发](#测试与开发)
+  - [libgit2 只读查询层](#libgit2-只读查询层)
 - [Magit 兼容范围与已知限制](#magit-兼容范围与已知限制)
 - [贡献](#贡献)
 - [致谢](#致谢)
@@ -211,8 +212,9 @@ src/
 ├── main.rs            # 入口：解析路径 → Git::discover → App
 ├── lib.rs             # 库入口（供测试引用）
 ├── git/
-│   ├── exec.rs        # git 进程封装（rev-parse/status 解析/全局参数）
+│   ├── exec.rs        # git 进程封装（全局参数/进程内查询短路/进程日志）
 │   ├── libgit2.rs     # libgit2 只读后端（git2 crate：仓库发现/HEAD/status/refs）
+│   ├── query.rs       # libgit2 只读查询层（刷新作用域内的白名单查询）
 │   ├── ops.rs         # Magit 风格操作（stage/commit/branch/... + 附加功能）
 │   └── status.rs      # magit-status 缓冲区模型（porcelain -z 解析）
 └── ui/
@@ -225,6 +227,17 @@ src/
     ├── app.rs         # 事件循环 + 命令分发 + 提示交互 + 界面布局
     └── app/jobs.rs    # 后台刷新与后台 git 进程（结果经 channel 回到事件循环）
 ```
+
+### libgit2 只读查询层
+
+状态、refs、log 缓冲区每次刷新都会重复问同一批只读问题（HEAD 分支名、上游、配置值、提交标题、ahead/behind、ref 列表等）。这些查询由 `src/git/query.rs` 在进程内用 libgit2 回答，不必为每条启动一个 git 子进程；其余命令仍交给 git CLI。
+
+- 刷新开始时，构建缓冲区的线程用 `query::Scope` 打开一次仓库（thread-local，libgit2 的 `Repository` 不是 `Sync`）。作用域只覆盖这一次刷新，嵌套作用域复用外层的仓库句柄。
+- 只拦截参数形状完全匹配白名单的只读查询：`symbolic-ref --short HEAD`、`rev-parse`（`--verify`/`--short`/`--abbrev-ref`/`--quiet`/`-q`）、`config` 及 `config --get-all`/`--type=bool`、`rev-list --count` 与 `--left-right --count`、`log -1 --no-walk --format=...`（固定的几种格式）、`describe --long --tags`、`merge-base --is-ancestor`、`for-each-ref`（仅 `%(refname)`/`%(refname:short)`，且不带 `--contains`/`--points-at`/`--sort`/glob 等）、`remote`、`tag --list`、`stash list --format=%gd|%gs`。
+- 其余情况一律回退 CLI：未知命令或参数、`diff`/`log --graph`/`blame`/`show` 等文本生成、带环境变量的调用（如 `GIT_INDEX_FILE`）、写操作、网络与凭据相关操作、编辑器和 hook，以及 libgit2 无法回答的查询（裸仓库、仓库打不开、解析不了的 rev 等）。查询失败时保留 CLI 的退出码语义，例如 `merge-base --is-ancestor` 返回非 0、`rev-parse --verify` 找不到对象时报失败。
+- 已对齐的语义细节：`merge-base --is-ancestor A A` 成功，而 libgit2 不把提交视为自己的后代；`@{u}`/`@{upstream}` 不带分支前缀时取当前分支的上游；`%at` 用作者时间、`%ct` 用提交者时间；`for-each-ref` 按完整 refname 排序（即便输出短名）。`src/git/query.rs` 的单测逐项与真实 git CLI 比对输出和退出码。
+- `git status --porcelain` 仍由 CLI 生成：XY 状态码、重命名/复制的源路径、unmerged 冲突分类与 `## ` 分支头都由 git 负责，用 libgit2 复刻容易与 Magit 的状态显示产生偏差。`Status::load()` 只读一次 `status --porcelain=v1 -z --branch`，同一个输出同时用于分支头与文件章节。
+- 查询是刷新开始时的仓库快照，作用域内的只读查询都来自这一次快照；作用域外的调用仍读实时状态。实测在 ffmpeg 与本项目仓库中，启动时的 git 子进程数由 66–70 降到 16–18，状态页 `g` 由 33–35 降到 7–8（其中只剩一条 `status --porcelain`）。
 
 ### 测试
 
@@ -253,6 +266,7 @@ xagit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、�
 - refs 候选、最近提交列表及提示行输入与 Magit 的历史/log 选择交互不同。例如部分 rebase 操作从最近 30 个提交中选择，cherry 搬移可输入 commit 或 `A..B` 区间。
 - `D`/`L` 用于当前视图参数调整，按 `g` 刷新；现有测试断言 diff/log 参数修改只影响所显示的 buffer，新视图仍使用默认参数。旧的"运行内所有 diff/log 共享参数"说明不适用于当前实现。
 - stash 采用原生 `git stash`，而 Magit 有自己的 stash 构造逻辑；现有测试不能证明所有场景的净效果一致，尚未通过全面的真实差分验证。
+- 状态视图的文件状态仍来自 `git status --porcelain` 的 CLI 输出，而不是 libgit2 的状态 API；只有高频只读查询走进程内查询层，差异/日志文本、写操作与远程操作仍由 git CLI 执行。
 
 ## 贡献
 

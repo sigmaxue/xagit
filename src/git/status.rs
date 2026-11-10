@@ -90,6 +90,37 @@ mod file_status_tests {
         assert_eq!((v[1].file.as_str(), v[1].x, v[1].y), ("a b", ' ', 'M'));
         assert_eq!((v[2].file.as_str(), v[2].x), ("dir/", '?'));
     }
+
+    #[test]
+    fn parse_one_status_call_with_header_and_entries() {
+        let out = "## main...origin/main [ahead 1, behind 2]\0M  staged.txt\0 M dirty.txt\0R  new.txt\0old.txt\0?? dir/\0";
+        let mut st = Status::default();
+        assert!(!parse_status(out, &mut st));
+        assert_eq!(st.branch.as_deref(), Some("main"));
+        assert_eq!(st.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((st.ahead, st.behind), (1, 2));
+        assert_eq!(st.staged.len(), 2);
+        assert_eq!(st.staged[1].orig_path.as_deref(), Some("old.txt"));
+        assert_eq!(st.unstaged.len(), 1);
+        assert_eq!(st.unstaged[0].path, "dirty.txt");
+        assert_eq!(st.untracked.len(), 1);
+        assert_eq!(st.untracked[0].path, "dir/");
+    }
+
+    #[test]
+    fn parse_entries_without_a_branch_header() {
+        let mut st = Status::default();
+        assert!(!parse_status(" M dirty.txt\0", &mut st));
+        assert!(st.branch.is_none());
+        assert_eq!(st.unstaged.len(), 1);
+    }
+
+    #[test]
+    fn detached_header_is_reported() {
+        let mut st = Status::default();
+        assert!(parse_status("## HEAD (no branch)\0", &mut st));
+        assert!(st.branch.is_none());
+    }
 }
 
 /// Parsed `## ...` header of `git status --porcelain=v1 --branch`.
@@ -146,6 +177,61 @@ pub fn parse_branch_header(rest: &str) -> BranchHeader {
     h
 }
 
+/// Parse one `git status --porcelain=v1 -z --branch` output: the optional
+/// "## " header line, then the file entries. Returns whether HEAD is
+/// detached (`Status::load` fills in its short hash).
+fn parse_status(out: &str, st: &mut Status) -> bool {
+    let mut parts = out.split('\0').peekable();
+    let mut detached = false;
+    if let Some(first) = parts.peek().copied() {
+        if let Some(rest) = first.strip_prefix("## ") {
+            let h = parse_branch_header(rest);
+            detached = h.detached;
+            st.branch = h.branch;
+            st.upstream = h.upstream;
+            st.ahead = h.ahead;
+            st.behind = h.behind;
+            parts.next();
+        }
+    }
+    while let Some(chunk) = parts.next() {
+        if chunk.len() < 3 {
+            continue;
+        }
+        let bytes = chunk.as_bytes();
+        let x = bytes[0] as char;
+        let y = bytes[1] as char;
+        let path = chunk[3..].to_string();
+        // -z format: "XY <path>\0<orig>\0" when X or Y is R/C
+        let orig_path = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            parts.next().map(str::to_string)
+        } else {
+            None
+        };
+        let entry = |code: char| FileEntry {
+            path: path.clone(),
+            code,
+            x,
+            y,
+            orig_path: orig_path.clone(),
+        };
+        if x == '?' {
+            st.untracked.push(entry('?'));
+        } else if is_unmerged(x, y) {
+            // Magit lists conflicts once, in the unstaged section ("unmerged   file")
+            st.unstaged.push(entry('U'));
+        } else {
+            if x != ' ' && x != '!' {
+                st.staged.push(entry(x));
+            }
+            if y != ' ' && y != '!' {
+                st.unstaged.push(entry(y));
+            }
+        }
+    }
+    detached
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Status {
     pub branch: Option<String>,
@@ -164,63 +250,15 @@ pub struct Status {
 impl Status {
     /// Parse `git status --porcelain=v1 -z --branch` like Magit does for its status buffer.
     pub fn load(g: &Git) -> Status {
-        let mut st = Status::default();
-        // branch header
-        let header = g
+        // `--branch` prefixes the same -z entries with a "## " header, so
+        // one git invocation answers both the header and the file sections.
+        let out = g
             .git_string(&["status", "--porcelain=v1", "-z", "--branch"])
             .unwrap_or_default();
-        let mut parts = header.split('\0');
-        if let Some(rest) = parts.next().and_then(|first| first.strip_prefix("## ")) {
-            let h = parse_branch_header(rest);
-            if h.detached {
-                st.detached_at = Some(g.rev_short("HEAD"));
-            }
-            st.branch = h.branch;
-            st.upstream = h.upstream;
-            st.ahead = h.ahead;
-            st.behind = h.behind;
+        let mut st = Status::default();
+        if parse_status(&out, &mut st) {
+            st.detached_at = Some(g.rev_short("HEAD"));
         }
-
-        let porcelain = g
-            .git_string(&["status", "--porcelain=v1", "-z"])
-            .unwrap_or_default();
-        let mut chunks = porcelain.split('\0');
-        while let Some(chunk) = chunks.next() {
-            if chunk.len() < 3 {
-                continue;
-            }
-            let bytes = chunk.as_bytes();
-            let x = bytes[0] as char;
-            let y = bytes[1] as char;
-            let path = chunk[3..].to_string();
-            // -z format: "XY <path>\0<orig>\0" when X or Y is R/C
-            let orig_path = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
-                chunks.next().map(str::to_string)
-            } else {
-                None
-            };
-            let entry = |code: char| FileEntry {
-                path: path.clone(),
-                code,
-                x,
-                y,
-                orig_path: orig_path.clone(),
-            };
-            if x == '?' {
-                st.untracked.push(entry('?'));
-            } else if is_unmerged(x, y) {
-                // Magit lists conflicts once, in the unstaged section ("unmerged   file")
-                st.unstaged.push(entry('U'));
-            } else {
-                if x != ' ' && x != '!' {
-                    st.staged.push(entry(x));
-                }
-                if y != ' ' && y != '!' {
-                    st.unstaged.push(entry(y));
-                }
-            }
-        }
-
         st.stashes = g.stashes();
         st.merge_in_progress = g.merge_in_progress();
         st.rebase_in_progress = g.rebase_in_progress();
