@@ -118,6 +118,12 @@ pub struct App {
     /// keys answering the question being read at once (y-or-n-p,
     /// read-char-choice): key code -> answer
     instant_keys: std::cell::RefCell<Vec<(String, String)>>,
+    /// the rows of a help window shown above the minibuffer while a
+    /// question is read (read-multiple-choice's help)
+    minibuffer_above: std::cell::RefCell<Vec<String>>,
+    /// user-init-file: the options file read (enable-command saves
+    /// there)
+    user_init_file: Option<std::path::PathBuf>,
     /// minibuffer-history: the inputs of prompts without a history of
     /// their own, newest first (not saved)
     minibuffer_history: std::cell::RefCell<Vec<String>>,
@@ -541,6 +547,8 @@ impl App {
             scripted: std::cell::RefCell::new(std::collections::VecDeque::new()),
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
             instant_keys: std::cell::RefCell::new(Vec::new()),
+            minibuffer_above: std::cell::RefCell::new(Vec::new()),
+            user_init_file: None,
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
             revision_history: std::cell::RefCell::new(Vec::new()),
             screen: std::cell::RefCell::new(Vec::new()),
@@ -1173,7 +1181,11 @@ impl App {
                     rows.truncate(h.saturating_sub(1) / 2);
                     rows
                 }
-                None => Vec::new(),
+                None => {
+                    let mut rows: Vec<String> = self.minibuffer_above.borrow().clone();
+                    rows.truncate(h.saturating_sub(1));
+                    rows
+                }
             };
             let last = h.saturating_sub(1);
             let screen = self.screen.borrow();
@@ -1246,10 +1258,19 @@ impl App {
 
     /// The answer KEY gives at once to the question being read.
     fn instant_answer(&self, key: &Key) -> Option<String> {
+        let keys = self.instant_keys.borrow();
+        if keys.iter().any(|(k, _)| k == ANY_KEY) {
+            // read-event: any key but C-g (quit)
+            return match (key.ctrl, key.code.as_str()) {
+                (true, "g") => None,
+                (true, c) => Some(format!("C-{c}")),
+                (false, c) => Some(c.to_string()),
+            };
+        }
         if key.ctrl {
             return None;
         }
-        self.instant_keys.borrow().iter().find(|(k, _)| *k == key.code).map(|(_, a)| a.clone())
+        keys.iter().find(|(k, _)| *k == key.code).map(|(_, a)| a.clone())
     }
 
     /// read_line_hist with the KEYS answering at once.
@@ -1854,6 +1875,7 @@ impl App {
     /// lines in error.
     pub fn load_options(&mut self, file: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(file) else { return };
+        self.user_init_file = Some(file.to_path_buf());
         let (options, errors) = Options::parse(&text);
         self.set_options(options);
         if !errors.is_empty() {
@@ -2242,10 +2264,12 @@ impl App {
         }
     }
 
-    /// execute-extended-command (M-x): read a command and call it. The
-    /// commands are transient-resume and the transient prefixes.
+    /// execute-extended-command (M-x): read a command and call it (with
+    /// the prefix argument, shown before "M-x "), disabled commands
+    /// through disabled-command-function. The commands are
+    /// transient-resume, magit-clean and the transient prefixes.
     fn execute_extended_command(&mut self) -> Result<()> {
-        let mut commands: Vec<String> = vec!["transient-resume".into()];
+        let mut commands: Vec<String> = vec!["transient-resume".into(), "magit-clean".into()];
         for name in self.menus.keys() {
             let cmd = help::prefix_command(name);
             if !commands.contains(&cmd) {
@@ -2253,14 +2277,124 @@ impl App {
             }
         }
         commands.sort();
-        let Some(cmd) = self.read_choice("M-x ", &commands, None)? else {
+        let arg = match self.prefix_arg {
+            None => String::new(),
+            Some(PrefixArg::Minus) => "- ".into(),
+            Some(PrefixArg::Raw(4)) => "C-u ".into(),
+            Some(PrefixArg::Raw(n) | PrefixArg::Num(n)) => format!("{n} "),
+        };
+        let Some(cmd) = self.read_choice(&format!("{arg}M-x "), &commands, None)? else {
             return Ok(());
         };
+        if self.options.disabled(&cmd) && !self.disabled_command_function(&cmd)? {
+            return Ok(());
+        }
         if cmd == "transient-resume" {
             self.transient_resume();
+        } else if cmd == "magit-clean" {
+            self.magit_clean()?;
         } else if let Some(name) = self.menus.keys().find(|n| help::prefix_command(n) == cmd).cloned() {
             self.open_menu(&name);
         }
+        Ok(())
+    }
+
+    /// disabled-command-function for CMD invoked by M-x: whether to call
+    /// it, asked with read-multiple-choice and the help in
+    /// *Disabled Command*. `y` enables CMD (saved in the options file if
+    /// confirmed), `!` all disabled commands for the session.
+    fn disabled_command_function(&mut self, cmd: &str) -> Result<bool> {
+        let choices = [('n', "no"), ('y', "yes"), (' ', "(space bar) only once"), ('!', "use and enable all")];
+        let help = disabled_command_help(cmd);
+        let Some(c) = self.read_multiple_choice("Use this command?", &choices, &help)? else {
+            self.set_msg("Quit");
+            return Ok(false);
+        };
+        match c {
+            '!' => self.options.disabled_command_function = false,
+            'y' => {
+                if self.user_init_file.is_some() && self.yes_no("Enable command for future editing sessions also? ")? {
+                    self.enable_command(cmd)?;
+                }
+                self.options.put_disabled(cmd, false);
+            }
+            _ => {}
+        }
+        Ok(c != 'n')
+    }
+
+    /// enable-command (en/disable-command): the first line of the
+    /// options file enabling or disabling CMD is replaced by
+    /// "enable-command CMD" at its end.
+    fn enable_command(&mut self, cmd: &str) -> Result<()> {
+        let Some(file) = self.user_init_file.clone() else { return Ok(()) };
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let mut lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let put = |l: &str| {
+            let mut w = l.split_whitespace();
+            matches!(w.next(), Some("enable-command" | "disable-command")) && w.next() == Some(cmd)
+        };
+        if let Some(i) = lines.iter().position(|l| put(l)) {
+            lines.remove(i);
+        }
+        let mut text = lines.concat();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("enable-command {cmd}\n"));
+        std::fs::write(&file, text)?;
+        Ok(())
+    }
+
+    /// read-multiple-choice with SHOW-HELP: PROMPT and the CHOICES
+    /// ("[N]o", "SPC (space bar) only once": the key in brackets, or
+    /// before the name), HELP shown above the minibuffer. Any key
+    /// answers at once: a key not among the choices (but `?` and C-h)
+    /// prompts again after "Invalid choice.  ". None on C-g.
+    fn read_multiple_choice(&mut self, prompt: &str, choices: &[(char, &str)], help: &str) -> Result<Option<char>> {
+        let names: Vec<String> = choices.iter().map(|(c, name)| rmc_key_description(*c, name)).collect();
+        let full = format!("{prompt} ({}): ", names.join(", "));
+        *self.minibuffer_above.borrow_mut() = help.lines().map(str::to_string).collect();
+        let mut wrong = false;
+        let answer = loop {
+            let p = if wrong { format!("Invalid choice.  {full}") } else { full.clone() };
+            let Some(ans) = self.read_instant(&p, vec![(ANY_KEY.into(), String::new())])? else {
+                break None;
+            };
+            let mut it = ans.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) if choices.iter().any(|(k, _)| *k == c) => break Some(c),
+                _ => wrong = !matches!(ans.as_str(), "?" | "C-h"),
+            }
+        };
+        self.minibuffer_above.borrow_mut().clear();
+        Ok(answer)
+    }
+
+    /// magit-clean: remove the untracked files (prefix argument: and
+    /// the ignored ones, two: just the ignored ones) after confirmation
+    /// with yes-or-no-p (git clean -f -d [-x|-X]).
+    fn magit_clean(&mut self) -> Result<()> {
+        let arg = self.prefix_numeric();
+        let what = match arg {
+            1 => "untracked",
+            4 => "untracked and ignored",
+            _ => "ignored",
+        };
+        if !self.yes_or_no_p(&format!("Remove {what} files? "))? {
+            return Ok(());
+        }
+        self.wip_hook(&[], "before", "clean")?;
+        let mut a = vec!["clean", "-f", "-d"];
+        match arg {
+            4 => a.push("-x"),
+            16 => a.push("-X"),
+            _ => {}
+        }
+        if let Err(e) = self.git.git_interactive(&a) {
+            self.set_msg(&format!("{e}"));
+        }
+        self.refresh();
         Ok(())
     }
 
@@ -8296,6 +8430,56 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
         app.load_history(f);
     }
     app.run()
+}
+
+/// The instant key answering any key with its code (read-event).
+const ANY_KEY: &str = "<any>";
+
+/// rmc--add-key-description on a terminal without underlining: the key
+/// C in NAME upcased in brackets, else (or for a special key) its
+/// description before NAME.
+fn rmc_key_description(c: char, name: &str) -> String {
+    let desc = match c {
+        ' ' => "SPC".to_string(),
+        '\t' => "TAB".into(),
+        '\r' => "RET".into(),
+        '\u{1b}' => "ESC".into(),
+        '\u{7f}' => "DEL".into(),
+        c => c.to_string(),
+    };
+    match name.char_indices().find(|(_, x)| *x == c) {
+        Some((i, _)) if desc.chars().count() == 1 => {
+            let rest = &name[i + c.len_utf8()..];
+            format!("{}[{}]{rest}", &name[..i], c.to_uppercase())
+        }
+        _ => format!("{desc} {name}"),
+    }
+}
+
+/// The help of disabled-command-function for CMD invoked by M-x: the
+/// first paragraph of its documentation, indented.
+fn disabled_command_help(cmd: &str) -> String {
+    let doc = match cmd {
+        "magit-clean" => {
+            "Remove untracked files from the working tree.\n\
+             With a prefix argument also remove ignored files,\n\
+             with two prefix arguments remove ignored files only."
+        }
+        _ => "<< not documented >>",
+    };
+    let doc: Vec<String> = doc.lines().map(|l| if l.is_empty() { String::new() } else { format!("   {l}") }).collect();
+    format!(
+        "You have invoked the disabled command {cmd}.\n\
+         It is disabled because new users often find it confusing.\n\
+         Here's the first part of its description:\n\n{}\n\n\
+         Do you want to use this command anyway?\n\n\
+         You can now type:\n \
+         n    (also C-g) to cancel--don't try the command; it remains disabled.\n \
+         y    to enable the command (no questions if you use it again).\n \
+         SPC  to try the command just this once, but leave it disabled.\n \
+         !    to enable it and all the disabled commands for this session.",
+        doc.join("\n")
+    )
 }
 
 /// PROMPT followed by a space unless empty or ending with one (the

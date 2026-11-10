@@ -16,13 +16,18 @@
 //! magit-wip-mode t
 //! magit-wip-merge-branch nil
 //! magit-wip-namespace refs/wip/
+//! enable-command magit-clean
+//! disabled-command-function nil
 //! ```
 //!
 //! magit-no-confirm, magit-slow-confirm and magit-visit-ref-behavior take a list of symbols
 //! (or `t` / `nil`), magit-published-branches a list of branches (or
 //! `nil`), a line setting the whole list. Each
 //! magit-refs-filter-alist line adds an entry: a regexp (Emacs syntax,
-//! without whitespace) and `t` (show) or `nil` (omit).
+//! without whitespace) and `t` (show) or `nil` (omit). enable-command
+//! and disable-command (Emacs' `(put COMMAND 'disabled nil|t)`) enable
+//! or disable a command (magit-clean is disabled); with
+//! disabled-command-function nil disabled commands just run.
 
 use super::regexp::Regexp;
 
@@ -84,6 +89,10 @@ pub struct Options {
     pub wip_mode: bool,
     /// magit-wip-namespace and magit-wip-merge-branch
     pub wip: crate::git::wip::Wip,
+    /// disabled-command-function: nil (false) runs disabled commands
+    pub disabled_command_function: bool,
+    /// the commands whose `disabled` property is set
+    pub disabled_commands: Vec<String>,
 }
 
 impl Default for Options {
@@ -99,6 +108,8 @@ impl Default for Options {
             trash_directory: None,
             wip_mode: false,
             wip: crate::git::wip::Wip::default(),
+            disabled_command_function: true,
+            disabled_commands: vec!["magit-clean".into()],
         }
     }
 }
@@ -115,6 +126,19 @@ impl Options {
                 || (self.wip_mode
                     && member("safe-with-wip")
                     && ["discard", "reverse", "stage-all-changes", "unstage-all-changes"].contains(&action)))
+    }
+
+    /// Whether running COMMAND calls disabled-command-function.
+    pub fn disabled(&self, command: &str) -> bool {
+        self.disabled_command_function && self.disabled_commands.iter().any(|c| c == command)
+    }
+
+    /// (put COMMAND 'disabled DISABLE)
+    pub fn put_disabled(&mut self, command: &str, disable: bool) {
+        self.disabled_commands.retain(|c| c != command);
+        if disable {
+            self.disabled_commands.push(command.to_string());
+        }
     }
 
     /// Whether ACTION asks a "yes or no" question (magit-y-or-n-p).
@@ -189,6 +213,14 @@ impl Options {
                         None
                     }
                     _ => Some("expected a string".into()),
+                },
+                "disabled-command-function" => boolean(&values).map(|b| o.disabled_command_function = b).err(),
+                "enable-command" | "disable-command" => match values.as_slice() {
+                    [c] => {
+                        o.put_disabled(c, name == "disable-command");
+                        None
+                    }
+                    _ => Some("expected a command".into()),
                 },
                 "magit-refs-filter-alist" => match values.as_slice() {
                     ["nil"] => {
@@ -304,5 +336,12 @@ mod tests {
         assert!(!o.no_confirm("discard"));
         let (o, _) = Options::parse("magit-no-confirm safe-with-wip\nmagit-wip-mode t");
         assert!(o.no_confirm("discard") && o.no_confirm("unstage-all-changes") && !o.no_confirm("trash"));
+        // disabled commands
+        assert!(d.disabled("magit-clean") && !d.disabled("magit-status"));
+        let (o, e) = Options::parse("enable-command magit-clean\ndisable-command\ndisable-command magit-status");
+        assert!(!o.disabled("magit-clean") && o.disabled("magit-status"));
+        assert_eq!(e, ["2: expected a command"]);
+        let (o, _) = Options::parse("disabled-command-function nil");
+        assert!(!o.disabled("magit-clean"));
     }
 }
