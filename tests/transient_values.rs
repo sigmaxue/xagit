@@ -9,12 +9,6 @@ use common::*;
 use xagit_lib::ui::app::App;
 use xagit_lib::ui::options::Options;
 
-fn press_all(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 #[test]
 fn set_for_this_session() {
     let (_td, g, _) = repo_with_commit();

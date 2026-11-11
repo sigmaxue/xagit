@@ -6,12 +6,6 @@ use common::*;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::App;
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 /// A repository with one commit (file a) to import from.
 fn source() -> (TempDir, Git, String) {
     let td = TempDir::new().unwrap();

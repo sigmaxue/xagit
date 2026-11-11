@@ -1771,6 +1771,12 @@ impl App {
         }
     }
 
+    /// Report a failed command with the whole error chain (anyhow's `{:#}`
+    /// includes the git stderr attached as context).
+    fn report_error(&mut self, e: &anyhow::Error) {
+        self.set_msg(&format!("{e:#}"));
+    }
+
     // ------------------------------------------------------------ buffer search
 
     /// The query highlighted in the current buffer, if a search is active.
@@ -3824,7 +3830,7 @@ impl App {
                         match g!().merge_preview(&rev) {
                             Ok(p) if p.trim().is_empty() => self.set_msg("merge would not change anything"),
                             Ok(p) => self.view_text = Some((format!("preview merge of {rev}"), p)),
-                            Err(e) => self.set_msg(&format!("{e:#}")),
+                            Err(e) => self.report_error(&e),
                         }
                         return Ok(());
                     }
@@ -3835,7 +3841,7 @@ impl App {
             "merge-commit" => {
                 match g!().merge_commit() {
                     Ok(()) => self.set_msg("merge committed"),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
+                    Err(e) => self.report_error(&e),
                 }
                 self.refresh();
             }
@@ -4024,7 +4030,7 @@ impl App {
                 }
                 match g!().sequencer(action) {
                     Ok(()) => self.set_msg(&format!("sequencer {action}")),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
+                    Err(e) => self.report_error(&e),
                 }
                 self.refresh();
             }
@@ -4217,7 +4223,7 @@ impl App {
                 a.push(&rev);
                 match g!().git_string(&a) {
                     Ok(o) => self.view_text = Some(("*magit-shortlog*".into(), o)),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
+                    Err(e) => self.report_error(&e),
                 }
             }
             "diff-unstaged" | "diff-staged" | "diff-worktree" | "diff-dwim" | "diff-range"
@@ -4795,7 +4801,7 @@ impl App {
         let res = self.with_terminal(|g| g.sequencer_run(command, &args, &commits));
         match res {
             Ok(()) => self.set_msg(command),
-            Err(e) => self.set_msg(&format!("{e:#}")),
+            Err(e) => self.report_error(&e),
         }
         self.refresh();
         Ok(())
@@ -8445,7 +8451,7 @@ impl App {
                     .and_then(|()| self.git.git_interactive(&["update-ref", &format!("refs/heads/{up1}"), "FETCH_HEAD"]));
                 match res {
                     Ok(()) => self.set_msg(&format!("updated {up1} from {up2}")),
-                    Err(e) => self.set_msg(&format!("{e:#}")),
+                    Err(e) => self.report_error(&e),
                 }
                 self.refresh();
             }
@@ -9557,7 +9563,7 @@ impl App {
         match res {
             Ok(out) if out.trim().is_empty() => self.set_msg("(no output)"),
             Ok(out) => self.view_text = Some((title.into(), out)),
-            Err(e) => self.set_msg(&format!("{e:#}")),
+            Err(e) => self.report_error(&e),
         }
     }
 
@@ -9568,7 +9574,7 @@ impl App {
                 self.set_msg(if first.is_empty() { ok_msg } else { first });
                 self.refresh();
             }
-            Err(e) => self.set_msg(&format!("{e:#}")),
+            Err(e) => self.report_error(&e),
         }
     }
 
@@ -9687,7 +9693,7 @@ impl App {
                 self.set_msg("rebase stopped (r r continue, r s skip, r a abort)")
             }
             Ok(()) => self.set_msg("rebased"),
-            Err(e) => self.set_msg(&format!("{e:#}")),
+            Err(e) => self.report_error(&e),
         }
         self.refresh();
     }
@@ -9766,7 +9772,7 @@ impl App {
         };
         match res {
             Ok(()) => self.set_msg(&format!("merged and removed {absorbed}")),
-            Err(e) => self.set_msg(&format!("{e:#}")),
+            Err(e) => self.report_error(&e),
         }
         self.refresh();
         Ok(())
@@ -9920,7 +9926,7 @@ impl App {
         };
         match self.git.set_default_branch(&new, &old) {
             Ok(()) => self.set_msg(&format!("default branch is now {new}")),
-            Err(e) => self.set_msg(&format!("{e:#}")),
+            Err(e) => self.report_error(&e),
         }
         self.refresh();
         Ok(())

@@ -9,6 +9,14 @@ use std::sync::Mutex;
 /// Global arguments Magit passes to every git invocation (magit-git-global-arguments).
 const GLOBAL_ARGS: [&str; 4] = ["-c", "core.editor=true", "-c", "color.ui=false"];
 
+/// A git command with the standard global arguments and working directory.
+/// Callers add their own stdio/environment on top.
+fn command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env_git());
+    cmd.args(GLOBAL_ARGS).args(args).current_dir(dir);
+    cmd
+}
+
 /// Recent side-effecting git invocations, shown by `$` (magit-process-buffer).
 /// Like Magit, plain queries (status, rev-parse, ...) are not recorded.
 static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
@@ -352,11 +360,7 @@ impl Git {
         if let Some(v) = super::query::answer_lines(args) {
             return v;
         }
-        let out = Command::new(env_git())
-            .args(GLOBAL_ARGS)
-            .args(args)
-            .current_dir(&self.toplevel)
-            .output();
+        let out = command(&self.toplevel, args).output();
         match out {
             Ok(o) if o.status.success() => {
                 let s = String::from_utf8_lossy(&o.stdout);
@@ -393,11 +397,8 @@ impl Git {
                 return Ok(out);
             }
         }
-        Command::new(env_git())
-            .args(GLOBAL_ARGS)
-            .args(args)
+        command(&self.toplevel, args)
             .envs(env.iter().copied())
-            .current_dir(&self.toplevel)
             .output()
             .map_err(|e| spawn_failure(&self.toplevel, args, e))
     }
@@ -405,10 +406,7 @@ impl Git {
     /// Like `git_string`, but run in `dir` instead of the toplevel
     /// (magit-git-command vs magit-git-command-topdir).
     pub fn git_string_in(&self, dir: &Path, args: &[&str]) -> Result<String> {
-        let out = Command::new(env_git())
-            .args(GLOBAL_ARGS)
-            .args(args)
-            .current_dir(dir)
+        let out = command(dir, args)
             .output()
             .map_err(|e| spawn_failure(dir, args, e))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -423,10 +421,7 @@ impl Git {
     pub fn git_with_input(&self, args: &[&str], input: &[u8]) -> Result<String> {
         use std::io::Write;
         use std::process::Stdio;
-        let mut child = Command::new(env_git())
-            .args(GLOBAL_ARGS)
-            .args(args)
-            .current_dir(&self.toplevel)
+        let mut child = command(&self.toplevel, args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -451,8 +446,8 @@ impl Git {
     /// git_interactive with the environment variables ENV set
     /// (with-environment-variables).
     pub fn git_interactive_env(&self, env: &[(&str, &str)], args: &[&str]) -> Result<()> {
-        let mut cmd = Command::new(env_git());
-        cmd.args(GLOBAL_ARGS).args(args).envs(env.iter().copied()).current_dir(&self.toplevel);
+        let mut cmd = command(&self.toplevel, args);
+        cmd.envs(env.iter().copied());
         if args.first() == Some(&"checkout") {
             return self.checkout_with_diagnostics(&mut cmd, args);
         }
@@ -475,11 +470,8 @@ impl Git {
     /// the terminal.
     pub fn git_detached(&self, args: &[&str], on_start: impl FnOnce(u32)) -> std::result::Result<(), (String, bool)> {
         use std::process::Stdio;
-        let mut cmd = Command::new(env_git());
-        cmd.args(GLOBAL_ARGS)
-            .args(args)
-            .current_dir(&self.toplevel)
-            .env("GIT_TERMINAL_PROMPT", "0")
+        let mut cmd = command(&self.toplevel, args);
+        cmd.env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

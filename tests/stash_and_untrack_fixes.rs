@@ -28,12 +28,6 @@ fn repo() -> (TempDir, Git) {
     (td, g)
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 /// Move point to the first visible line matching PRED (from the top).
 fn goto_match(app: &mut App, pred: impl Fn(&str) -> bool) {
     let n = app.visible_lines().len();

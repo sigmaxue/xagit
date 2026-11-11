@@ -12,12 +12,6 @@ use xagit_lib::ui::keys::key_from_label;
 use xagit_lib::ui::minibuf::{add_to_history, LineEditor, Step};
 use xagit_lib::ui::transient::{read_history, write_history, History, HISTORY_LIMIT};
 
-fn press_all(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn type_keys(ed: &mut LineEditor, keys: &[&str]) -> Step {
     let mut last = Step::Continue;
     for k in keys {

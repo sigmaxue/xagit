@@ -225,7 +225,7 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 ```
 src/
 ├── main.rs            # 入口：--help / --version / 解析路径 → Git::discover → App
-├── lib.rs             # 库入口（供测试引用）
+├── lib.rs             # 库入口；bin 与集成测试复用同一份 git/ui 实现
 ├── git/
 │   ├── exec.rs        # git 进程封装（全局参数/进程内查询短路/进程日志）
 │   ├── libgit2.rs     # libgit2 只读后端（git2 crate：仓库发现/HEAD/status/refs）
@@ -271,7 +271,7 @@ cargo test
 - `help.rs`：命令行 `--help`/`--version` 的输出与退出码、优先级及路径参数不受影响。
 - `isearch.rs`：`C-s`/`C-r` 在 status/refs/log 内的匹配、跳转、循环、清除与切换 buffer 时的状态。
 
-这里描述的是现有测试覆盖范围，不是对 Magit 全等的保证，也不代表所有平台已经验证。
+这里描述的是现有测试覆盖范围，不是对 Magit 全等的保证，也不代表所有平台已经验证。共享 fixture 与 `press`/`press_all` helper 集中在 `tests/common/mod.rs`，新增测试请直接复用；测试仓库由 `git_init()` 固定为 `master` 分支，不依赖机器的 `init.defaultBranch`。
 
 ## Magit 兼容范围与已知限制
 

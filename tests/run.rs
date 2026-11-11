@@ -8,12 +8,6 @@ use std::fs;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::App;
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn popup(app: &App) -> String {
     app.transient_popup().join("\n")
 }

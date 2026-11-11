@@ -6,12 +6,6 @@ use common::*;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::App;
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 /// A superproject and a repository TMP/lib (one commit, file a).
 fn setup() -> (TempDir, Git, TempDir, String) {
     let (td, g, _) = repo_with_commit();

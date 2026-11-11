@@ -26,12 +26,6 @@ fn file_repo() -> (TempDir, Git) {
     (td, g)
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn goto(app: &mut App, text: &str) {
     for _ in 0..app.visible_lines().len() {
         app.press("C-p").unwrap();

@@ -378,9 +378,7 @@ pub fn build_log(g: &Git, revs: &[String], args: &[String], files: &[String], ma
     if count > 0 && Some(count) == commit_limit(args) {
         b.line("Type + to show more history".into(), LineKind::Info, "longer", true, 0);
     }
-    let mut buf = StatusBuffer::new(b.lines, diffs, title);
-    buf.margin_width = margin.shown_width();
-    buf
+    StatusBuffer::new(b.lines, diffs, title).with_margin(margin.shown_width())
 }
 
 /// Where washed commits go: the depth of their sections, the section
@@ -579,9 +577,7 @@ pub fn build_reflog(g: &Git, refname: &str, args: &[String], margin: &Margin) ->
     if count > 0 && Some(count) == commit_limit(args) {
         b.line("Type + to show more history".into(), LineKind::Info, "longer", true, 0);
     }
-    let mut buf = StatusBuffer::new(b.lines, Vec::new(), title);
-    buf.margin_width = margin.shown_width();
-    buf
+    StatusBuffer::new(b.lines, Vec::new(), title).with_margin(margin.shown_width())
 }
 
 // ---------------------------------------------------------------- stashes
@@ -608,9 +604,7 @@ pub fn build_stashes(g: &Git, refname: &str, margin: &Margin) -> StatusBuffer {
         b.line(format!("{} {}", f[0], f[3]), kind, &format!("stash:{}", f[0]), true, 1);
         b.margin(margin.author(f[1], f[2], now));
     }
-    let mut buf = StatusBuffer::new(b.lines, Vec::new(), String::new());
-    buf.margin_width = margin.shown_width();
-    buf
+    StatusBuffer::new(b.lines, Vec::new(), String::new()).with_margin(margin.shown_width())
 }
 
 // ---------------------------------------------------------------- cherry
@@ -638,9 +632,7 @@ pub fn build_cherry(g: &Git, head: &str, upstream: &str, margin: &Margin) -> Sta
             b.margin(margin.author(author, date, now));
         }
     }
-    let mut buf = StatusBuffer::new(b.lines, Vec::new(), String::new());
-    buf.margin_width = margin.shown_width();
-    buf
+    StatusBuffer::new(b.lines, Vec::new(), String::new()).with_margin(margin.shown_width())
 }
 
 /// A line of `git cherry -v`: "+" (not in upstream) or "-" (an

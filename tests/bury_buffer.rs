@@ -7,12 +7,6 @@ use common::*;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::{App, BufferMode};
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn texts(app: &App) -> Vec<String> {
     app.visible_lines().iter().map(|l| l.text.clone()).collect()
 }

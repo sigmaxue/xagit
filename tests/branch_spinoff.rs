@@ -13,12 +13,6 @@ fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn rev(g: &Git, r: &str) -> String {
     g.git_string(&["rev-parse", r]).unwrap().trim().to_string()
 }

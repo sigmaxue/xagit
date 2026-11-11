@@ -7,12 +7,6 @@ use xagit_lib::prelude::*;
 use xagit_lib::ui::app::App;
 use xagit_lib::ui::options::Options;
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 /// Commits writing 1..=5 to f; returns their hashes.
 fn repo() -> (TempDir, Git, Vec<String>) {
     let (td, g) = scratch_repo();

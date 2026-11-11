@@ -109,8 +109,8 @@ pub fn build_refs(
     r.remote_branches(&args);
     r.tags(&args);
     let deferred = std::mem::take(&mut r.deferred);
-    let mut buf = StatusBuffer::new(r.b.lines, Vec::new(), format!("{focus} {}", args.join(" ")));
-    buf.margin_width = margin.shown_width();
+    let mut buf = StatusBuffer::new(r.b.lines, Vec::new(), format!("{focus} {}", args.join(" ")))
+        .with_margin(margin.shown_width());
     buf.deferred = deferred;
     buf
 }

@@ -32,12 +32,6 @@ fn repo() -> (TempDir, Git) {
     (td, g)
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn note(g: &Git, r: &str) -> Option<String> {
     g.git_string(&["notes", &format!("--ref={r}"), "show", "HEAD"]).ok()
 }

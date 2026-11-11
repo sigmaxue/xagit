@@ -8,12 +8,6 @@ use common::*;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::{App, BufferMode};
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();
 }

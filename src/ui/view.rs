@@ -134,6 +134,12 @@ impl StatusBuffer {
         }
     }
 
+    /// Set the width of the right margin (log/ref buffers).
+    pub(crate) fn with_margin(mut self, width: usize) -> StatusBuffer {
+        self.margin_width = width;
+        self
+    }
+
     /// Whether the section IDENT is hidden under VIS (else its initial state).
     pub fn is_hidden(&self, vis: &Visibility, ident: &str) -> bool {
         vis.get(ident).copied().unwrap_or_else(|| self.defaults.get(ident).copied().unwrap_or(false))
@@ -427,9 +433,7 @@ pub fn build_status(g: &Git, st: &Status, diff_args: &[String], log_args: &[Stri
     while b.lines.last().is_some_and(|l| l.text.is_empty() && l.kind == LineKind::Info) {
         b.lines.pop();
     }
-    let mut buf = StatusBuffer::new(b.lines, vec![("unstaged".into(), unstaged), ("staged".into(), staged)], String::new());
-    buf.margin_width = margin.shown_width();
-    buf
+    StatusBuffer::new(b.lines, vec![("unstaged".into(), unstaged), ("staged".into(), staged)], String::new()).with_margin(margin.shown_width())
 }
 
 // ---------------------------------------------------------------- headers

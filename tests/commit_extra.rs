@@ -40,12 +40,6 @@ fn out(g: &Git, args: &[&str]) -> String {
     g.git_string(args).unwrap_or_default().trim_end().to_string()
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn options(app: &mut App, text: &str) {
     let (o, errors) = Options::parse(text);
     assert!(errors.is_empty(), "{errors:?}");

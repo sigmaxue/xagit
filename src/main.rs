@@ -1,5 +1,6 @@
-mod git;
-mod ui;
+// Use the library crate instead of compiling `git`/`ui` a second time in
+// the binary: the integration tests exercise exactly this code.
+use xagit_lib::{git, ui};
 
 /// Printed by `xagit --help`. The full keymap lives in the TUI (`h`) and
 /// in README.md; this is only what is useful before starting the program.

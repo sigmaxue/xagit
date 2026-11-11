@@ -1,7 +1,20 @@
 //! tests/common/mod.rs — shared test fixtures: scratch repos mirroring Magit test setup.
 
 use xagit_lib::prelude::*;
+use xagit_lib::ui::app::App;
 use std::fs;
+
+/// Press a sequence of keys, panicking on any error.
+pub fn press(app: &mut App, keys: &[&str]) {
+    for k in keys {
+        app.press(k).unwrap();
+    }
+}
+
+/// The name a few older test files use for `press`.
+pub fn press_all(app: &mut App, keys: &[&str]) {
+    press(app, keys);
+}
 
 /// Create an empty scratch repo (like magit's `setup` with no commits).
 pub fn scratch_repo() -> (TempDir, Git) {

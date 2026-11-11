@@ -26,12 +26,6 @@ fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn worktrees(g: &Git) -> Vec<String> {
     g.git_string(&["worktree", "list", "--porcelain"])
         .unwrap()

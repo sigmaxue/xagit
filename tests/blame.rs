@@ -30,12 +30,6 @@ fn texts(app: &App) -> Vec<String> {
     app.visible_lines().iter().map(|l| l.text.clone()).collect()
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 /// Visit the worktree file from the status buffer.
 fn visit_file(app: &mut App) {
     for _ in 0..app.visible_lines().len() {

@@ -12,12 +12,6 @@ fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn level7(g: &Git) -> App {
     let mut app = App::new(g.clone());
     let (o, _) = Options::parse("transient-level magit-branch 7");

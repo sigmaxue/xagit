@@ -28,12 +28,6 @@ fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();
 }
 
-fn press(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 fn config_all(g: &Git, key: &str) -> Vec<String> {
     g.git_string(&["config", "--get-all", key])
         .unwrap_or_default()

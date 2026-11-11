@@ -591,7 +591,39 @@ fn mono(face: Face) -> Style {
         Face::SearchMatch => reverse,
         Face::PopupValue => Style { underline: true, ..Style::default() },
         Face::Meta | Face::PopupInapt => Style { italic: true, ..Style::default() },
-        _ => Style::default(),
+        // Exhaustive on purpose: adding a Face must force a decision about
+        // how it looks on a mono terminal, instead of silently becoming
+        // plain text.
+        Face::Default
+        | Face::Dim
+        | Face::Count
+        | Face::Label
+        | Face::Hash
+        | Face::BranchLocal
+        | Face::BranchRemote
+        | Face::Tag
+        | Face::Bisect
+        | Face::Stash
+        | Face::Refs
+        | Face::Ahead
+        | Face::Graph
+        | Face::Keyword
+        | Face::FileModified
+        | Face::FileNew
+        | Face::FileDeleted
+        | Face::FileRenamed
+        | Face::HunkHeading
+        | Face::Added
+        | Face::Removed
+        | Face::Context
+        | Face::BlameHeading
+        | Face::Margin
+        | Face::HintText
+        | Face::PopupRule
+        | Face::PopupDesc
+        | Face::Completion
+        | Face::SectionHighlight
+        | Face::Fringe => Style::default(),
     }
 }
 

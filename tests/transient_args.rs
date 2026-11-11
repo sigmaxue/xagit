@@ -7,12 +7,6 @@ use common::*;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::App;
 
-fn press_all(app: &mut App, keys: &[&str]) {
-    for k in keys {
-        app.press(k).unwrap();
-    }
-}
-
 /// master: initial, then a merge of "side" (adds g.txt).
 fn merged_repo() -> (TempDir, Git) {
     let (td, g, _) = repo_with_commit();
