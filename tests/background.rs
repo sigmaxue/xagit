@@ -130,3 +130,16 @@ fn refresh_done_restores_ui_state() {
     app.press("y").unwrap();
     assert_eq!(app.search_query(), None, "leaving the buffer clears the query");
 }
+
+/// A background command that fails for an ordinary reason must be reported
+/// as such, not offered to run again in the terminal: only a command that
+/// could not ask for credentials / a passphrase / a host key is retried.
+#[test]
+fn detached_failure_does_not_ask_for_a_terminal() {
+    let (_td, g) = scratch_repo();
+    let r = g.git_detached(&["ls-remote", "/nonexistent/xagit-detached-test"], |_| {});
+    let (msg, wants_terminal) = r.expect_err("a missing remote must fail");
+    assert!(msg.contains("ls-remote"), "{msg}");
+    assert!(!wants_terminal, "a missing remote is not a request for the terminal: {msg}");
+    assert!(xagit_lib::git::exec::process_log().iter().any(|e| e.contains("ls-remote")));
+}

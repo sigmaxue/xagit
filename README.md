@@ -15,6 +15,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
   - [本界面搜索（C-s）](#本界面搜索c-s)
 - [测试与开发](#测试与开发)
   - [libgit2 只读查询层](#libgit2-只读查询层)
+  - [git 诊断消息的语言](#git-诊断消息的语言)
 - [Magit 兼容范围与已知限制](#magit-兼容范围与已知限制)
 - [贡献](#贡献)
 - [致谢](#致谢)
@@ -257,6 +258,14 @@ src/
 - `git status --porcelain` 仍由 CLI 生成：XY 状态码、重命名/复制的源路径、unmerged 冲突分类与 `## ` 分支头都由 git 负责，用 libgit2 复刻容易与 Magit 的状态显示产生偏差。`Status::load()` 只读一次 `status --porcelain=v1 -z --branch`，同一个输出同时用于分支头与文件章节。
 - 查询是刷新开始时的仓库快照，作用域内的只读查询都来自这一次快照；作用域外的调用仍读实时状态。实测在 ffmpeg 与本项目仓库中，启动时的 git 子进程数由 66–70 降到 16–18，状态页 `g` 由 33–35 降到 7–8（其中只剩一条 `status --porcelain`）。
 - 启动时先进入终端画出空界面，状态页在后台线程构建一次（读取 options 和 transient 保存值引起的刷新合并到这一次），构建完成后光标放到第一个 section（magit-status-initial-section）。在 2000 个已修改文件、无上游无 tag 的仓库中实测：首屏由约 820ms 降到约 20ms，状态页出现由约 830ms 降到约 350ms，启动时的 git 子进程由 22 个降到 5 个（`rev-parse --show-toplevel`、`status`、两次 `diff`、`log`）。
+
+### git 诊断消息的语言
+
+`git/exec.rs` 会检查 git 的 stderr 来给出针对性提示（`failure`），并判断后台命令是否因为无法向用户询问凭据 / 口令 / host key 而失败、需要重新在终端运行（`wants_terminal`）。这些判断针对英文文本，因此凡是会捕获 stderr 的 git 命令都固定诊断语言为 `LC_MESSAGES=C` 并清空 `LANGUAGE`（GNU gettext 里 `LANGUAGE` 优先级更高）。
+
+- 不用 `LC_ALL=C`：它同时改变 `LC_CTYPE`/`LC_COLLATE`，会改变非 ASCII 路径的 quoting 和 ref 排序，而这些输出会被解析。这里只改消息语言，字符与排序行为保持用户设置。
+- 把终端交给编辑器 / hook 的交互式命令（`git_interactive`、`git_with_editors`）保持用户 locale 不变，编辑器界面语言不受影响。
+- 若用户显式设置了非 `C` 的 `LC_ALL`，按 POSIX 规则它会覆盖 `LC_MESSAGES`；这种情况下上述提示可能不显示，但命令行为不变。`wants_terminal` 匹配的都是 git credential 与 OpenSSH 的固定字符串（不经过 gettext 翻译），普通失败（push 被拒、主机不存在、仓库不存在）不会被误判为需要终端交互。
 
 ### 测试
 

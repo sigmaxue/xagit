@@ -17,6 +17,22 @@ fn command(dir: &Path, args: &[&str]) -> Command {
     cmd
 }
 
+/// A git command whose stderr we capture and inspect (`failure`'s hints,
+/// `wants_terminal`). Those look for git's English diagnostics, so pin the
+/// message language: on a system with gettext and e.g. LANG=zh_CN.UTF-8
+/// they would otherwise be translated and a failing background command
+/// would no longer be offered to run in the terminal.
+///
+/// Only LC_MESSAGES (and GNU gettext's LANGUAGE, which overrides it) are
+/// changed. LC_ALL=C would also change LC_CTYPE/LC_COLLATE, i.e. how git
+/// quotes non-ASCII paths and sorts refs — output we parse. Interactive
+/// commands keep the user's locale so their editor/hooks are unaffected.
+fn captured_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = command(dir, args);
+    cmd.env("LANGUAGE", "").env("LC_MESSAGES", "C");
+    cmd
+}
+
 /// Recent side-effecting git invocations, shown by `$` (magit-process-buffer).
 /// Like Magit, plain queries (status, rev-parse, ...) are not recorded.
 static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
@@ -156,6 +172,13 @@ pub(crate) fn failure(dir: &Path, args: &[&str], out: &std::process::Output) -> 
 
 /// Whether git (or ssh) failed because it could not ask the user for
 /// something on the terminal: credentials, a passphrase, a host key.
+///
+/// Only used by `git_detached`, which runs through `captured_command` (so
+/// git's diagnostics are English) with GIT_TERMINAL_PROMPT=0, no stdin and
+/// no controlling terminal. The phrases below are git's credential prompts
+/// and OpenSSH's errors, i.e. fixed strings rather than translated gettext
+/// messages; a plain failure (rejected push, unknown host, missing repo)
+/// must not turn into another run in the terminal.
 pub(crate) fn wants_terminal(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     [
@@ -179,9 +202,7 @@ pub(crate) fn spawn_failure(dir: &Path, args: &[&str], e: std::io::Error) -> any
 impl Git {
     /// Find the toplevel of the repository containing `dir` (like magit-toplevel).
     pub fn discover(dir: &Path) -> Result<Git> {
-        let out = Command::new(env_git())
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(dir)
+        let out = captured_command(dir, &["rev-parse", "--show-toplevel"])
             .output()
             .map_err(|e| spawn_failure(dir, &["rev-parse", "--show-toplevel"], e))?;
         if !out.status.success() {
@@ -396,7 +417,7 @@ impl Git {
                 return Ok(out);
             }
         }
-        command(&self.toplevel, args)
+        captured_command(&self.toplevel, args)
             .envs(env.iter().copied())
             .output()
             .map_err(|e| spawn_failure(&self.toplevel, args, e))
@@ -405,7 +426,7 @@ impl Git {
     /// Like `git_string`, but run in `dir` instead of the toplevel
     /// (magit-git-command vs magit-git-command-topdir).
     pub fn git_string_in(&self, dir: &Path, args: &[&str]) -> Result<String> {
-        let out = command(dir, args)
+        let out = captured_command(dir, args)
             .output()
             .map_err(|e| spawn_failure(dir, args, e))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -420,7 +441,7 @@ impl Git {
     pub fn git_with_input(&self, args: &[&str], input: &[u8]) -> Result<String> {
         use std::io::Write;
         use std::process::Stdio;
-        let mut child = command(&self.toplevel, args)
+        let mut child = captured_command(&self.toplevel, args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -469,7 +490,7 @@ impl Git {
     /// the terminal.
     pub fn git_detached(&self, args: &[&str], on_start: impl FnOnce(u32)) -> std::result::Result<(), (String, bool)> {
         use std::process::Stdio;
-        let mut cmd = command(&self.toplevel, args);
+        let mut cmd = captured_command(&self.toplevel, args);
         cmd.env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -708,9 +729,37 @@ mod diagnostic_tests {
     #[test]
     fn prompts_wanted_are_recognized() {
         assert!(wants_terminal("fatal: could not read Username for 'https://x': terminal prompts disabled"));
+        assert!(wants_terminal("fatal: could not read Password for 'https://x': terminal prompts disabled"));
         assert!(wants_terminal("Host key verification failed.\nfatal: Could not read from remote repository."));
-        assert!(wants_terminal("git@x: Permission denied (publickey).\n"));
+        assert!(wants_terminal("git@x: Permission denied (publickey,password).\n"));
+        assert!(wants_terminal("fatal: Authentication failed for 'https://x/'"));
+        assert!(wants_terminal("read_passphrase: can't open /dev/tty"));
         assert!(!wants_terminal("fatal: '/nonexistent' does not appear to be a git repository"));
         assert!(!wants_terminal(" ! [rejected]        main -> main (non-fast-forward)"));
+        // a network failure is not a request for the terminal
+        assert!(!wants_terminal("ssh: Could not resolve hostname example.com: nodename nor servname provided"));
+    }
+
+    /// The captured commands must pin only the *message* language: changing
+    /// LC_ALL would also change how git quotes non-ASCII paths and sorts
+    /// refs, and interactive commands must keep the user's locale for their
+    /// editor and hooks.
+    #[test]
+    fn captured_commands_pin_only_the_message_locale() {
+        let env = |cmd: &std::process::Command| {
+            cmd.get_envs()
+                .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+                .collect::<Vec<_>>()
+        };
+        let captured = env(&captured_command(Path::new("/repo"), &["fetch"]));
+        assert!(captured.contains(&("LC_MESSAGES".into(), Some("C".into()))), "{captured:?}");
+        assert!(captured.contains(&("LANGUAGE".into(), Some("".into()))), "{captured:?}");
+        for k in ["LC_ALL", "LC_CTYPE", "LC_COLLATE", "LANG"] {
+            assert!(!captured.iter().any(|(n, _)| n == k), "{k} must not be overridden: {captured:?}");
+        }
+        let interactive = env(&command(Path::new("/repo"), &["commit"]));
+        for k in ["LC_MESSAGES", "LANGUAGE", "LC_ALL"] {
+            assert!(!interactive.iter().any(|(n, _)| n == k), "{k} must not be overridden: {interactive:?}");
+        }
     }
 }
