@@ -50,6 +50,7 @@ fn restore_terminal() {
 
 mod gitvar;
 mod jobs;
+mod isearch;
 mod run;
 mod remote;
 mod reshelve;
@@ -474,7 +475,7 @@ impl PrefixArg {
 }
 
 /// The name of the Emacs command of the binding B.
-fn binding_command(b: &Binding) -> String {
+pub fn binding_command(b: &Binding) -> String {
     let name = match b {
         Binding::Bury => "magit-mode-bury-buffer",
         Binding::Refresh => "magit-refresh",
@@ -505,7 +506,9 @@ fn binding_command(b: &Binding) -> String {
         Binding::Command("discard") => "magit-discard",
         Binding::Command("execute-extended-command") => "execute-extended-command",
         Binding::Command(c) => return format!("magit-{c}"),
-        Binding::Menu(m) => return format!("magit-{}", m.trim_end_matches("-menu")),
+        // Keep one source of truth for prefix command names (the same
+        // function the help module uses), including its special cases.
+        Binding::Menu(m) => return crate::ui::help::prefix_command(m),
     };
     name.to_string()
 }
@@ -816,7 +819,7 @@ impl App {
     /// buffer of that mode (or burying the buffer shown).
     fn setup_buffer(&mut self, mode: BufferMode, args: Vec<String>) {
         self.view_text = None;
-        self.search_query = None;
+        self.clear_search_state();
         let mut same = self.mode == mode;
         if !self.mode.same_kind(&mode) {
             let saved = self.take_current();
@@ -894,7 +897,7 @@ impl App {
             self.set_msg("");
             return;
         }
-        self.search_query = None;
+        self.clear_search_state();
         let Some(b) = self.buried.pop() else {
             if self.mode == BufferMode::Status {
                 self.set_msg("Type C-x C-c to quit xagit");
@@ -915,7 +918,7 @@ impl App {
 
     /// Show the status buffer in place of the buffer shown (killed).
     fn show_status_buffer(&mut self) {
-        self.search_query = None;
+        self.clear_search_state();
         self.mode = BufferMode::Status;
         self.buf_args.clear();
         self.buf = StatusBuffer::default();
@@ -1777,97 +1780,21 @@ impl App {
         self.set_msg(&format!("{e:#}"));
     }
 
-    // ------------------------------------------------------------ buffer search
-
-    /// The query highlighted in the current buffer, if a search is active.
-    pub fn search_query(&self) -> Option<&str> {
-        self.search_query.as_deref()
+    /// Forget the region: MARK indexes the old buffer's `all` vector, so it
+    /// must go away when that buffer is replaced.
+    fn clear_region(&mut self) {
+        self.mark = None;
     }
 
-    /// The visible lines matching QUERY, including the right margin. The
-    /// list is rebuilt for every step: a refresh or a section toggle can
-    /// replace `lines`, so caching line numbers would go stale.
-    fn search_matches(&self, query: &str) -> Vec<usize> {
-        let needle = folded_bytes(query);
-        if needle.is_empty() {
-            return Vec::new();
-        }
-        self.lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| {
-                let mut text = l.text.clone();
-                if !l.margin.is_empty() {
-                    text.push(' ');
-                    text.push_str(&l.margin);
-                }
-                let folded = folded_bytes(&text);
-                folded.windows(needle.len()).any(|w| w == needle.as_slice())
-            })
-            .map(|(i, _)| i)
-            .collect()
+    /// Forget the active search when leaving a buffer or cancelling it.
+    /// A plain refresh deliberately keeps the query (see `on_refresh_done`).
+    fn clear_search_state(&mut self) {
+        self.search_query = None;
     }
 
-    /// C-s / C-r: read a query on the first call (or with a prefix arg),
-    /// then move point through the matches of the current buffer.
-    fn isearch(&mut self, forward: bool) -> Result<()> {
-        if self.view_text.is_some() || self.mode == BufferMode::RebaseTodo {
-            self.set_msg("Search is only available in Magit buffers");
-            return Ok(());
-        }
-        let repeat = self.search_query.is_some() && self.prefix_arg.is_none();
-        let query = if repeat {
-            self.search_query.clone().unwrap_or_default()
-        } else {
-            let default = (!self.last_search.is_empty()).then_some(self.last_search.as_str());
-            match self.read_line_prompt("Search: ", default)? {
-                Some(q) => q,
-                None => {
-                    self.search_query = None;
-                    self.set_msg("Search cancelled");
-                    return Ok(());
-                }
-            }
-        };
-        if query.is_empty() {
-            self.search_query = None;
-            self.set_msg("Search cancelled");
-            return Ok(());
-        }
-        self.last_search = query.clone();
-        self.search_query = Some(query.clone());
-        let matches = self.search_matches(&query);
-        self.search_goto(&matches, forward, !repeat, &query);
-        Ok(())
-    }
-
-    /// Move point to the next match, wrapping around at either end.
-    fn search_goto(&mut self, matches: &[usize], forward: bool, include_current: bool, query: &str) {
-        let short: String = query.chars().take(40).collect();
-        if matches.is_empty() {
-            self.set_msg(&format!("[no match] {short}"));
-            return;
-        }
-        let cur = self.cursor;
-        let next = if forward {
-            matches
-                .iter()
-                .copied()
-                .find(|&i| if include_current { i >= cur } else { i > cur })
-                .or_else(|| matches.first().copied())
-        } else {
-            matches
-                .iter()
-                .rev()
-                .copied()
-                .find(|&i| if include_current { i <= cur } else { i < cur })
-                .or_else(|| matches.last().copied())
-        };
-        if let Some(i) = next {
-            self.cursor = i;
-        }
-        let n = matches.len();
-        self.set_msg(&format!("{n} matches for {short}"));
+    /// Whether the region is active.
+    pub fn region_active(&self) -> bool {
+        self.mark.is_some()
     }
 
     // ------------------------------------------------------------ selection helpers
@@ -2283,8 +2210,8 @@ impl App {
                 self.set_msg("Mark set");
             }
             Binding::KeyboardQuit => {
-                self.mark = None;
-                self.search_query = None;
+                self.clear_region();
+                self.clear_search_state();
                 self.set_msg("Quit");
             }
             Binding::IsearchForward => self.isearch(true)?,
@@ -4461,11 +4388,11 @@ impl App {
             Dwim::Type(_) => self.refresh(),
             Dwim::Stash(s) => self.show_stash(&s),
             Dwim::Commit(v) => {
-                self.mark = None;
+                self.clear_region();
                 self.show_diff(Some(format!("{v}^..{v}")), None, "committed")
             }
             Dwim::Range(r) => {
-                self.mark = None;
+                self.clear_region();
                 self.show_diff(Some(r), None, "committed")
             }
             Dwim::None => self.diff_view("range")?,
@@ -5629,7 +5556,7 @@ impl App {
                 None => return Ok(()),
             },
         };
-        self.mark = None;
+        self.clear_region();
         let mut msg = String::new();
         for s in stashes.iter().rev() {
             msg = format!("Deleted refs/{s} (was {})", self.git.rev_short(s));
@@ -8713,7 +8640,7 @@ impl App {
         self.git = git;
         self.buried.clear();
         self.background.clear();
-        self.mark = None;
+        self.clear_region();
         self.view_text = None;
         if self.mode == BufferMode::Status {
             self.buf = StatusBuffer::default();

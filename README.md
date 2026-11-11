@@ -239,8 +239,9 @@ src/
     ├── paint.rs       # 样式行、按行类型的语义着色、整行绘制
     ├── theme.rs       # face 与深/浅配色、终端色深/背景/字形探测与降级
     ├── width.rs       # 终端显示宽度（CJK/emoji/组合字符/tab）
-    ├── app.rs         # 事件循环 + 命令分发 + 提示交互 + 界面布局
-    └── app/jobs.rs    # 后台刷新与后台 git 进程（结果经 channel 回到事件循环）
+    ├── app.rs         # App 状态 + 事件循环 + 命令分发（内聚方法组拆到 app/）
+    ├── app/jobs.rs    # 后台刷新与后台 git 进程；on_refresh_done 统一恢复 UI 状态
+    └── app/isearch.rs # C-s/C-r 本界面搜索（匹配、跳转、查询状态）
 ```
 
 ### libgit2 只读查询层

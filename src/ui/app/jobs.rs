@@ -227,9 +227,16 @@ impl App {
 
     /// Show BUF, the buffer rebuilt, with point where it was.
     fn show_refreshed(&mut self, buf: StatusBuffer) {
-        let anchor = self.anchor();
+        self.on_refresh_done(buf);
+    }
+
+    /// Install a freshly built buffer and restore the UI state tied to the
+    /// old one. The single entry point for both the synchronous and the
+    /// background refresh, so the rules live in one place.
+    fn on_refresh_done(&mut self, buf: StatusBuffer) {
+        let anchor = self.anchor(); // must be read before `buf` is replaced
         self.buf = buf;
-        self.mark = None;
+        self.clear_region(); // mark indexes the old buf.all
         self.lines = self.buf.visible(&self.vis);
         let (id, fallback) = anchor;
         let target = id.and_then(|(ident, off)| {
@@ -240,6 +247,9 @@ impl App {
             Some(p) => self.visible_index_near(p),
             None => fallback.min(self.lines.len().saturating_sub(1)),
         };
+        // `search_query` intentionally survives: matches are recomputed
+        // from the new lines on the next C-s and the hint bar stays in
+        // search mode. It is cleared when the buffer is left instead.
     }
 
     /// Make the buffer shown up to date: do the refresh asked for, or

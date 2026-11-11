@@ -108,3 +108,25 @@ fn failed_fetch_is_reported() {
     assert!(details.contains("fetch"), "{details}");
     assert!(details.contains("/nonexistent/repository"), "{details}");
 }
+
+#[test]
+fn refresh_done_restores_ui_state() {
+    let (_td, g, _) = repo_with_commit();
+    let mut app = App::new(g);
+    app.set_background(true);
+    app.press("C-SPC").unwrap();
+    assert!(app.region_active(), "mark should be active");
+    app.script_answers(&["file"]);
+    app.press("C-s").unwrap();
+    assert_eq!(app.search_query(), Some("file"));
+    let before = app.point_text().to_string();
+
+    app.press("g").unwrap();
+    app.wait_background();
+    assert!(!app.region_active(), "mark must not survive a rebuild");
+    assert_eq!(app.search_query(), Some("file"), "a refresh keeps the query");
+    assert_eq!(app.point_text(), before, "point is restored by its anchor");
+
+    app.press("y").unwrap();
+    assert_eq!(app.search_query(), None, "leaving the buffer clears the query");
+}
