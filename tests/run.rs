@@ -134,6 +134,10 @@ fn ediff_resolve_suffixes_with_conflicts() {
     app.press("m").unwrap();
     assert!(app.prompts().iter().any(|p| p.contains("Resolve file")), "{:?}", app.prompts());
     assert_eq!(app.message(), "[No match]");
+    // with the conflicted file, E m opens the merge (resolution) view
+    app.script_answers(&["f.txt"]);
+    press(&mut app, &["E", "m"]);
+    assert_eq!(app.mode(), &xagit_lib::ui::app::BufferMode::Resolve, "{}", app.message());
 }
 
 #[test]

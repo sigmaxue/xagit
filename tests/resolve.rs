@@ -76,18 +76,19 @@ fn choose_a_b_both_and_save() {
     let out = app.resolve_result().unwrap();
     assert!(out.contains("MASTER line") && !out.contains("TOPIC line"), "a: {out:?}");
 
-    // u then b: keep B (theirs)
-    press(&mut app, &["p", "u"]);
+    // r (restore) then b: keep B (theirs); point stays on the difference
+    press(&mut app, &["r"]);
+    assert_eq!(app.resolve_choices().unwrap(), [Choice::Undecided]);
     press(&mut app, &["b"]);
     assert_eq!(app.resolve_choices().unwrap(), [Choice::B]);
     let out = app.resolve_result().unwrap();
     assert!(out.contains("TOPIC line") && !out.contains("MASTER line"), "b: {out:?}");
 
-    // d: keep both
-    press(&mut app, &["p", "d"]);
+    // + (ediff-combine-diffs): keep both
+    press(&mut app, &["+"]);
     assert_eq!(app.resolve_choices().unwrap(), [Choice::Both]);
     let out = app.resolve_result().unwrap();
-    assert!(out.contains("MASTER line") && out.contains("TOPIC line"), "d: {out:?}");
+    assert!(out.contains("MASTER line") && out.contains("TOPIC line"), "+: {out:?}");
 
     // C-c C-c writes back and stages the file
     press(&mut app, &["C-c", "C-c"]);
@@ -106,9 +107,9 @@ fn multiple_conflicts_and_movement() {
     assert_eq!(app.resolve_choices().unwrap().len(), 2);
     assert_eq!(app.resolve_cursor(), Some(0));
     press(&mut app, &["a"]);
-    // auto-advance went to the next undecided conflict
-    assert_eq!(app.resolve_cursor(), Some(1));
-    press(&mut app, &["b"]);
+    // like ediff-copy-A-to-C, point stays on the difference; n moves on
+    assert_eq!(app.resolve_cursor(), Some(0));
+    press(&mut app, &["n", "b"]);
     assert_eq!(app.resolve_choices().unwrap(), [Choice::A, Choice::B]);
     // n/p move between conflicts
     press(&mut app, &["p"]);
@@ -224,7 +225,7 @@ fn cancel_leaves_file_untouched() {
     let before = read(&g, "f.txt");
     let mut app = App::new(g.clone());
     open(&mut app);
-    press(&mut app, &["d"]);
+    press(&mut app, &["+"]);
     // declining the confirm keeps editing
     app.script_answers(&["n"]);
     press(&mut app, &["C-c", "C-k"]);
@@ -242,11 +243,80 @@ fn undecided_keeps_markers() {
     let (_td, g) = conflict_repo();
     let mut app = App::new(g.clone());
     open(&mut app);
-    press(&mut app, &["a", "p", "u"]); // decide then undecide
+    press(&mut app, &["a", "r"]); // decide then restore
     assert_eq!(app.resolve_choices().unwrap(), [Choice::Undecided]);
     press(&mut app, &["C-c", "C-c"]);
     // markers are retained, file stays unresolved
     assert!(read(&g, "f.txt").contains("<<<<<<<"));
     assert!(!g.unmerged_files().is_empty());
-    assert!(app.message().contains("undecided"), "{}", app.message());
+    assert!(app.message().contains("unresolved"), "{}", app.message());
+}
+
+/// q: "Conflict resolution finished; save FILE?" (smerge-ediff quit hook).
+#[test]
+fn q_asks_to_save() {
+    let (_td, g) = conflict_repo();
+    let before = read(&g, "f.txt");
+    // no: the file stays as it was
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    press(&mut app, &["a"]);
+    app.script_answers(&["no"]);
+    press(&mut app, &["q"]);
+    assert!(app.prompts().last().unwrap().starts_with("Conflict resolution finished; save f.txt?"), "{:?}", app.prompts());
+    assert_ne!(app.mode(), &BufferMode::Resolve);
+    assert_eq!(read(&g, "f.txt"), before);
+    assert!(!g.unmerged_files().is_empty());
+    // yes: saved, and staged because no conflict markers remain
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    press(&mut app, &["b"]);
+    app.script_answers(&["yes"]);
+    press(&mut app, &["q"]);
+    let body = read(&g, "f.txt");
+    assert!(body.contains("TOPIC line") && !body.contains("<<<<<<< "), "{body:?}");
+    assert!(g.unmerged_files().is_empty(), "{}", app.message());
+}
+
+/// j jumps to difference N (numeric prefix), ! recomputes from disk.
+#[test]
+fn jump_and_recompute() {
+    let (_td, g) = two_conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    press(&mut app, &["C-u", "2", "j"]);
+    assert_eq!(app.resolve_cursor(), Some(1), "{}", app.message());
+    press(&mut app, &["j"]);
+    assert_eq!(app.resolve_cursor(), Some(0));
+    // the file is changed behind the view: ! picks up the new conflicts
+    press(&mut app, &["a"]);
+    let text = read(&g, "f.txt");
+    let first_end = text.find(">>>>>>>").unwrap();
+    let line_end = first_end + text[first_end..].find('\n').unwrap() + 1;
+    let start = text.find("<<<<<<<").unwrap();
+    write(&g, "f.txt", &format!("{}MASTER-1\n{}", &text[..start], &text[line_end..]));
+    press(&mut app, &["!"]);
+    assert_eq!(app.resolve_choices().unwrap(), [Choice::Undecided]);
+    assert!(app.message().contains("1 difference"), "{}", app.message());
+}
+
+/// r r refuses with unresolved conflicts (unstaged changes), like
+/// magit-rebase-continue.
+#[test]
+fn rebase_continue_refuses_with_conflicts() {
+    let (_td, g) = conflict_repo();
+    let mut app = App::new(g.clone());
+    press(&mut app, &["r", "r"]);
+    assert_eq!(app.message(), "Cannot continue rebase with unstaged changes");
+    assert!(g.rebase_in_progress());
+    // resolved and staged: r r continues
+    open(&mut app);
+    press(&mut app, &["b", "C-c", "C-c"]);
+    git(&g, &["config", "core.editor", "true"]);
+    press(&mut app, &["r", "r"]);
+    assert!(!g.rebase_in_progress(), "{}", app.message());
+    // no rebase: No rebase in progress
+    let mut app = App::new(g.clone());
+    press(&mut app, &["r", "r"]);
+    assert_ne!(app.message(), "rebase continued");
 }

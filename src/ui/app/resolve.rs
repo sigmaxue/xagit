@@ -25,19 +25,25 @@ pub struct ResolveEdit {
 }
 
 const HELP: &str = "\
-Resolve conflicts — choose a version for each conflict, then C-c C-c
+Resolve conflicts — Ediff merge-session keys (smerge-ediff / magit-ediff-resolve-rest)
 
-C-c C-c  save the file and stage it (git add)
-C-c C-k  cancel, leaving the file untouched
-a        keep A (ours / upper) for the conflict at point
-b        keep B (theirs / lower)
-d        keep both versions, one after the other
-s        keep the base version (diff3 conflicts only)
-u        leave this conflict undecided (markers stay)
-n / p    next / previous conflict (scrolls it into view)
-SPC/DEL  page down / up (free scroll)
+n / p    next / previous difference (scrolls it into view)
+j        jump to difference N (with a numeric prefix, e.g. C-u 3 j); else the first
+a        copy A (ours / upper) into the merge result
+b        copy B (theirs / lower) into the merge result
++        combine A and B (ediff-combine-diffs; d is an alias)
+r        restore the difference: leave its conflict markers (u is an alias)
+B        keep the base version (diff3 conflicts only; xagit extension)
+!        recompute the differences from the file on disk
+SPC/DEL  page down / up (also C-v / M-v, PgDn / PgUp)
 up/down  scroll one line
-?        show this help";
+q        quit: \"Conflict resolution finished; save FILE?\" (yes saves and,
+         when no conflict markers remain, stages the file)
+C-c C-c  save without asking; C-c C-k cancel without saving
+?        show this help
+
+Not supported in this single view: * (refine), ## / #h / #f (skip regions),
+| (toggle split), $$ (show only conflicts), window and buffer commands.";
 
 impl App {
     /// `e` (magit-ediff-dwim) with conflicts: pick the unmerged file at
@@ -56,16 +62,22 @@ impl App {
             })
             .or_else(|| unmerged.first().cloned())
             .unwrap();
+        self.resolve_open_file(&file)
+    }
+
+    /// The resolution view of the unmerged FILE (also `E m` / `E M`).
+    pub(super) fn resolve_open_file(&mut self, file: &str) -> Result<bool> {
+        let file = file.to_string();
         let abs = self.git.toplevel.join(&file);
         let text = std::fs::read(&abs).map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
         let parsed = ResolveFile::parse(&file, &text);
         if parsed.regions.is_empty() {
-            self.set_msg(&format!("No conflict markers in {file} (use E m for git mergetool)"));
+            self.set_msg(&format!("No conflict markers in {file} (use E t for git mergetool)"));
             return Ok(false);
         }
         self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, top: 0, cc: false, modified: false });
         self.setup_buffer(BufferMode::Resolve, Vec::new());
-        self.set_msg("a/b/d choose a side, C-c C-c saves and stages, ? for help");
+        self.set_msg("Type ? for help (n/p move, a/b/+ choose, q to finish)");
         Ok(true)
     }
 
@@ -109,24 +121,74 @@ impl App {
         ed
     }
 
-    /// C-c C-c: write the resolved file and stage it.  Undecided conflicts
-    /// keep their markers, so git still considers the file unresolved unless
-    /// the user decided them all.
+    /// Write the merge result back to the file and, like the quit hook of
+    /// magit-ediff-resolve-all, stage it when no line starts with
+    /// "<<<<<<< " any more.
     fn resolve_finish(&mut self) -> Result<()> {
         let Some(ed) = self.resolve_close() else { return Ok(()) };
         let bytes = ed.file.resolved();
         let path = ed.file.path.clone();
         let abs = self.git.toplevel.join(&path);
         std::fs::write(&abs, &bytes).map_err(|e| anyhow::anyhow!("Cannot write {path}: {e}"))?;
-        let remaining = ed.file.regions.iter().filter(|r| r.choice == Choice::Undecided).count();
-        if remaining == 0 {
+        let markers = bytes.split(|&b| b == b'\n').any(|l| l.starts_with(b"<<<<<<< "));
+        if markers {
+            let remaining = ed.file.regions.iter().filter(|r| r.choice == Choice::Undecided).count();
+            self.set_msg(&format!("Wrote {path}: {remaining} conflict(s) still unresolved"));
+        } else {
             self.git.stage(&path)?;
             self.set_msg(&format!("Resolved and staged {path} (r r to continue)"));
-        } else {
-            self.set_msg(&format!("Wrote {path}: {remaining} conflict(s) still undecided"));
         }
         self.refresh();
         Ok(())
+    }
+
+    /// q (ediff-quit in a merge job started by smerge-ediff /
+    /// magit-ediff-resolve-rest): "Conflict resolution finished; save
+    /// FILE?" — yes writes the result back, no leaves the file alone.
+    fn resolve_quit(&mut self) -> Result<()> {
+        let path = self.resolve.as_ref().map(|e| e.file.path.clone()).unwrap_or_default();
+        if self.yes_or_no_p(&format!("Conflict resolution finished; save {path}? "))? {
+            self.resolve_finish()
+        } else {
+            self.resolve_close();
+            self.set_msg(&format!("{path} not saved"));
+            self.refresh();
+            Ok(())
+        }
+    }
+
+    /// ! (ediff-update-diffs): parse the file again from disk.
+    fn resolve_reload(&mut self) -> Result<()> {
+        let Some(ed) = self.resolve.as_ref() else { return Ok(()) };
+        let path = ed.file.path.clone();
+        let text = std::fs::read(self.git.toplevel.join(&path)).map_err(|e| anyhow::anyhow!("Cannot read {path}: {e}"))?;
+        let parsed = ResolveFile::parse(&path, &text);
+        if parsed.regions.is_empty() {
+            self.set_msg(&format!("No conflict markers left in {path}"));
+            return Ok(());
+        }
+        let n = parsed.regions.len();
+        let ed = self.resolve.as_mut().unwrap();
+        ed.file = parsed;
+        ed.cursor = ed.cursor.min(n - 1);
+        ed.top = Self::resolve_conflict_row(ed, ed.cursor);
+        ed.modified = false;
+        self.set_msg(&format!("{n} difference(s) recomputed"));
+        Ok(())
+    }
+
+    /// j (ediff-jump-to-difference): to difference N given as a numeric
+    /// prefix argument, else to the first one.
+    fn resolve_jump(&mut self) {
+        let n = self.prefix_arg.map(|p| p.numeric()).unwrap_or(1);
+        let Some(ed) = self.resolve.as_mut() else { return };
+        let count = ed.file.regions.len();
+        if n < 1 || n as usize > count {
+            self.set_msg(&format!("Bad difference number, {n}. Valid numbers are 1 to {count}"));
+            return;
+        }
+        ed.cursor = n as usize - 1;
+        ed.top = Self::resolve_conflict_row(ed, ed.cursor);
     }
 
     fn resolve_cancel(&mut self) -> Result<()> {
@@ -171,17 +233,19 @@ impl App {
             (false, "pgup") | (false, "M-v") => self.resolve_scroll(self.view_body_h(), false),
             (false, "down") => self.resolve_scroll(1, true),
             (false, "up") => self.resolve_scroll(1, false),
-            // decisions
+            (false, "j") => self.resolve_jump(),
+            // decisions (ediff-merge keys)
             (false, "a") => self.resolve_set(Choice::A),
             (false, "b") => self.resolve_set(Choice::B),
-            (false, "d") => self.resolve_set(Choice::Both),
-            (false, "s") => self.resolve_set(Choice::Base),
-            (false, "u") => self.resolve_set(Choice::Undecided),
+            (false, "+" | "d") => self.resolve_set(Choice::Both),
+            (false, "B") => self.resolve_set(Choice::Base),
+            (false, "r" | "u") => self.resolve_set(Choice::Undecided),
+            (false, "!") => self.resolve_reload()?,
             (false, "?") | (true, "h") => {
                 self.view_text = Some(("Resolve conflicts".into(), HELP.into()));
                 self.view_scroll = 0;
             }
-            (false, "q") => self.set_msg("q is undefined (C-c C-k cancels, C-x C-c quits)"),
+            (false, "q") => self.resolve_quit()?,
             _ => self.set_msg(&format!("{} is undefined", key.label())),
         }
         Ok(true)
@@ -229,20 +293,12 @@ impl App {
             self.set_msg("No base version (not a diff3 conflict)");
             return;
         }
+        // like ediff-copy-A/B-to-C and ediff-combine-diffs, point stays on
+        // the current difference (n moves on)
         ed.file.regions[ed.cursor].choice = choice;
         ed.modified = true;
-        // auto-advance to the next undecided conflict and scroll it into view
-        let n = ed.file.regions.len();
-        let from = ed.cursor;
-        for step in 1..=n {
-            let i = (from + step) % n;
-            if ed.file.regions[i].choice == Choice::Undecided {
-                ed.cursor = i;
-                ed.top = Self::resolve_conflict_row(ed, i);
-                break;
-            }
-        }
-        self.set_msg(&format!("Conflict {}: {}", from + 1, choice.label()));
+        let n = ed.cursor + 1;
+        self.set_msg(&format!("Difference {n}: {}", choice.label()));
     }
 
     /// The rows of the resolution view: the WHOLE file is shown.  Ordinary

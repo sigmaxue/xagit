@@ -565,9 +565,21 @@ impl App {
                 let keyid = args.iter().find_map(|a| a.strip_prefix("--gpg-sign=")).map(str::to_string);
                 self.reshelve_since_select(keyid)?;
             }
+            // magit-rebase-continue: refuse without a rebase or with unstaged
+            // changes (unresolved conflicts are unstaged too)
             "rebase-continue" => {
-                g!().rebase_continue()?;
-                self.set_msg("rebase continued");
+                if !self.git.rebase_in_progress() {
+                    self.set_msg("No rebase in progress");
+                    return Ok(());
+                }
+                if !self.git.git_ok(&["diff", "--quiet", "--ignore-submodules"]) {
+                    self.set_msg("Cannot continue rebase with unstaged changes");
+                    return Ok(());
+                }
+                match g!().rebase_continue() {
+                    Ok(()) => self.set_msg("rebase continued"),
+                    Err(e) => self.report_error(&e),
+                }
                 self.refresh();
             }
             "rebase-skip" => {
@@ -681,6 +693,17 @@ impl App {
                         }
                     };
                     if !self.confirm(a, p)? {
+                        return Ok(());
+                    }
+                }
+                // magit-sequencer-continue
+                if action == "continue" {
+                    if !self.git.sequencer_in_progress() {
+                        self.set_msg("No cherry-pick or revert in progress");
+                        return Ok(());
+                    }
+                    if !self.git.unmerged_files().is_empty() {
+                        self.set_msg("Cannot continue due to unresolved conflicts");
                         return Ok(());
                     }
                 }

@@ -35,7 +35,14 @@ impl App {
             // magit-git-mergetool with a prefix argument shows its transient
             "git-mergetool" | "ediff-mergetool" if self.prefix_arg.is_some() => self.open_menu("mergetool-menu"),
             "git-mergetool" | "git-mergetool-invoke" | "ediff-mergetool" => self.resolve_with_mergetool(args, true, "Resolve")?,
-            "ediff-resolve-rest" | "ediff-resolve-all" => self.resolve_with_mergetool(args, false, "Resolve file")?,
+            // magit-ediff-resolve-rest / -all: the merge session is xagit's
+            // resolution view of the unmerged file read (E t: git mergetool)
+            "ediff-resolve-rest" | "ediff-resolve-all" => {
+                let _ = args;
+                if let Some(file) = self.read_unmerged_file("Resolve file")? {
+                    self.resolve_open_file(&file)?;
+                }
+            }
             "ediff-stage" => self.ediff_stage()?,
             _ => {}
         }
