@@ -112,7 +112,7 @@ fn direct_mode_map_equivalents() {
         ("cherry-pick-menu", "A"),
     ] {
         assert!(
-            matches!(action_of(&d, disp_key), Action::Command(c) if c == menu_name),
+            matches!(action_of(d, disp_key), Action::Command(c) if c == menu_name),
             "dispatch key {disp_key} should open {menu_name}"
         );
     }

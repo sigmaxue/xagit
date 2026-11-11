@@ -258,11 +258,12 @@ impl Todo {
     pub fn set_bare_action(&mut self, cursor: usize, action: &str, arg: bool) -> Option<usize> {
         let p = self.parsed(cursor);
         let same = p.action == action;
-        if !(arg || p.typ.is_none() || !same || (same && p.comment)) {
+        // nothing to do: the same bare action is already there, uncommented
+        if !arg && p.typ.is_some() && same && !p.comment {
             return None;
         }
         self.save(cursor);
-        if !(arg || !same) {
+        if !arg && same {
             self.lines.remove(cursor);
         }
         self.lines.insert(cursor.min(self.lines.len()), action.to_string());
@@ -323,7 +324,7 @@ mod tests {
         let f = parse("fixup -C abc s", "#");
         assert_eq!((f.options.as_deref(), f.target.as_str()), (Some("-C"), "abc"));
         assert!(parse("# pick abc s", "#").comment);
-        assert_eq!(parse("pick abc # s", "#").hash_sep, true);
+        assert!(parse("pick abc # s", "#").hash_sep);
         assert_eq!(parse("# p, pick <commit> = use commit", "#").typ, None);
         assert_eq!(parse("# Rebase a..b onto a", "#").typ, None);
         assert_eq!(parse("exec make test", "#").typ, Some(LineType::Exec));

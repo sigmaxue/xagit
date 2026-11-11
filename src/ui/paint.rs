@@ -493,15 +493,34 @@ pub fn write_row(out: &mut impl Write, theme: &Theme, y: u16, row: &Row, w: usiz
 
 /// Paint ROWS from the top of a W x H screen, blank rows below them, in
 /// one synchronized update (no tearing in terminals that support it;
-/// others ignore it).
-pub fn write_rows(out: &mut impl Write, theme: &Theme, rows: &[Row], w: usize, h: usize) -> std::io::Result<()> {
-    queue!(out, crossterm::terminal::BeginSynchronizedUpdate, crossterm::cursor::Hide)?;
+/// others ignore it). With PREVIOUS, the rows the terminal shows now
+/// (same W x H), only the rows that differ are written. Returns how many
+/// rows were written.
+pub fn write_rows(
+    out: &mut impl Write,
+    theme: &Theme,
+    rows: &[Row],
+    previous: Option<&[Row]>,
+    w: usize,
+    h: usize,
+) -> std::io::Result<usize> {
     let blank = Row::default();
-    for y in 0..h {
+    let changed: Vec<usize> = (0..h)
+        .filter(|&y| {
+            let row = rows.get(y).unwrap_or(&blank);
+            previous.is_none_or(|p| p.get(y).unwrap_or(&blank) != row)
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(0);
+    }
+    queue!(out, crossterm::terminal::BeginSynchronizedUpdate, crossterm::cursor::Hide)?;
+    for &y in &changed {
         write_row(out, theme, y as u16, rows.get(y).unwrap_or(&blank), w)?;
     }
     queue!(out, crossterm::terminal::EndSynchronizedUpdate)?;
-    out.flush()
+    out.flush()?;
+    Ok(changed.len())
 }
 
 #[cfg(test)]
@@ -642,5 +661,48 @@ mod tests {
         }
         assert_eq!(str_width(&plain), 20, "{plain:?}");
         assert!(plain.starts_with("修复    x"), "{plain:?}");
+    }
+
+    fn frame(lines: &[&str]) -> Vec<Row> {
+        lines.iter().map(|l| Row::text(*l, Style::default())).collect()
+    }
+
+    #[test]
+    fn repaint_writes_only_the_rows_that_changed() {
+        let t = theme();
+        let old = frame(&["header", "> one", "  two", "mode 1/2"]);
+        let new = frame(&["header", "  one", "> two", "mode 2/2"]);
+        let mut out = Vec::new();
+        assert_eq!(write_rows(&mut out, &t, &new, Some(&old), 20, 4).unwrap(), 3);
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("header"), "unchanged row written: {s:?}");
+        assert!(s.contains("> two") && s.contains("mode 2/2"), "{s:?}");
+    }
+
+    #[test]
+    fn repaint_without_a_previous_frame_writes_every_row() {
+        let t = theme();
+        let new = frame(&["a", "b"]);
+        let mut out = Vec::new();
+        // rows below the frame are blanked too
+        assert_eq!(write_rows(&mut out, &t, &new, None, 10, 4).unwrap(), 4);
+    }
+
+    #[test]
+    fn an_identical_frame_writes_nothing() {
+        let t = theme();
+        let rows = frame(&["a", "b"]);
+        let mut out = Vec::new();
+        assert_eq!(write_rows(&mut out, &t, &rows, Some(&rows), 10, 4).unwrap(), 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_shorter_frame_blanks_the_rows_it_no_longer_covers() {
+        let t = theme();
+        let old = frame(&["a", "b", "c"]);
+        let new = frame(&["a"]);
+        let mut out = Vec::new();
+        assert_eq!(write_rows(&mut out, &t, &new, Some(&old), 10, 3).unwrap(), 2);
     }
 }

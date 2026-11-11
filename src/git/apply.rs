@@ -10,7 +10,7 @@ pub fn diff_context(args: &[String]) -> usize {
     args.iter()
         .filter_map(|a| a.strip_prefix("-U").or_else(|| a.strip_prefix("--unified=")))
         .filter_map(|n| n.parse().ok())
-        .last()
+        .next_back()
         .unwrap_or(3)
 }
 

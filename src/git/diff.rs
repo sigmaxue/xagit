@@ -316,9 +316,9 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
 
 /// `diff --git A B` with --no-prefix: when both halves are equal, that path.
 fn guess_git_path(rest: &str) -> String {
-    if rest.starts_with('"') {
+    if let Some(inner) = rest.strip_prefix('"') {
         // quoted: "a" "b" or "a" b
-        if let Some(end) = rest[1..].find("\" ") {
+        if let Some(end) = inner.find("\" ") {
             return unquote_path(&rest[..end + 2]);
         }
     }

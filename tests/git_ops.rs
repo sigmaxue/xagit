@@ -52,11 +52,8 @@ fn status_sections_match_git() {
     assert!(g.anything_staged());
 
     let st = Status::load(&g);
-    assert_eq!(st.branch.as_deref(), Some("master").or_else(|| {
-        // git may default to 'main' depending on version
-        None
-    }).or(st.branch.as_deref()).map(|_| st.branch.clone()).flatten().as_deref().map(|s| s.to_string()).as_deref().map(|s| s).or(None).or(None));
-    let _ = st;
+    // scratch repos are created on `master` (tests/common::git_init)
+    assert_eq!(st.branch.as_deref(), Some("master"));
 }
 
 #[test]
@@ -315,7 +312,7 @@ fn commit_extend_amends_without_message_change() {
     let after = g.git_string(&["log", "-1", "--pretty=%s"]).unwrap();
     assert_eq!(before, after, "extend keeps the message");
     assert!(g.staged_files().is_empty());
-    assert!(g.anything_staged() == false);
+    assert!(!g.anything_staged());
     assert!(g.unstaged_files().is_empty());
 }
 
@@ -1496,7 +1493,7 @@ fn sequencer_continue_skip_abort() {
     assert!(g.sequencer("bogus").is_err());
 
     // revert of v2 conflicts with v3
-    assert!(g.revert(&[second.clone()], &[], false).is_err());
+    assert!(g.revert(std::slice::from_ref(&second), &[], false).is_err());
     assert!(g.revert_in_progress() && g.pick_or_revert_in_progress());
     g.sequencer("abort").unwrap();
     assert!(!g.pick_or_revert_in_progress());
@@ -1504,7 +1501,7 @@ fn sequencer_continue_skip_abort() {
     assert_eq!(read(&g, "file.txt"), "v3\n");
 
     // cherry-pick: resolve, then continue
-    assert!(g.cherry_pick(&[second.clone()], &[]).is_err());
+    assert!(g.cherry_pick(std::slice::from_ref(&second), &[]).is_err());
     assert!(g.cherry_in_progress() && g.pick_or_revert_in_progress());
     write(&g, "file.txt", "resolved\n");
     g.stage("file.txt").unwrap();
@@ -1786,7 +1783,7 @@ fn cherry_repo() -> (TempDir, Git, String, [String; 3]) {
 #[test]
 fn resolve_cherries_orders_oldest_first() {
     let (_td, g, main, [f1, f2, f3]) = cherry_repo();
-    assert_eq!(g.resolve_cherries(&f2).unwrap(), [f2.clone()]);
+    assert_eq!(g.resolve_cherries(&f2).unwrap(), std::slice::from_ref(&f2));
     assert_eq!(g.resolve_cherries(&format!("{main}..feature")).unwrap(), [f1, f2, f3]);
     assert!(g.resolve_cherries("feature..feature").is_err());
     assert_eq!(g.branches_containing("feature~1"), ["feature"]);

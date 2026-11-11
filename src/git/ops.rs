@@ -371,7 +371,7 @@ impl Git {
     /// magit-fetch-from-upstream: `git fetch <args> <upstream-remote>`; returns the remote.
     pub fn fetch_upstream(&self, args: &[String]) -> Result<String> {
         let (_, remote, _) = self.current_upstream()?;
-        self.run_args(vec!["fetch".into()], args, &[remote.clone()])?;
+        self.run_args(vec!["fetch".into()], args, std::slice::from_ref(&remote))?;
         Ok(remote)
     }
 
@@ -698,12 +698,12 @@ impl Git {
             SnapshotScope::Worktree => {
                 // stash unstaged only, then immediately re-apply
                 self.stash_both(None, untracked)?;
-                self.stash_apply(&"stash@{0}".to_string(), true)?;
+                self.stash_apply("stash@{0}", true)?;
                 return Ok(());
             }
         }
         // for both/index: re-apply so nothing is removed from the worktree
-        self.stash_apply(&"stash@{0}".to_string(), true)
+        self.stash_apply("stash@{0}", true)
     }
 
     /// magit-stash-apply ("z a"): `git stash apply [--index] <stash>`

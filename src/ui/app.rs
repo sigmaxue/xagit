@@ -22,7 +22,6 @@ use super::view::{build_status, status_log_args, BufferLine, LineKind, Section, 
 use crate::git::apply::diff_context;
 use crate::git::diff::{FileDiff, Scope};
 use crate::git::exec::Editor;
-use crate::git::ops::Untracked;
 use crate::git::status::{file_status, FileStatus, Status};
 use crate::git::Git;
 use anyhow::Result;
@@ -183,6 +182,11 @@ pub struct App {
     revision_history: std::cell::RefCell<Vec<String>>,
     /// the rows drawn last (the minibuffer restores those it covered)
     screen: std::cell::RefCell<Vec<Row>>,
+    /// the terminal size `screen` was painted at
+    painted_size: (usize, usize),
+    /// whether the terminal may no longer show `screen` (something else
+    /// wrote to it), so the next frame must be painted in full
+    repaint_all: bool,
     /// the faces' colors for this terminal (detected when run in one)
     theme: Theme,
     /// the history of each infix (its values read, newest first)
@@ -716,6 +720,8 @@ impl App {
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
             revision_history: std::cell::RefCell::new(Vec::new()),
             screen: std::cell::RefCell::new(Vec::new()),
+            painted_size: (0, 0),
+            repaint_all: true,
             theme: Theme::default(),
             infix_history: std::cell::RefCell::new(BTreeMap::new()),
             history_file: None,
@@ -1337,8 +1343,14 @@ impl App {
         rows.truncate(h);
 
         if self.in_terminal {
-            let _ = paint::write_rows(&mut stdout(), &t, &rows, w, h);
+            // only the rows that changed, unless the terminal may show
+            // something else than the last frame
+            let full = std::mem::take(&mut self.repaint_all) || self.painted_size != (w, h);
+            let screen = self.screen.borrow();
+            let previous = (!full).then_some(screen.as_slice());
+            let _ = paint::write_rows(&mut stdout(), &t, &rows, previous, w, h);
         }
+        self.painted_size = (w, h);
         *self.screen.borrow_mut() = rows;
     }
 
@@ -1837,26 +1849,6 @@ impl App {
         }
     }
 
-    /// Files of the untracked / unstaged / staged section around point.
-    fn files_in_current_section(&self) -> Vec<String> {
-        let Some(cur) = self.current_line() else { return vec![] };
-        let section = match &cur.kind {
-            LineKind::File { section, .. }
-            | LineKind::Hunk { section, .. }
-            | LineKind::DiffLine { section, .. }
-            | LineKind::SectionHeader { section, .. } => section.clone(),
-            _ => return vec![],
-        };
-        self.buf
-            .all
-            .iter()
-            .filter_map(|l| match &l.kind {
-                LineKind::File { section: s, path } if *s == section => Some(path.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     // ------------------------------------------------------------ event loop
 
     pub fn run(&mut self) -> Result<()> {
@@ -1900,16 +1892,23 @@ impl App {
                     let key = Key::from_event(&ev);
                     // moving around is done in the buffer shown; any
                     // other command works on the refreshed one
-                    if !self.only_moves(&key) {
+                    let moves = self.only_moves(&key);
+                    if !moves {
                         self.settle();
                     }
                     if let Err(e) = self.handle_key(key) {
                         self.set_msg(&format!("{e:#}"));
                     }
+                    // other commands may have written to the terminal
+                    // (the minibuffer, hooks of interactive git commands)
+                    if !moves {
+                        self.repaint_all = true;
+                    }
                 }
                 // a new size: the frame is laid out again below
                 Event::Resize(..) => {
                     let _ = execute!(stdout(), Clear(ClearType::All));
+                    self.repaint_all = true;
                 }
                 _ => {}
             }
@@ -2616,6 +2615,8 @@ impl App {
         let r = f(&self.git);
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), EnterAlternateScreen);
+        // the alternate screen comes back empty
+        self.repaint_all = true;
         r
     }
 
@@ -3421,19 +3422,6 @@ impl App {
             .filter(|(_, on)| **on)
             .map(|(k, _)| k.clone())
             .collect()
-    }
-
-    /// magit-stash-read-untracked: one prefix argument is equivalent to
-    /// "--include-untracked", two to "--all".
-    fn untracked_from(&self, active: &BTreeMap<String, bool>) -> Untracked {
-        let prefix = self.prefix_numeric();
-        if prefix == 16 || *active.get("--all").unwrap_or(&false) {
-            Untracked::All
-        } else if prefix == 4 || *active.get("--include-untracked").unwrap_or(&false) {
-            Untracked::Include
-        } else {
-            Untracked::No
-        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -7623,20 +7611,6 @@ impl App {
         }
     }
 
-    /// The default of magit-read-remote: magit-remote-at-point (the remote
-    /// section, or the remote of the remote branch section at point),
-    /// else magit-get-remote.
-    fn remote_default(&self) -> Option<String> {
-        self.remote_at_point().or_else(|| self.get_remote()).or_else(|| {
-            let rs = self.git.remotes();
-            if rs.len() == 1 {
-                rs.first().cloned()
-            } else {
-                rs.into_iter().find(|r| r == "origin")
-            }
-        })
-    }
-
     /// The secret OpenPGP keys that can sign (`gpg --list-secret-keys`):
     /// the fingerprints of their primary keys.
     fn gpg_signing_keys(&self) -> Vec<String> {
@@ -9391,16 +9365,6 @@ impl App {
             None => self.set_msg("No diffstat in this buffer"),
         }
     }
-
-    // ------------------------------------------------------------ point helpers
-
-    fn pick_current_file_or_section(&self) -> Option<(String, String)> {
-        if let Some((section, path)) = self.current_file() {
-            return Some((section, path));
-        }
-        let files = self.files_in_current_section();
-        files.first().map(|f| (String::new(), f.clone()))
-    }
 }
 
 /// What magit-diff--dwim finds at point.
@@ -9486,14 +9450,6 @@ impl Git {
 /// Magit extras: bisect / worktree / submodule / notes / ediff.
 /// Kept out of `run_command`'s main dispatch so each feature stays together.
 impl App {
-    fn show(&mut self, title: &str, res: Result<String>) {
-        match res {
-            Ok(out) if out.trim().is_empty() => self.set_msg("(no output)"),
-            Ok(out) => self.view_text = Some((title.into(), out)),
-            Err(e) => self.report_error(&e),
-        }
-    }
-
     fn done(&mut self, ok_msg: &str, res: Result<String>) {
         match res {
             Ok(out) => {

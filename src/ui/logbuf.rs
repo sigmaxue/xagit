@@ -51,10 +51,6 @@ pub(crate) fn now() -> f64 {
         .map_or(0.0, |d| d.as_secs_f64())
 }
 
-fn truncate(s: &str, width: usize) -> String {
-    s.chars().take(width).collect()
-}
-
 /// format-time-string: TIME (seconds since the epoch) in the local time
 /// zone, formatted by strftime.
 pub fn format_time(format: &str, time: i64) -> String {

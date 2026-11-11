@@ -1,4 +1,8 @@
 //! tests/common/mod.rs — shared test fixtures: scratch repos mirroring Magit test setup.
+//!
+//! Every integration test crate compiles this module and uses only part of
+//! it, so unused helpers are expected here (and only here).
+#![allow(dead_code)]
 
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::App;

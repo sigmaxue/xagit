@@ -208,7 +208,7 @@ pub fn file_ident(section: &str, path: &str) -> String {
 
 /// Identity of a hunk section.
 pub fn hunk_ident(section: &str, path: &str, header: &str) -> String {
-    let ranges = header.splitn(3, "@@").nth(1).unwrap_or(header).trim();
+    let ranges = header.split("@@").nth(1).unwrap_or(header).trim();
     format!("{section}/{path}/@@ {ranges} @@")
 }
 
@@ -274,6 +274,7 @@ impl Builder {
         Builder { lines: Vec::new(), stack: Vec::new(), log_margin: Margin::status() }
     }
 
+    #[allow(clippy::too_many_arguments)] // the fields of one BufferLine
     fn push(&mut self, text: String, kind: LineKind, ident: &str, heading: bool, depth: usize, has_body: bool, ancestors: Vec<String>) {
         self.lines.push(BufferLine {
             text,
