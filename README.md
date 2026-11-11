@@ -241,9 +241,18 @@ src/
     ├── theme.rs       # face 与深/浅配色、终端色深/背景/字形探测与降级
     ├── width.rs       # 终端显示宽度（CJK/emoji/组合字符/tab）
     ├── app.rs         # App 状态 + 事件循环 + 命令分发（内聚方法组拆到 app/）
-    ├── app/jobs.rs    # 后台刷新与后台 git 进程；on_refresh_done 统一恢复 UI 状态
-    └── app/isearch.rs # C-s/C-r 本界面搜索（匹配、跳转、查询状态）
+    └── app/           # impl App 的分散实现（见下方拆分约定）
+        ├── render.rs   # 帧绘制：header / mode line / hints / 缓冲区正文
+        ├── input.rs    # minibuffer、补全、历史与 yes/no 提问
+        ├── sections.rs # section 导航与可见性（magit-section）
+        ├── menus.rs    # transient 菜单、参数值 / 历史与扩展命令
+        ├── apply.rs    # stage / unstage / discard / reverse
+        ├── jobs.rs     # 后台刷新与后台 git 进程；on_refresh_done 统一恢复 UI 状态
+        ├── isearch.rs  # C-s/C-r 本界面搜索（匹配、跳转、查询状态）
+        └── …           # gitvar / bisect / stash / tag / worktree 等命令子模块
 ```
+
+`impl App` 分散在 `src/ui/app/*.rs`：子模块用 `use super::*;` 复用父模块的私有字段和 helper，反过来父模块或其它子模块要调用的方法显式写成 `pub(super)`（Rust 的私有项只对定义模块及其后代可见）。这些模块是纯代码位置调整，不改变行为；移动时原本的 `super::xxx`（指向 `ui`）要改成 `crate::ui::xxx`。目前 `app.rs` 约 6600 行，主要集中在事件循环、命令分派表与 visiting 相关的命令。
 
 ### libgit2 只读查询层
 
