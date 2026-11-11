@@ -175,6 +175,9 @@ impl App {
                 if let Some(a) = self.instant_answer(k) {
                     return Ok(Some(a));
                 }
+                if self.search_submit_key(k) {
+                    return Ok(Some(ed.text()));
+                }
                 match ed.key(k) {
                     Step::Done(s) => return Ok(Some(s)),
                     Step::Abort => return Ok(None),
@@ -279,6 +282,9 @@ impl App {
             let key = Key::from_event(&ev);
             if let Some(a) = self.instant_answer(&key) {
                 break Some(a);
+            }
+            if self.search_submit_key(&key) {
+                break Some(ed.text());
             }
             match ed.key(&key) {
                 Step::Done(s) => break Some(s),

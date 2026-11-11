@@ -21,7 +21,7 @@ Status buffer keys:
   c c        commit
   g          refresh
   q          back (does not quit on the status page)
-  C-s / C-r  search this buffer (C-s again: next match)
+  C-s / C-r  search this buffer (C-s again: next match, also submits the query)
   C-g        clear the search highlight
   C-x C-c    quit
 

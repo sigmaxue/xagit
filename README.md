@@ -32,7 +32,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - 提供分支、提交、远端、fetch/pull/push、merge/rebase、tag、stash、reset、cherry-pick 与 revert 菜单；进行中操作按仓库状态提供 continue/skip/abort 等入口。
 - 支持 diff、log、refs、blame、补全、历史选择及 transient 参数；支持多键序列与 Ctrl/Meta 按键。
 - 包含 bisect、worktree、submodule、subtree、notes、patch/am 与分支配置功能，以及进程日志视图。
-- 支持 `C-s` / `C-r` 在当前 buffer 内搜索并高亮所有匹配，可循环跳转，覆盖 status、refs、log 等 Magit 缓冲区。
+- 支持 `C-s` / `C-r` 在当前 buffer 内搜索并高亮所有匹配，输入查询后再按 `C-s` / `C-r` 即可直接搜索（不必按回车）并循环跳转，覆盖 status、refs、log 等 Magit 缓冲区。
   
 
   
@@ -153,7 +153,7 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 
 `C-s` 在**当前显示的 buffer** 内搜索，覆盖 status、refs、log、diff、revision、blame、cherry 等 Magit 缓冲区（含右侧 author/age margin）：
 
-- 第一次按 `C-s` 读取查询（默认值为上一次的查询），按大小写不敏感的子串匹配。回车后所有匹配以醒目底色高亮，光标跳到当前位置之后的第一个匹配；底部按键提示切换为 `C-s next` / `C-r prev` / `C-g clear`。
+- 第一次按 `C-s`（或 `C-r`）读取查询（默认值为上一次的查询），按大小写不敏感的子串匹配。输入查询时**不必按回车**：再按一次 `C-s` 就用当前已输入的内容开始向前搜索，`C-r` 则改为向后；`RET` 同样可以提交，`C-g` 取消。提交后所有匹配以醒目底色高亮，光标跳到当前位置之后（`C-r` 为之前）的第一个匹配，到底/到头时循环；底部按键提示切换为 `C-s next` / `C-r prev` / `C-g clear`。
 - 再按 `C-s` 跳下一个匹配，`C-r` 跳上一个，到末尾循环；`C-g` 清除高亮，`C-u C-s` 重新输入查询。切换 buffer 时自动清除搜索状态；后台刷新后高亮按新内容重新计算，不会残留旧行号。
 - 只搜索当前 buffer 里存在的**可见行**：折叠的 section、被 refs 过滤规则排除的 ref、超过文件列表上限或 log `-n` 限制而未列出的内容都不会命中，需要先展开或增加数量。纯文本视图（`$` 进程日志、`E` 文本 diff、`git show` 输出等）不是 Magit 缓冲区，按 `C-s` 会提示不支持。
 - 某些终端把 `C-s` 用作 XOFF 流控键，导致按键发不到程序；可执行 `stty -ixon` 关闭（或在终端设置里禁用 flow control）。

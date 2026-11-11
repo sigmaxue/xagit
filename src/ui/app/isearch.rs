@@ -32,6 +32,23 @@ impl App {
             .collect()
     }
 
+    /// Whether KEY ends the search prompt with the text typed so far.
+    /// Like Emacs' isearch, C-s / C-r while entering a query submit it, so
+    /// repeating the key searches without a RET in between; the key also
+    /// decides the direction. Only active while `isearch` reads a query.
+    pub(super) fn search_submit_key(&self, key: &Key) -> bool {
+        let mut slot = self.search_read.borrow_mut();
+        if *slot != Some(SearchRead::Reading) {
+            return false;
+        }
+        *slot = Some(match (key.ctrl, key.code.as_str()) {
+            (true, "s") => SearchRead::Forward,
+            (true, "r") => SearchRead::Backward,
+            _ => return false,
+        });
+        true
+    }
+
     /// C-s / C-r: read a query on the first call (or with a prefix arg),
     /// then move point through the matches of the current buffer.
     pub(super) fn isearch(&mut self, forward: bool) -> Result<()> {
@@ -40,12 +57,20 @@ impl App {
             return Ok(());
         }
         let repeat = self.search_query.is_some() && self.prefix_arg.is_none();
-        let query = if repeat {
-            self.search_query.clone().unwrap_or_default()
+        let (query, forward) = if repeat {
+            (self.search_query.clone().unwrap_or_default(), forward)
         } else {
             let default = (!self.last_search.is_empty()).then_some(self.last_search.as_str());
-            match self.read_line_prompt("Search: ", default)? {
-                Some(q) => q,
+            *self.search_read.borrow_mut() = Some(SearchRead::Reading);
+            let read = self.read_line_prompt("Search: ", default);
+            // take before `?`: the prompt must not stay active on an error
+            let direction = match self.search_read.borrow_mut().take() {
+                Some(SearchRead::Forward) => true,
+                Some(SearchRead::Backward) => false,
+                _ => forward,
+            };
+            match read? {
+                Some(q) => (q, direction),
                 None => {
                     self.clear_search_state();
                     self.set_msg("Search cancelled");

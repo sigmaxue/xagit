@@ -174,3 +174,67 @@ fn text_views_report_that_search_is_unavailable() {
     assert!(app.message().contains("only available"), "{}", app.message());
     assert_eq!(app.search_query(), None);
 }
+
+/// Emacs' isearch: while entering a query, a further C-s / C-r submits the
+/// text typed so far. No RET is needed, and repeating C-s moves on.
+#[test]
+fn c_s_in_the_prompt_submits_without_ret() {
+    let (_td, g) = status_repo();
+    let mut app = App::new(g);
+    app.script_keys(&[".", "T", "X", "T", "C-s"]);
+    app.press("C-s").unwrap();
+
+    assert_eq!(app.search_query(), Some(".TXT"));
+    assert_eq!(app.prompts().last().map(String::as_str), Some("Search: "));
+    assert!(app.point_text().contains(".txt"), "{}", app.point_text());
+    assert!(app.message().contains("matches for"), "{}", app.message());
+
+    let first = app.point_text().to_string();
+    app.press("C-s").unwrap();
+    assert_ne!(app.point_text(), first, "repeating C-s must move to the next match");
+    assert_eq!(app.prompts().len(), 1, "repeating must not read a new query");
+}
+
+#[test]
+fn c_r_in_the_prompt_submits_a_backward_search() {
+    let (_td, g) = status_repo();
+    let mut forward = App::new(g.clone());
+    forward.script_keys(&[".", "t", "x", "t", "C-s"]);
+    forward.press("C-s").unwrap();
+
+    let mut backward = App::new(g);
+    backward.script_keys(&[".", "t", "x", "t", "C-r"]);
+    backward.press("C-s").unwrap(); // C-r in the prompt changes direction
+
+    assert_eq!(backward.search_query(), Some(".txt"));
+    assert_ne!(forward.point_text(), backward.point_text(), "C-r must search backwards");
+    assert!(backward.point_text().contains(".txt"));
+}
+
+#[test]
+fn ret_and_c_g_in_the_prompt_are_unchanged() {
+    let (_td, g) = status_repo();
+    let mut by_ret = App::new(g.clone());
+    by_ret.script_keys(&[".", "t", "x", "t", "RET"]);
+    by_ret.press("C-s").unwrap();
+    assert_eq!(by_ret.search_query(), Some(".txt"));
+
+    let mut cancelled = App::new(g);
+    cancelled.script_keys(&[".", "t", "C-g"]);
+    cancelled.press("C-s").unwrap();
+    assert_eq!(cancelled.search_query(), None);
+    assert!(cancelled.message().contains("cancelled"), "{}", cancelled.message());
+}
+
+/// The submit keys are scoped to the search prompt: another prompt must
+/// not treat C-s as RET.
+#[test]
+fn c_s_in_another_prompt_is_not_a_submit_key() {
+    let (_td, g) = status_repo();
+    let mut app = App::new(g);
+    app.script_keys(&["C-s"]);
+    app.press("M-x").unwrap(); // execute-extended-command reads a command
+    assert_eq!(app.prompts().last().map(String::as_str), Some("M-x "), "the prompt must have been read");
+    assert_eq!(app.search_query(), None);
+    assert!(!app.message().contains("matches for"), "{}", app.message());
+}

@@ -177,6 +177,9 @@ pub struct App {
     instant_keys: std::cell::RefCell<Vec<(String, String)>>,
     /// the INITIAL-INPUT of the next question read
     initial_input: std::cell::RefCell<Option<String>>,
+    /// set while the search prompt (C-s / C-r) is read; a second C-s / C-r
+    /// there submits the text typed so far, and records the direction
+    search_read: std::cell::RefCell<Option<SearchRead>>,
     /// the scopes read by magit-branch-configure and
     /// magit-remote-configure (transient-scope)
     var_scopes: HashMap<String, Option<String>>,
@@ -447,6 +450,16 @@ enum Hist<'a> {
     Infix(&'a str),
     /// none (y-or-n-p)
     None,
+}
+
+/// The state of one read of the search prompt. While reading, a further
+/// C-s / C-r submits the text typed so far (as RET would) and records
+/// the direction, so repeating C-s searches without a RET in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchRead {
+    Reading,
+    Forward,
+    Backward,
 }
 
 /// The kind of the section at point in the refs buffer, for the
@@ -738,6 +751,7 @@ impl App {
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
             instant_keys: std::cell::RefCell::new(Vec::new()),
             initial_input: std::cell::RefCell::new(None),
+            search_read: std::cell::RefCell::new(None),
             var_scopes: HashMap::new(),
             invoking_menu: None,
             minibuffer_above: std::cell::RefCell::new(Vec::new()),
