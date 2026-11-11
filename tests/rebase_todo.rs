@@ -70,7 +70,10 @@ fn actions(app: &App) -> Vec<String> {
             let mut w = l.split(' ');
             let a = w.next().unwrap_or("").to_string();
             let _hash = w.next();
-            format!("{a} {}", w.collect::<Vec<_>>().join(" "))
+            let rest: Vec<&str> = w.collect();
+            // git >= 2.50 writes `pick <hash> # <subject>`, older git omits `#`
+            let subject = if rest.first() == Some(&"#") { &rest[1..] } else { &rest[..] };
+            format!("{a} {}", subject.join(" "))
         })
         .collect()
 }

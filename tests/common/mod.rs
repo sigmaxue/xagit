@@ -14,11 +14,13 @@ pub fn scratch_repo() -> (TempDir, Git) {
     (td, g)
 }
 
-/// git init at path (Git::discover requires an existing repo).
+/// git init at path (Git::discover requires an existing repo). The branch
+/// is pinned: otherwise `init.defaultBranch` from the system/global config
+/// decides it and the tests that expect `master` break on newer setups.
 pub fn git_init(path: &std::path::Path) {
     assert!(
         std::process::Command::new("git")
-            .args(["init", "-q"])
+            .args(["init", "-q", "-b", "master"])
             .current_dir(path)
             .status()
             .unwrap()
