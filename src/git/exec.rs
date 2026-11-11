@@ -240,7 +240,6 @@ impl Git {
     }
 
     /// HEAD line for the status header: "branch-name" or "detached at abc1234"
-    #[allow(dead_code)]
     pub fn head_desc(&self) -> String {
         match self.current_branch() {
             Some(b) => b,

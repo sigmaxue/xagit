@@ -392,6 +392,9 @@ impl Builder {
     /// than "Recent commits", TITLE is followed by the number of commits
     /// (magit-log-insert-child-count), "N+" when that is the limit.
     fn log_section(&mut self, g: &Git, ident: &str, title: &str, section: &str, revs: Option<&str>, args: &[String]) {
+        if empty_range(revs, args) {
+            return;
+        }
         let (out, n) = section_log(g, revs, args);
         if n == 0 {
             return;
@@ -408,6 +411,26 @@ impl Builder {
         wash_section_log(self, g, &out, &margin, &LogSection { depth: 1, section, ident: &ident });
         self.blank();
     }
+}
+
+/// Whether `git log ARGS REVS` certainly lists no commit: REVS is a
+/// two-dot range with no commit in it and ARGS only limit, order or format
+/// the listing. Answered in-process only (during a refresh), so asking
+/// never costs a git process; otherwise the log is run as before.
+fn empty_range(revs: Option<&str>, args: &[String]) -> bool {
+    const FLAGS: &[&str] =
+        &["--graph", "--color", "--decorate", "--topo-order", "--author-date-order", "--date-order", "--no-merges", "--first-parent", "--reverse"];
+    const VALUED: &[&str] = &["-n", "--max-count=", "--decorate=", "--author=", "--committer=", "--grep=", "--since=", "--until="];
+    let Some((a, b)) = revs.and_then(|r| r.split_once("..")) else { return false };
+    if b.starts_with('.') || a.is_empty() && b.is_empty() {
+        return false;
+    }
+    if !args.iter().all(|x| FLAGS.contains(&x.as_str()) || VALUED.iter().any(|p| x.starts_with(p))) {
+        return false;
+    }
+    let range = format!("{}..{}", if a.is_empty() { "HEAD" } else { a }, if b.is_empty() { "HEAD" } else { b });
+    crate::git::query::answer(&["rev-list", "--count", &range])
+        .is_some_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "0")
 }
 
 /// Build the status buffer (magit-status-refresh-buffer); MARGIN is

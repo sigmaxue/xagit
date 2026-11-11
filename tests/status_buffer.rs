@@ -359,3 +359,35 @@ fn headers_nest_under_the_first_header() {
     assert!(!visible(&app, "Tag:"));
     assert!(app.point_text().starts_with("Head:"));
 }
+
+/// The log sections of a range without commits are left out without running
+/// the log (the count is answered in-process); one with commits is shown.
+#[test]
+fn empty_log_ranges_are_left_out() {
+    let (_td, g, _) = repo_with_commit();
+    g.git_interactive(&["branch", "base"]).unwrap();
+    g.git_interactive(&["branch", "--set-upstream-to=base"]).unwrap();
+    let texts = |app: &App| app.visible_lines().iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+    let app = App::new(g.clone());
+    let lines = texts(&app);
+    assert!(!lines.iter().any(|l| l.starts_with("Unpulled from") || l.starts_with("Unmerged into")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("Recent commits")), "{lines:?}");
+
+    // base one commit ahead: unpulled
+    g.git_interactive(&["checkout", "-q", "base"]).unwrap();
+    write(&g, "up.txt", "up\n");
+    g.git_interactive(&["add", "up.txt"]).unwrap();
+    g.git_interactive(&["commit", "-qm", "upstream work"]).unwrap();
+    g.git_interactive(&["checkout", "-q", "master"]).unwrap();
+    let lines = texts(&App::new(g.clone()));
+    assert!(lines.iter().any(|l| l == "Unpulled from base (1)"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with("Unmerged into")), "{lines:?}");
+
+    // and a local commit: unmerged too
+    write(&g, "local.txt", "local\n");
+    g.git_interactive(&["add", "local.txt"]).unwrap();
+    g.git_interactive(&["commit", "-qm", "local work"]).unwrap();
+    let lines = texts(&App::new(g));
+    assert!(lines.iter().any(|l| l == "Unmerged into base (1)"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "Unpulled from base (1)"), "{lines:?}");
+}

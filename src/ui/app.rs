@@ -2240,6 +2240,9 @@ impl App {
     }
 
     fn open_menu(&mut self, name: &str) {
+        // opening a menu only reads (the branch, remotes and config of the
+        // dynamic descriptions): answer those in-process, as in a refresh
+        let _queries = crate::git::query::enter(&self.git.toplevel);
         let name = resolve_menu(name, self.repo_state());
         if !self.menus.contains_key(&name) {
             return;

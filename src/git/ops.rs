@@ -842,7 +842,6 @@ pub enum SnapshotScope {
     Worktree,
 }
 
-#[allow(dead_code)]
 fn env_vars(kv: &str) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     if let Some((k, v)) = kv.split_once('=') {

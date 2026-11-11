@@ -174,7 +174,11 @@ fn no_tags(repo: &Repository) -> bool {
 
 /// The short name of `branch@{upstream}`, as `rev-parse --abbrev-ref`.
 fn upstream(repo: &Repository, rev: &str) -> Option<String> {
-    Some(short_ref(&upstream_ref(repo, rev)?).to_string())
+    let full = upstream_ref(repo, rev)?;
+    // configured but not fetched (or deleted): git fails, it does not
+    // print the name libgit2 derives from the config
+    repo.find_reference(&full).ok()?;
+    Some(short_ref(&full).to_string())
 }
 
 fn short_ref(name: &str) -> &str {
@@ -592,6 +596,19 @@ mod tests {
         // a branch that does not exist stays with the CLI
         assert!(answer(&["rev-parse", "--abbrev-ref", "nope@{u}"]).is_none());
         drop(scope);
+
+        // an upstream configured but missing: git fails, it is not named
+        must(&dir, &["config", "branch.main.remote", "origin"]);
+        must(&dir, &["config", "branch.main.merge", "refs/heads/gone"]);
+        let scope = enter(&dir);
+        for rev in ["@{u}", "main@{u}"] {
+            let args = ["rev-parse", "--abbrev-ref", rev];
+            assert!(!cli(&dir, &args).0);
+            assert!(answer(&args).is_none_or(|o| !o.status.success()), "git {args:?}");
+        }
+        drop(scope);
+        must(&dir, &["config", "--unset", "branch.main.remote"]);
+        must(&dir, &["config", "--unset", "branch.main.merge"]);
 
         must(&dir, &["checkout", "-q", "--detach", "HEAD"]);
         let scope = enter(&dir);
