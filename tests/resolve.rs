@@ -152,7 +152,8 @@ fn two_columns_with_diff_highlight() {
     let pair = view.iter().find(|(text, _)| text.contains("MASTER line") && text.contains("│"));
     assert!(pair.is_some(), "no side-by-side row: {:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
     // column titles
-    assert!(view.iter().any(|(t, _)| t.contains("A (ours") && t.contains("B (theirs")));
+    // the column titles name the two sides: rebase onto master, topic
+    assert!(view.iter().any(|(t, _)| t.contains("A: master") && t.contains("B: topic")), "{:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
     // the changed lines are highlighted with Added (A) / Removed (B) faces
     let (_, spans) = pair.unwrap();
     let added = theme.style(Face::Added);
@@ -207,10 +208,13 @@ fn free_page_scrolling() {
     assert_eq!(app.resolve_top(), Some(2));
     app.press("up").unwrap();
     assert_eq!(app.resolve_top(), Some(1));
-    // SPC pages down (clamped at the bottom), DEL pages back to the top
+    // SPC pages down, DEL pages back (a page is the A/B window's height,
+    // so it returns to where it was unless SPC hit the bottom)
     app.press("SPC").unwrap();
     let after_page = app.resolve_top().unwrap();
-    assert!(after_page >= 1, "SPC did not scroll");
+    assert!(after_page > 1, "SPC did not scroll");
+    app.press("DEL").unwrap();
+    assert!(app.resolve_top().unwrap() <= 1, "{:?}", app.resolve_top());
     app.press("DEL").unwrap();
     assert_eq!(app.resolve_top(), Some(0));
     // n jumps to the next conflict and scrolls its header to the top
@@ -319,4 +323,62 @@ fn rebase_continue_refuses_with_conflicts() {
     let mut app = App::new(g.clone());
     press(&mut app, &["r", "r"]);
     assert_ne!(app.message(), "rebase continued");
+}
+
+/// The sides are named after the branches, and a third window (C) shows
+/// the merge result as it will be saved.
+#[test]
+fn branch_names_and_result_window() {
+    let (_td, g) = conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    // rebase topic onto master: A = master (upper, HEAD side), B = topic
+    let (a, b) = app.resolve_side_names_shown().unwrap();
+    assert_eq!(a, "master");
+    assert!(b.starts_with("topic (") && b.contains("topic"), "{b}");
+    let texts = |app: &App| app.resolve_view(30, 100).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
+    let v = texts(&app);
+    let c = v.iter().position(|t| t.contains("C: merge result")).expect("C window");
+    // undecided: C still shows the conflict markers
+    assert!(v[c..].iter().any(|t| t.contains("<<<<<<<")), "{v:?}");
+    // b: C shows B's line in place of the conflict, with the context
+    press(&mut app, &["b"]);
+    let v = texts(&app);
+    let c = v.iter().position(|t| t.contains("C: merge result")).unwrap();
+    let below = &v[c + 1..];
+    assert!(below.iter().any(|t| t.contains("TOPIC line")), "{v:?}");
+    assert!(!below.iter().any(|t| t.contains("MASTER line") || t.contains("<<<<<<<")), "{v:?}");
+    assert!(below.iter().any(|t| t.trim() == "top") && below.iter().any(|t| t.trim() == "bottom"), "{v:?}");
+    // the header and message name the chosen branch
+    assert!(v.iter().any(|t| t.contains("Conflict 1") && t.contains("B: topic")), "{v:?}");
+    assert!(app.message().contains("B: topic"), "{}", app.message());
+    // +: both, in order
+    press(&mut app, &["+"]);
+    let v = texts(&app);
+    let c = v.iter().position(|t| t.contains("C: merge result")).unwrap();
+    let below: Vec<&String> = v[c + 1..].iter().collect();
+    let m = below.iter().position(|t| t.contains("MASTER line")).expect("A in C");
+    let tp = below.iter().position(|t| t.contains("TOPIC line")).expect("B in C");
+    assert!(m < tp, "{below:?}");
+}
+
+/// A merge names its sides after the current and the merged branch.
+#[test]
+fn merge_side_names() {
+    let (_td, g) = scratch_repo();
+    git(&g, &["config", "user.name", "t"]);
+    git(&g, &["config", "user.email", "t@t"]);
+    write(&g, "f.txt", "x\n");
+    git(&g, &["add", "."]);
+    git(&g, &["commit", "-q", "-m", "base"]);
+    git(&g, &["checkout", "-q", "-b", "feature"]);
+    write(&g, "f.txt", "feature\n");
+    git(&g, &["commit", "-q", "-am", "feature"]);
+    git(&g, &["checkout", "-q", "master"]);
+    write(&g, "f.txt", "main\n");
+    git(&g, &["commit", "-q", "-am", "main"]);
+    let _ = g.git_string(&["merge", "feature"]);
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    assert_eq!(app.resolve_side_names_shown().unwrap(), ("master".to_string(), "feature".to_string()));
 }

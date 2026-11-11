@@ -22,6 +22,10 @@ pub struct ResolveEdit {
     pub cc: bool,
     /// any decision changed
     pub modified: bool,
+    /// the names of the two versions: A (upper, the HEAD side) and B
+    /// (lower, the side being merged / picked / rebased)
+    pub a_name: String,
+    pub b_name: String,
 }
 
 const HELP: &str = "\
@@ -29,12 +33,15 @@ Resolve conflicts — Ediff merge-session keys (smerge-ediff / magit-ediff-resol
 
 n / p    next / previous difference (scrolls it into view)
 j        jump to difference N (with a numeric prefix, e.g. C-u 3 j); else the first
-a        copy A (ours / upper) into the merge result
-b        copy B (theirs / lower) into the merge result
+a        copy A (upper, the HEAD side) into the merge result
+b        copy B (lower, the side merged / picked / rebased) into the result
 +        combine A and B (ediff-combine-diffs; d is an alias)
 r        restore the difference: leave its conflict markers (u is an alias)
 B        keep the base version (diff3 conflicts only; xagit extension)
 !        recompute the differences from the file on disk
+The bottom window (C) shows the merge result as it will be saved: the
+current difference is highlighted, undecided ones still show their markers.
+
 SPC/DEL  page down / up (also C-v / M-v, PgDn / PgUp)
 up/down  scroll one line
 q        quit: \"Conflict resolution finished; save FILE?\" (yes saves and,
@@ -75,10 +82,69 @@ impl App {
             self.set_msg(&format!("No conflict markers in {file} (use E t for git mergetool)"));
             return Ok(false);
         }
-        self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, top: 0, cc: false, modified: false });
+        let (a_name, b_name) = self.resolve_side_names(&parsed);
+        self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, top: 0, cc: false, modified: false, a_name, b_name });
         self.setup_buffer(BufferMode::Resolve, Vec::new());
         self.set_msg("Type ? for help (n/p move, a/b/+ choose, q to finish)");
         Ok(true)
+    }
+
+    /// The names of the two sides of the conflicts, from the operation in
+    /// progress (the conflict marker labels are the fallback):
+    /// rebase: A = the branch rebased onto, B = the branch being rebased;
+    /// merge: A = the current branch, B = the merged branch;
+    /// cherry-pick / revert: A = the current branch, B = the commit.
+    fn resolve_side_names(&self, file: &ResolveFile) -> (String, String) {
+        use crate::ui::view::{file_line, shortname};
+        let g = &self.git;
+        let abbrev = |rev: &str| -> String {
+            g.git_string(&["log", "-1", "--no-walk", "--format=%h %s", rev, "--"])
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| g.rev_short(rev))
+        };
+        let head_branch = || g.current_branch().unwrap_or_else(|| "HEAD".to_string());
+        let marker = |upper: bool| {
+            file.regions
+                .first()
+                .map(|r| if upper { r.upper_label.clone() } else { r.lower_label.clone() })
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| (if upper { "A" } else { "B" }).to_string())
+        };
+        if g.rebase_in_progress() {
+            let dir = if g.gitdir.join("rebase-merge").is_dir() { "rebase-merge" } else { "rebase-apply" };
+            let onto = file_line(g, &format!("{dir}/onto")).map(|o| shortname(g, &o)).unwrap_or_else(|| marker(true));
+            let branch = file_line(g, &format!("{dir}/head-name"))
+                .map(|h| h.strip_prefix("refs/heads/").unwrap_or(&h).to_string())
+                .unwrap_or_else(|| "HEAD".to_string());
+            let stop = file_line(g, "rebase-merge/stopped-sha")
+                .or_else(|| file_line(g, "rebase-apply/original-commit"))
+                .or_else(|| file_line(g, "REBASE_HEAD"));
+            let b = match stop {
+                Some(s) => format!("{branch} ({})", abbrev(&s)),
+                None => branch,
+            };
+            return (onto, b);
+        }
+        if g.merge_in_progress() {
+            let b = file_line(g, "MERGE_HEAD").map(|h| shortname(g, &h)).unwrap_or_else(|| marker(false));
+            return (head_branch(), b);
+        }
+        if g.cherry_in_progress() {
+            let b = file_line(g, "CHERRY_PICK_HEAD").map(|h| abbrev(&h)).unwrap_or_else(|| marker(false));
+            return (head_branch(), b);
+        }
+        if g.revert_in_progress() {
+            let b = file_line(g, "REVERT_HEAD").map(|h| format!("revert {}", abbrev(&h))).unwrap_or_else(|| marker(false));
+            return (head_branch(), b);
+        }
+        (marker(true), marker(false))
+    }
+
+    /// The names of the two sides (tests).
+    pub fn resolve_side_names_shown(&self) -> Option<(String, String)> {
+        self.resolve.as_ref().map(|e| (e.a_name.clone(), e.b_name.clone()))
     }
 
     /// The decisions of the conflicts being edited (tests).
@@ -254,7 +320,8 @@ impl App {
     /// Number of body rows available for scrolling a page.
     fn view_body_h(&self) -> isize {
         let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
-        (h as isize).saturating_sub(3).max(1)
+        let body = (h as usize).saturating_sub(3).max(1);
+        Self::resolve_split(body).0.max(1) as isize
     }
 
     /// Free vertical scroll by DELTA display rows (down when DOWN).
@@ -298,7 +365,29 @@ impl App {
         ed.file.regions[ed.cursor].choice = choice;
         ed.modified = true;
         let n = ed.cursor + 1;
-        self.set_msg(&format!("Difference {n}: {}", choice.label()));
+        let text = Self::choice_text(ed, choice);
+        self.set_msg(&format!("Difference {n}: {text}"));
+    }
+
+    /// How a decision is shown, with the names of the sides.
+    fn choice_text(ed: &ResolveEdit, choice: Choice) -> String {
+        match choice {
+            Choice::A => format!("A: {}", ed.a_name),
+            Choice::B => format!("B: {}", ed.b_name),
+            Choice::Both => format!("A+B: {} + {}", ed.a_name, ed.b_name),
+            Choice::Base => "base".into(),
+            Choice::Undecided => "undecided".into(),
+        }
+    }
+
+    /// The heights of the A/B window and of the merge-result window (C)
+    /// for a body of BODY rows (one row is the C title).
+    fn resolve_split(body: usize) -> (usize, usize) {
+        if body < 8 {
+            return (body, 0);
+        }
+        let top = (body - 1) * 3 / 5;
+        (top, body - 1 - top)
     }
 
     /// The rows of the resolution view: the WHOLE file is shown.  Ordinary
@@ -348,18 +437,18 @@ impl App {
                     let mut head = Row::new(head_base);
                     head.push(format!("{gutter} "), on(Face::Gutter));
                     head.push(format!("Conflict {} ", i + 1), on(Face::Label));
-                    let decided = ed.file.regions[i].choice != Choice::Undecided;
+                    let choice = ed.file.regions[i].choice;
                     head.push(
-                        format!("[{}]", ed.file.regions[i].choice.label()),
-                        on(if decided { Face::Keyword } else { Face::Dim }),
+                        format!("[{}]", Self::choice_text(ed, choice)),
+                        on(if choice != Choice::Undecided { Face::Keyword } else { Face::Dim }),
                     );
                     rows.push(head);
                 }
                 ViewLine::Columns => {
                     let mut titles = Row::new(t.style(Face::SectionHeading));
-                    titles.push(format!("  {}", fit("A (ours/upper)")), t.style(Face::SectionHeading));
+                    titles.push(format!("  {}", fit(&format!("A: {}", ed.a_name))), t.style(Face::SectionHeading));
                     titles.push(" │ ", t.style(Face::Gutter));
-                    titles.push(fit("B (theirs/lower)"), t.style(Face::SectionHeading));
+                    titles.push(fit(&format!("B: {}", ed.b_name)), t.style(Face::SectionHeading));
                     rows.push(titles);
                 }
                 ViewLine::Pair(_, a, b, changed) => {
@@ -372,9 +461,51 @@ impl App {
                 ViewLine::Blank => rows.push(Row::text(String::new(), Style::default())),
             }
         }
+        let (top_h, c_h) = Self::resolve_split(body);
         let total = rows.len();
         let top = ed.top.min(total.saturating_sub(1));
-        let visible: Vec<Row> = rows.into_iter().skip(top).take(body).collect();
+        let mut visible: Vec<Row> = rows.into_iter().skip(top).take(top_h).collect();
+        if c_h > 0 {
+            while visible.len() < top_h {
+                visible.push(Row::text(String::new(), Style::default()));
+            }
+            // the C window: the merge result as it would be saved
+            let mut title = Row::new(t.style(Face::HunkHeading));
+            title.push(format!("  C: merge result — {} ", ed.file.path), t.style(Face::HunkHeading));
+            let used = crate::ui::width::str_width(&format!("  C: merge result — {} ", ed.file.path));
+            title.push(t.glyphs.rule.to_string().repeat(w.saturating_sub(used).max(1)), t.style(Face::Gutter));
+            visible.push(title);
+            let result = ed.file.result_lines();
+            // keep the current difference near the top of the C window
+            let first = result.iter().position(|(_, c, _)| *c == Some(ed.cursor)).unwrap_or(0);
+            let c_top = first.saturating_sub(2).min(result.len().saturating_sub(c_h));
+            let cw = w.saturating_sub(2);
+            for (text, conflict, empty) in result.into_iter().skip(c_top).take(c_h) {
+                let current = conflict == Some(ed.cursor);
+                let base = if current { t.style(Face::CursorLine) } else { Style::default() };
+                let undecided = conflict.is_some_and(|i| ed.file.regions[i].choice == Choice::Undecided);
+                let face = if empty {
+                    Face::Dim
+                } else if undecided {
+                    Face::Conflict
+                } else if conflict.is_some() {
+                    Face::Keyword
+                } else {
+                    Face::Context
+                };
+                let shown = if empty { "(empty)".to_string() } else { text };
+                let shown = if crate::ui::width::str_width(&shown) > cw {
+                    format!("{}…", crate::ui::width::truncate(&shown, cw.saturating_sub(1)))
+                } else {
+                    shown
+                };
+                let mut row = Row::new(base);
+                let gutter = if conflict.is_some() { t.glyphs.region } else { ' ' };
+                row.push(format!("{gutter} "), t.style(Face::Gutter).over(base));
+                row.push(shown, t.style(face).over(base));
+                visible.push(row);
+            }
+        }
         let n = ed.file.regions.len();
         (visible, format!("{}/{}", (ed.cursor + 1).min(n), n))
     }

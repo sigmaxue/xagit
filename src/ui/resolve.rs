@@ -41,6 +41,10 @@ pub struct Region {
     pub base: Option<Vec<u8>>,
     pub lower: Vec<u8>,
     pub choice: Choice,
+    /// the labels after the <<<<<<< and >>>>>>> markers ("HEAD",
+    /// "abc1234 (subject)", a branch name …)
+    pub upper_label: String,
+    pub lower_label: String,
 }
 
 /// One side-by-side row of a conflict: the A line, the B line, and whether
@@ -194,6 +198,10 @@ impl ResolveFile {
             let upper = text[after(i)..b[base_sep]].to_vec();
             let base_bytes = base.map(|bl| text[after(bl)..b[sep_line]].to_vec());
             let lower = text[after(sep_line)..b[end_line]].to_vec();
+            let label = |idx: usize, prefix: &[u8]| {
+                let l = line(text, &b, idx);
+                String::from_utf8_lossy(&l[prefix.len()..]).trim().to_string()
+            };
             regions.push(Region {
                 start: b[i],
                 end: after(end_line),
@@ -201,6 +209,8 @@ impl ResolveFile {
                 base: base_bytes,
                 lower,
                 choice: Choice::Undecided,
+                upper_label: label(i, BEGIN),
+                lower_label: label(end_line, END),
             });
             i = end_line + 1;
         }
@@ -239,6 +249,48 @@ impl ResolveFile {
         }
         for l in split_lines(&self.original[at..]) {
             out.push(ViewLine::Context(lossy(l)));
+        }
+        out
+    }
+
+    /// The lines of the merge result (Ediff's buffer C) with, for each, the
+    /// conflict it comes from (None for the text around the conflicts).  A
+    /// conflict whose result is empty still gets an (empty) entry so that
+    /// its position can be shown.
+    pub fn result_lines(&self) -> Vec<(String, Option<usize>, bool)> {
+        let mut out: Vec<(String, Option<usize>, bool)> = Vec::new();
+        let mut at = 0;
+        for (idx, r) in self.regions.iter().enumerate() {
+            for l in split_lines(&self.original[at..r.start]) {
+                out.push((lossy(l), None, false));
+            }
+            let (bytes, empty_mark): (Vec<u8>, bool) = match r.choice {
+                Choice::A => (r.upper.clone(), r.upper.is_empty()),
+                Choice::B => (r.lower.clone(), r.lower.is_empty()),
+                Choice::Both => {
+                    let mut v = r.upper.clone();
+                    v.extend_from_slice(&r.lower);
+                    let e = v.is_empty();
+                    (v, e)
+                }
+                Choice::Base => {
+                    let v = r.base.clone().unwrap_or_default();
+                    let e = v.is_empty();
+                    (v, e)
+                }
+                Choice::Undecided => (self.original[r.start..r.end].to_vec(), false),
+            };
+            if empty_mark {
+                out.push((String::new(), Some(idx), true));
+            } else {
+                for l in split_lines(&bytes) {
+                    out.push((lossy(l), Some(idx), false));
+                }
+            }
+            at = r.end;
+        }
+        for l in split_lines(&self.original[at..]) {
+            out.push((lossy(l), None, false));
         }
         out
     }

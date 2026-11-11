@@ -67,6 +67,15 @@ pub enum Face {
     Graph,
     /// the "pick"/"edit" … word of a sequence line, cherry marks
     Keyword,
+    /// magit-sequence-pick / -stop / -part / -head / -drop / -done / -onto:
+    /// the type words of the rebase / sequencer / am sections
+    SequencePick,
+    SequenceStop,
+    SequencePart,
+    SequenceHead,
+    SequenceDrop,
+    SequenceDone,
+    SequenceOnto,
     /// magit-diff-file-heading
     FileHeading,
     FileModified,
@@ -473,6 +482,14 @@ impl Theme {
             Face::Ahead => Style::fg(p.accent),
             Face::Graph => Style::fg(p.dim),
             Face::Keyword => Style::fg(p.keyword),
+            // magit-sequence-*: pick inherits default, stop is green, part
+            // goldenrod, head sky blue, drop indian red, done/onto magit-hash
+            Face::SequencePick => Style::default(),
+            Face::SequenceStop => Style::fg(p.local),
+            Face::SequencePart => Style::fg(p.tag),
+            Face::SequenceHead => Style::fg(p.remote),
+            Face::SequenceDrop => Style::fg(p.removed),
+            Face::SequenceDone | Face::SequenceOnto => Style::fg(p.hash),
             Face::FileHeading => Style { bold: true, ..Style::default() },
             Face::FileModified => Style::fg(p.modified),
             Face::FileNew => Style::fg(p.added),
@@ -594,6 +611,9 @@ fn mono(face: Face) -> Style {
         // keep diff additions / removals distinguishable on a monochrome
         // terminal (the colored styles use green / red backgrounds instead)
         Face::Added => Style { underline: true, ..bold },
+        Face::SequenceHead | Face::SequenceStop => bold,
+        Face::SequencePart => Style { underline: true, ..Style::default() },
+        Face::SequenceDrop => Style { italic: true, ..Style::default() },
         Face::Removed => Style { italic: true, ..Style::default() },
         // Exhaustive on purpose: adding a Face must force a decision about
         // how it looks on a mono terminal, instead of silently becoming
@@ -612,6 +632,9 @@ fn mono(face: Face) -> Style {
         | Face::Ahead
         | Face::Graph
         | Face::Keyword
+        | Face::SequencePick
+        | Face::SequenceDone
+        | Face::SequenceOnto
         | Face::FileModified
         | Face::FileNew
         | Face::FileDeleted

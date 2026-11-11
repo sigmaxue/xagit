@@ -708,7 +708,7 @@ fn insert_recent(b: &mut Builder, g: &Git, args: &[String]) {
 
 // ---------------------------------------------------------------- sequences
 
-fn file_line(g: &Git, rel: &str) -> Option<String> {
+pub(crate) fn file_line(g: &Git, rel: &str) -> Option<String> {
     let s = std::fs::read_to_string(g.gitdir.join(rel)).ok()?;
     s.lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
 }
@@ -720,7 +720,7 @@ fn file_lines(g: &Git, rel: &str) -> Vec<String> {
 }
 
 /// magit-get-shortname
-fn shortname(g: &Git, rev: &str) -> String {
+pub(crate) fn shortname(g: &Git, rev: &str) -> String {
     for refs in ["refs/tags/*", "refs/heads/*", "refs/remotes/*"] {
         if let Ok(n) = g.git_string(&["name-rev", "--name-only", "--no-undefined", &format!("--refs={refs}"), rev]) {
             let n = n.trim();
@@ -733,13 +733,56 @@ fn shortname(g: &Git, rev: &str) -> String {
     g.rev_short(rev)
 }
 
-fn summary_line(g: &Git, kind: &str, rev: &str) -> (String, String) {
+/// A line of a sequence section: the commit (empty for a step without
+/// one), the text, and the face of its type word (magit-sequence-*).
+type SeqLine = (String, String, Face);
+
+fn summary_line(g: &Git, kind: &str, rev: &str, face: Face) -> SeqLine {
     let full = g.rev_parse(rev).unwrap_or_else(|_| rev.to_string());
     let text = match rev_summary(g, rev) {
         Some((h, s)) => format!("{kind} {h} {s}"),
         None => format!("{kind} {rev}"),
     };
-    (full, text)
+    (full, text, face)
+}
+
+/// magit-patch-id: `git diff-tree -u REV | git patch-id`.
+fn patch_id(g: &Git, rev: &str) -> Option<String> {
+    let diff = g.git_output(&["diff-tree", "-u", rev]).ok()?;
+    let out = g.git_with_input(&["patch-id"], &diff.stdout).ok()?;
+    out.split_whitespace().next().map(str::to_string)
+}
+
+/// magit-rev-equal: no differences between the commits A and B.
+fn rev_equal(g: &Git, a: &str, b: &str) -> bool {
+    g.git_ok(&["diff", "--quiet", a, b])
+}
+
+/// magit-commit-tree "oO" of the index on HEAD, and magit-commit-worktree
+/// "oO" (the worktree's tracked changes on HEAD, via a temporary index).
+fn index_and_worktree_commits(g: &Git) -> (Option<String>, Option<String>) {
+    let commit = |tree: &str| -> Option<String> {
+        g.git_string(&["commit-tree", "--no-gpg-sign", "-m", "oO", "-p", "HEAD", tree])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let staged = g.git_string(&["write-tree"]).ok().and_then(|t| commit(t.trim()));
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let file = g.gitdir.join(format!("index.xagit-seq.{}{nanos}", std::process::id()));
+    let path = file.to_string_lossy().into_owned();
+    let unstaged = (|| {
+        if !g.git_ok(&["read-tree", "--reset", "-i", "HEAD", &format!("--index-output={path}")]) {
+            return None;
+        }
+        let env = [("GIT_INDEX_FILE", path.as_str())];
+        g.git_output_env(&env, &["add", "-u", "."]).ok()?;
+        let out = g.git_output_env(&env, &["write-tree"]).ok()?;
+        let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        commit(&tree)
+    })();
+    let _ = std::fs::remove_file(&file);
+    (staged, unstaged)
 }
 
 /// magit-insert-merge-log: "Merging <heads> (N)" with the merged commits.
@@ -761,7 +804,7 @@ fn insert_merge_log(b: &mut Builder, g: &Git) {
 }
 
 /// magit-sequence-insert-sequence: the stopped commit, done commits and onto.
-fn sequence_tail(g: &Git, stop: Option<String>, onto: Option<String>) -> Vec<(String, String)> {
+fn sequence_tail(g: &Git, stop: Option<String>, onto: Option<String>, orig: Option<String>) -> Vec<SeqLine> {
     let head = g.rev_parse("HEAD").unwrap_or_default();
     let onto = onto.and_then(|o| g.rev_parse(&o).ok()).unwrap_or_else(|| head.clone());
     let done: Vec<(String, String, String)> = g
@@ -774,29 +817,61 @@ fn sequence_tail(g: &Git, stop: Option<String>, onto: Option<String>) -> Vec<(St
         })
         .collect();
     let mut out = Vec::new();
-    let stop = stop.and_then(|s| g.rev_parse(&s).ok());
-    if let Some(s) = &stop {
-        if !done.iter().any(|d| &d.0 == s) {
-            let unmerged = !g.git_string(&["ls-files", "--unmerged"]).unwrap_or_default().trim().is_empty();
-            let kind = if unmerged {
-                "join"
-            } else if g.anything_modified() {
-                "work"
+    let mut stop = stop.and_then(|s| g.rev_parse(&s).ok());
+    if let Some(s) = stop.clone() {
+        if !done.iter().any(|d| d.0 == s) {
+            let id = patch_id(g, &s);
+            // the stopped commit was rewritten as one of the done commits
+            if let Some(m) = id.as_ref().and_then(|id| done.iter().find(|d| patch_id(g, &d.0).as_ref() == Some(id))) {
+                stop = Some(m.0.clone());
             } else {
-                "gone"
-            };
-            out.push(summary_line(g, kind, s));
+                let (kind, face) = if done.iter().any(|d| rev_equal(g, &d.0, &s)) {
+                    // the commit's testament has been executed
+                    ("void", Face::SequenceDrop)
+                } else if !g.git_string(&["ls-files", "--unmerged"]).unwrap_or_default().trim().is_empty() {
+                    // its fate is still undecided (conflicts)
+                    ("join", Face::SequencePart)
+                } else if g.anything_modified() {
+                    let (staged, unstaged) = index_and_worktree_commits(g);
+                    let same_tree = |c: &Option<String>| c.as_ref().is_some_and(|c| rev_equal(g, c, &s));
+                    let same_patch = |c: &Option<String>| c.as_ref().is_some_and(|c| id.is_some() && patch_id(g, c) == id);
+                    let kind = if same_tree(&staged) || same_tree(&unstaged) {
+                        // the same tree could be reached just by committing
+                        "goal"
+                    } else if same_patch(&staged) || same_patch(&unstaged) {
+                        // the changes are still there, untainted
+                        "same"
+                    } else {
+                        "work"
+                    };
+                    (kind, Face::SequencePart)
+                } else {
+                    ("gone", Face::SequenceDrop)
+                };
+                out.push(summary_line(g, kind, &s, face));
+                stop = None;
+            }
         }
     }
     for (rev, abbrev, msg) in &done {
-        let kind = if Some(rev) == stop.as_ref() {
-            if *rev == head { "stop" } else { "like" }
+        let (kind, face) = if Some(rev) == stop.as_ref() {
+            // "stop": nothing done yet; "like": there are new commits
+            let unchanged = *rev == head
+                && orig.as_ref().is_some_and(|o| {
+                    let a = patch_id(g, rev);
+                    a.is_some() && a == patch_id(g, o)
+                });
+            let kind = if unchanged || (orig.is_none() && *rev == head) { "stop" } else { "like" };
+            (kind, if *rev == head { Face::SequenceHead } else { Face::SequenceStop })
+        } else if *rev == head {
+            ("done", Face::SequenceHead)
         } else {
-            "done"
+            ("done", Face::SequenceDone)
         };
-        out.push((rev.clone(), format!("{kind} {abbrev} {msg}")));
+        out.push((rev.clone(), format!("{kind} {abbrev} {msg}"), face));
     }
-    out.push(summary_line(g, "onto", &onto));
+    let face = if onto == head { Face::SequenceHead } else { Face::SequenceOnto };
+    out.push(summary_line(g, "onto", &onto, face));
     out
 }
 
@@ -811,7 +886,7 @@ fn insert_rebase_sequence(b: &mut Builder, g: &Git) {
     let name = name.strip_prefix("refs/heads/").unwrap_or(&name).to_string();
     let onto_rev = file_line(g, &format!("{dir}/onto"));
     let onto_name = onto_rev.as_deref().map(|o| shortname(g, o)).unwrap_or_default();
-    let mut lines: Vec<(String, String)> = Vec::new();
+    let mut lines: Vec<SeqLine> = Vec::new();
     if mergep {
         let comment = config(g, "core.commentChar").unwrap_or_else(|| "#".into());
         let todo: Vec<String> = file_lines(g, "rebase-merge/git-rebase-todo")
@@ -831,14 +906,18 @@ fn insert_rebase_sequence(b: &mut Builder, g: &Git) {
                 let full = g.rev_parse(target).unwrap_or_else(|_| target.to_string());
                 let abbrev = g.rev_short(target);
                 let msg = rest.strip_prefix("# ").unwrap_or(rest);
-                lines.push((full, format!("{action} {abbrev} {msg}")));
+                lines.push((full, format!("{action} {abbrev} {msg}"), Face::SequencePick));
             } else {
                 let t = [target, rest].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
-                lines.push((String::new(), if t.is_empty() { action.to_string() } else { format!("{action} {t}") }));
+                lines.push((String::new(), if t.is_empty() { action.to_string() } else { format!("{action} {t}") }, Face::SequencePick));
             }
         }
         let stop = file_line(g, "rebase-merge/stopped-sha");
-        lines.extend(sequence_tail(g, stop, onto_rev));
+        // the original of the last done step (rebase-merge/done)
+        let orig = file_lines(g, "rebase-merge/done")
+            .last()
+            .and_then(|l| l.split_whitespace().nth(1).map(str::to_string));
+        lines.extend(sequence_tail(g, stop, onto_rev, orig));
     } else {
         let rewritten: Vec<String> = file_lines(g, "rebase-apply/rewritten")
             .iter()
@@ -854,22 +933,27 @@ fn insert_rebase_sequence(b: &mut Builder, g: &Git) {
             if hash.is_empty() || rewritten.contains(&hash) || Some(&hash) == stop.as_ref() {
                 continue;
             }
-            lines.push(summary_line(g, "pick", &hash));
+            lines.push(summary_line(g, "pick", &hash, Face::SequencePick));
         }
-        lines.extend(sequence_tail(g, stop, onto_rev));
+        lines.extend(sequence_tail(g, stop, onto_rev, None));
     }
     sequence_section(b, "rebase-sequence", format!("Rebasing {name} onto {onto_name}"), &lines);
 }
 
-fn sequence_section(b: &mut Builder, ident: &str, title: String, lines: &[(String, String)]) {
+fn sequence_section(b: &mut Builder, ident: &str, title: String, lines: &[SeqLine]) {
     if b.heading(title, LineKind::SectionHeader { section: ident.into(), n: lines.len() }, ident, 0, !lines.is_empty()) {
-        for (i, (hash, text)) in lines.iter().enumerate() {
+        for (i, (hash, text, face)) in lines.iter().enumerate() {
             let kind = if hash.is_empty() {
                 LineKind::Info
             } else {
                 LineKind::Commit { section: ident.into(), hash: hash.clone() }
             };
             b.line(text.clone(), kind, &format!("{ident}/{i}"), true, 1);
+            // the type word in its magit-sequence-* face
+            let word = text.split(' ').next().unwrap_or("").len();
+            if word > 0 {
+                b.faces(vec![(0, word, *face)]);
+            }
         }
     }
     b.blank();
@@ -907,9 +991,9 @@ fn insert_am_sequence(b: &mut Builder, g: &Git) {
         let Some(p) = it.next() else { break };
         let content = std::fs::read_to_string(p).unwrap_or_default();
         let hash = content.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
-        let kind = if i == cur { "stop" } else { "pick" };
+        let (kind, face) = if i == cur { ("stop", Face::SequenceStop) } else { ("pick", Face::SequencePick) };
         if !hash.is_empty() && rev_exists(g, hash) {
-            lines.push(summary_line(g, kind, hash));
+            lines.push(summary_line(g, kind, hash, face));
         } else {
             let title = content
                 .lines()
@@ -917,11 +1001,11 @@ fn insert_am_sequence(b: &mut Builder, g: &Git) {
                 .or_else(|| content.lines().next())
                 .unwrap_or("");
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            lines.push((String::new(), format!("{kind} {name} {title}")));
+            lines.push((String::new(), format!("{kind} {name} {title}"), face));
         }
         i -= 1;
     }
-    lines.extend(sequence_tail(g, None, Some("ORIG_HEAD".into())));
+    lines.extend(sequence_tail(g, None, Some("ORIG_HEAD".into()), None));
     sequence_section(b, "rebase-sequence", "Applying patches".into(), &lines);
 }
 
@@ -939,12 +1023,12 @@ fn insert_sequencer_sequence(b: &mut Builder, g: &Git) {
         if matches!(cmd, "pick" | "revert") && !hash.is_empty() {
             let full = g.rev_parse(hash).unwrap_or_else(|_| hash.to_string());
             let msg = msg.strip_prefix("# ").unwrap_or(msg);
-            lines.push((full, format!("{cmd} {hash} {msg}")));
+            lines.push((full, format!("{cmd} {hash} {msg}"), Face::SequencePick));
         }
     }
     let stop = file_line(g, if picking { "CHERRY_PICK_HEAD" } else { "REVERT_HEAD" });
     let onto = file_line(g, "sequencer/head");
-    lines.extend(sequence_tail(g, stop, onto));
+    lines.extend(sequence_tail(g, stop, onto, None));
     let title = if picking { "Cherry Picking" } else { "Reverting" };
     sequence_section(b, "sequence", title.into(), &lines);
 }
