@@ -247,6 +247,9 @@ impl App {
             Some(p) => self.visible_index_near(p),
             None => fallback.min(self.lines.len().saturating_sub(1)),
         };
+        if std::mem::take(&mut self.initial_section) && self.mode == BufferMode::Status {
+            self.goto_initial_section();
+        }
         // `search_query` intentionally survives: matches are recomputed
         // from the new lines on the next C-s and the hint bar stays in
         // search mode. It is cleared when the buffer is left instead.

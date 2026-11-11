@@ -249,11 +249,13 @@ src/
 状态、refs、log 缓冲区每次刷新都会重复问同一批只读问题（HEAD 分支名、上游、配置值、提交标题、ahead/behind、ref 列表等）。这些查询由 `src/git/query.rs` 在进程内用 libgit2 回答，不必为每条启动一个 git 子进程；其余命令仍交给 git CLI。
 
 - 刷新开始时，构建缓冲区的线程用 `query::Scope` 打开一次仓库（thread-local，libgit2 的 `Repository` 不是 `Sync`）。作用域只覆盖这一次刷新，嵌套作用域复用外层的仓库句柄。
-- 只拦截参数形状完全匹配白名单的只读查询：`symbolic-ref --short HEAD`、`rev-parse`（`--verify`/`--short`/`--abbrev-ref`/`--quiet`/`-q`）、`config` 及 `config --get-all`/`--type=bool`、`rev-list --count` 与 `--left-right --count`、`log -1 --no-walk --format=...`（固定的几种格式）、`describe --long --tags`、`merge-base --is-ancestor`、`for-each-ref`（仅 `%(refname)`/`%(refname:short)`，且不带 `--contains`/`--points-at`/`--sort`/glob 等）、`remote`、`tag --list`、`stash list --format=%gd|%gs`。
+- 只拦截参数形状完全匹配白名单的只读查询：`symbolic-ref --short [-q] HEAD`、`rev-parse`（`--verify`/`--short`/`--abbrev-ref`/`--quiet`/`-q`）、`config` 及 `config --get-all`/`--type=bool`、`rev-list --count` 与 `--left-right --count`、`log -1 --no-walk --format=...`（固定的几种格式）、`describe --long --tags`、`merge-base --is-ancestor`、`for-each-ref`（仅 `%(refname)`/`%(refname:short)`，且不带 `--contains`/`--points-at`/`--sort`/glob 等）、`remote`、`tag --list`、`stash list --format=%gd|%gs`。
 - 其余情况一律回退 CLI：未知命令或参数、`diff`/`log --graph`/`blame`/`show` 等文本生成、带环境变量的调用（如 `GIT_INDEX_FILE`）、写操作、网络与凭据相关操作、编辑器和 hook，以及 libgit2 无法回答的查询（裸仓库、仓库打不开、解析不了的 rev 等）。查询失败时保留 CLI 的退出码语义，例如 `merge-base --is-ancestor` 返回非 0、`rev-parse --verify` 找不到对象时报失败。
+- 能确定的“否定”答案也在进程内给出，不再为它起 CLI：分支存在但没有 `branch.<name>.merge` 时（或不带分支前缀且 HEAD 已分离）`rev-parse --abbrev-ref <b>@{u}` 直接失败；仓库没有任何 tag 时 `describe --long --tags` 和 `describe --contains <rev>` 直接失败。分支不存在、HEAD 未出生、有 tag 但不可达等不确定的情况仍交给 CLI。
 - 已对齐的语义细节：`merge-base --is-ancestor A A` 成功，而 libgit2 不把提交视为自己的后代；`@{u}`/`@{upstream}` 不带分支前缀时取当前分支的上游；`%at` 用作者时间、`%ct` 用提交者时间；`for-each-ref` 按完整 refname 排序（即便输出短名）。`src/git/query.rs` 的单测逐项与真实 git CLI 比对输出和退出码。
 - `git status --porcelain` 仍由 CLI 生成：XY 状态码、重命名/复制的源路径、unmerged 冲突分类与 `## ` 分支头都由 git 负责，用 libgit2 复刻容易与 Magit 的状态显示产生偏差。`Status::load()` 只读一次 `status --porcelain=v1 -z --branch`，同一个输出同时用于分支头与文件章节。
 - 查询是刷新开始时的仓库快照，作用域内的只读查询都来自这一次快照；作用域外的调用仍读实时状态。实测在 ffmpeg 与本项目仓库中，启动时的 git 子进程数由 66–70 降到 16–18，状态页 `g` 由 33–35 降到 7–8（其中只剩一条 `status --porcelain`）。
+- 启动时先进入终端画出空界面，状态页在后台线程构建一次（读取 options 和 transient 保存值引起的刷新合并到这一次），构建完成后光标放到第一个 section（magit-status-initial-section）。在 2000 个已修改文件、无上游无 tag 的仓库中实测：首屏由约 820ms 降到约 20ms，状态页出现由约 830ms 降到约 350ms，启动时的 git 子进程由 22 个降到 5 个（`rev-parse --show-toplevel`、`status`、两次 `diff`、`log`）。
 
 ### 测试
 

@@ -139,6 +139,39 @@ fn oid(repo: &Repository, rev: &str) -> Option<Oid> {
     Some(obj.peel_to_commit().ok()?.id())
 }
 
+/// Whether `branch@{u}` certainly has no upstream, so git would fail: the
+/// branch exists and has no `branch.<name>.merge`, or (without a branch
+/// prefix) HEAD is detached. Anything less certain is the CLI's to judge.
+fn no_upstream(repo: &Repository, rev: &str) -> bool {
+    let Some(b) = rev.strip_suffix("@{u}").or_else(|| rev.strip_suffix("@{upstream}")) else {
+        return false;
+    };
+    let branch = if b.is_empty() {
+        let Ok(head) = repo.head() else { return false }; // unborn: the CLI's case
+        if !head.is_branch() {
+            return true;
+        }
+        match head.shorthand() {
+            Ok(s) => s.to_string(),
+            Err(_) => return false,
+        }
+    } else {
+        b.to_string()
+    };
+    if repo.find_reference(&format!("refs/heads/{branch}")).is_err() {
+        return false;
+    }
+    let Ok(cfg) = repo.config() else { return false };
+    let missing = matches!(cfg.get_entry(&format!("branch.{branch}.merge")), Err(e) if e.code() == git2::ErrorCode::NotFound);
+    missing
+}
+
+/// Whether the repository has no tag at all, so `git describe --tags` and
+/// `git describe --contains` cannot name anything.
+fn no_tags(repo: &Repository) -> bool {
+    repo.references_glob("refs/tags/*").is_ok_and(|mut refs| refs.next().is_none())
+}
+
 /// The short name of `branch@{upstream}`, as `rev-parse --abbrev-ref`.
 fn upstream(repo: &Repository, rev: &str) -> Option<String> {
     Some(short_ref(&upstream_ref(repo, rev)?).to_string())
@@ -299,7 +332,10 @@ fn stashes(repo: &Repository) -> Option<Vec<String>> {
 /// Answer a `git_string` / `git_ok` / `git_output` query.
 fn string(repo: &Repository, args: &[&str]) -> Answer {
     match args {
-        ["symbolic-ref", "--short", "HEAD"] => {
+        // -q only silences the message of a detached HEAD
+        ["symbolic-ref", "--short", "HEAD"]
+        | ["symbolic-ref", "--short", "-q", "HEAD"]
+        | ["symbolic-ref", "-q", "--short", "HEAD"] => {
             let Ok(head) = repo.find_reference("HEAD") else { return Answer::Fallback };
             match head.symbolic_target() {
                 Ok(Some(t)) => Answer::some(t.strip_prefix("refs/heads/").map(str::to_string)),
@@ -310,6 +346,9 @@ fn string(repo: &Repository, args: &[&str]) -> Answer {
         ["rev-parse", kind, rev] if matches!(*kind, "--verify" | "--short" | "--abbrev-ref") => {
             match rev_parse(repo, rev, kind) {
                 Some(s) => Answer::Ok(s),
+                // the status buffer asks this on every refresh; most local
+                // branches have no upstream
+                None if kind == &"--abbrev-ref" && no_upstream(repo, rev) => Answer::Failed,
                 // an unknown rev expression is the CLI's job to resolve
                 None if kind == &"--abbrev-ref" || rev.contains('@') || rev.contains("..") => Answer::Fallback,
                 None => Answer::Failed,
@@ -340,8 +379,11 @@ fn string(repo: &Repository, args: &[&str]) -> Answer {
         }
         ["describe", "--long", "--tags"] => match describe(repo) {
             Some(s) => Answer::Ok(s),
+            None if no_tags(repo) => Answer::Failed,
             None => Answer::Fallback,
         },
+        // name-rev's walk stays with the CLI; only "no tag at all" is known
+        ["describe", "--contains", _] if no_tags(repo) => Answer::Failed,
         ["merge-base", "--is-ancestor", a, b] => {
             let (Some(a), Some(b)) = (oid(repo, a), oid(repo, b)) else { return Answer::Fallback };
             // git merge-base --is-ancestor A A succeeds; libgit2's
@@ -480,6 +522,7 @@ mod tests {
         let _scope = enter(f.path());
         for args in [
             vec!["symbolic-ref", "--short", "HEAD"],
+            vec!["symbolic-ref", "--short", "-q", "HEAD"],
             vec!["rev-parse", "--verify", "HEAD"],
             vec!["rev-parse", "--short", "HEAD"],
             vec!["rev-parse", "--verify", "HEAD^{commit}"],
@@ -522,6 +565,44 @@ mod tests {
         must(f.path(), &["checkout", "-q", "--detach", "HEAD"]);
         let _detached = enter(f.path());
         same_as_cli(f.path(), &["symbolic-ref", "--short", "HEAD"]);
+        same_as_cli(f.path(), &["symbolic-ref", "--short", "-q", "HEAD"]);
+    }
+
+    /// A branch without upstream and a repository without tags: the
+    /// status buffer asks these on every refresh, and the answer "no" must
+    /// not need the CLI.
+    #[test]
+    fn missing_upstream_and_tags_fail_in_process() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path().to_path_buf();
+        must(&dir, &["init", "-q"]);
+        must(&dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        must(&dir, &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "one"]);
+        let queries = [
+            vec!["rev-parse", "--abbrev-ref", "@{u}"],
+            vec!["rev-parse", "--abbrev-ref", "main@{u}"],
+            vec!["rev-parse", "--abbrev-ref", "main@{upstream}"],
+            vec!["describe", "--long", "--tags"],
+            vec!["describe", "--contains", "HEAD"],
+        ];
+        let scope = enter(&dir);
+        for args in &queries {
+            same_as_cli(&dir, args);
+        }
+        // a branch that does not exist stays with the CLI
+        assert!(answer(&["rev-parse", "--abbrev-ref", "nope@{u}"]).is_none());
+        drop(scope);
+
+        must(&dir, &["checkout", "-q", "--detach", "HEAD"]);
+        let scope = enter(&dir);
+        same_as_cli(&dir, &["rev-parse", "--abbrev-ref", "@{u}"]);
+        drop(scope);
+
+        // with a tag, describe --contains is the CLI's again
+        must(&dir, &["tag", "v1"]);
+        let _scope = enter(&dir);
+        assert!(answer(&["describe", "--contains", "HEAD"]).is_none());
+        same_as_cli(&dir, &["describe", "--long", "--tags"]);
     }
 
     #[test]

@@ -187,6 +187,9 @@ pub struct App {
     /// whether the terminal may no longer show `screen` (something else
     /// wrote to it), so the next frame must be painted in full
     repaint_all: bool,
+    /// put point on magit-status-initial-section when the next refresh
+    /// lands (the first one, which may finish on a worker)
+    initial_section: bool,
     /// the faces' colors for this terminal (detected when run in one)
     theme: Theme,
     /// the history of each infix (its values read, newest first)
@@ -665,8 +668,16 @@ fn search_parts<'a>(text: &'a str, query: &[u8]) -> Vec<(&'a str, bool)> {
 
 impl App {
     pub fn new(git: Git) -> App {
+        let mut app = App::unbuilt(git);
+        app.refresh();
+        app
+    }
+
+    /// An App whose status buffer is not built yet: `run` builds it in
+    /// the background, so the terminal shows something right away.
+    fn unbuilt(git: Git) -> App {
         let cwd = git.toplevel.clone();
-        let mut app = App {
+        App {
             git,
             menus: registry(),
             stack: Vec::new(),
@@ -722,6 +733,7 @@ impl App {
             screen: std::cell::RefCell::new(Vec::new()),
             painted_size: (0, 0),
             repaint_all: true,
+            initial_section: true,
             theme: Theme::default(),
             infix_history: std::cell::RefCell::new(BTreeMap::new()),
             history_file: None,
@@ -735,13 +747,14 @@ impl App {
             menu_history: (Vec::new(), 0),
             jobs: jobs::Jobs::default(),
             head_label: String::new(),
-        };
-        app.refresh();
-        // magit-status-initial-section '(1): the first section after the headers
-        if let Some(i) = app.lines.iter().position(|l| l.heading && l.depth == 0 && l.kind != LineKind::Head) {
-            app.cursor = i;
         }
-        app
+    }
+
+    /// magit-status-initial-section '(1): the first section after the headers
+    fn goto_initial_section(&mut self) {
+        if let Some(i) = self.lines.iter().position(|l| l.heading && l.depth == 0 && l.kind != LineKind::Head) {
+            self.cursor = i;
+        }
     }
 
     /// Diff arguments of the status buffer's diffs.
@@ -1210,7 +1223,8 @@ impl App {
             .as_ref()
             .filter(|q| !q.is_empty())
             .map(|q| folded_bytes(q));
-        if self.head_label.is_empty() {
+        // a refresh running brings the label along; do not ask git meanwhile
+        if self.head_label.is_empty() && !self.jobs.refreshing {
             self.head_label = self.git.head_desc();
         }
         let branch = self.head_label.clone();
@@ -1868,6 +1882,8 @@ impl App {
         }));
         let _ = enable_raw_mode();
         let _ = execute!(stdout(), EnterAlternateScreen, crossterm::cursor::Hide);
+        // the first build (see `main_run`), now on a worker
+        self.flush_refresh();
         self.draw();
         let mut frame = self.jobs.frame();
         loop {
@@ -1892,7 +1908,8 @@ impl App {
                     let key = Key::from_event(&ev);
                     // moving around is done in the buffer shown; any
                     // other command works on the refreshed one
-                    let moves = self.only_moves(&key);
+                    // (before the first build there is nothing to move in)
+                    let moves = self.only_moves(&key) && !self.lines.is_empty();
                     if !moves {
                         self.settle();
                     }
@@ -9821,10 +9838,13 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
     let dir = std::path::PathBuf::from(path.unwrap_or("."));
     let abs = dir.canonicalize().unwrap_or(dir);
     let git = Git::discover(&abs)?;
-    let mut app = App::new(git);
+    let mut app = App::unbuilt(git);
     if abs.is_dir() {
         app.cwd = abs;
     }
+    // reading the options and the saved arguments asks for refreshes: the
+    // status buffer is built once, after them, on a worker started by `run`
+    app.jobs.depth += 1;
     if let Some(f) = super::options::default_options_file() {
         app.load_options(&f);
     }
@@ -9834,6 +9854,8 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
     if let Some(f) = super::transient::default_history_file() {
         app.load_history(f);
     }
+    app.jobs.depth -= 1;
+    app.jobs.wanted = true;
     app.run()
 }
 
