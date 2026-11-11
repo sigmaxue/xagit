@@ -43,6 +43,58 @@ pub struct Region {
     pub choice: Choice,
 }
 
+/// One side-by-side row of a conflict: the A line, the B line, and whether
+/// the line has no counterpart on the other side (a changed line).
+pub type AlignedRow = (Option<String>, Option<String>, bool);
+
+/// The LCS-aligned rows of one conflict's A and B versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aligned {
+    pub rows: Vec<AlignedRow>,
+}
+
+impl Aligned {
+    /// Pair the A and B lines by position for a side-by-side comparison:
+    /// row i shows A[i] next to B[i]; the shorter side is padded with a
+    /// spacer.  A row is "changed" when the two lines differ (or one side
+    /// is missing), which the view renders as a diff highlight.  Positional
+    /// pairing (rather than LCS) keeps the two versions visually adjacent,
+    /// which is what "compare the two columns and choose" needs.
+    pub fn of(r: &Region) -> Aligned {
+        let a: Vec<&[u8]> = split_lines(&r.upper);
+        let b: Vec<&[u8]> = split_lines(&r.lower);
+        let n = a.len().max(b.len());
+        let mut rows: Vec<AlignedRow> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (x, y) = (a.get(i).copied(), b.get(i).copied());
+            let changed = match (x, y) {
+                (Some(x), Some(y)) => x != y,
+                _ => true,
+            };
+            rows.push((x.map(lossy), y.map(lossy), changed));
+        }
+        Aligned { rows }
+    }
+}
+
+/// The lines of TEXT without their trailing newline.
+fn split_lines(t: &[u8]) -> Vec<&[u8]> {
+    let mut out: Vec<&[u8]> = t.split(|&b| b == b'\n').collect();
+    if out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    for l in &mut out {
+        if l.last() == Some(&b'\r') {
+            *l = &l[..l.len() - 1];
+        }
+    }
+    out
+}
+
+fn lossy(t: &[u8]) -> String {
+    String::from_utf8_lossy(t).into_owned()
+}
+
 /// A file with its conflict regions and the surrounding text.
 #[derive(Debug, Clone)]
 pub struct ResolveFile {
@@ -138,6 +190,13 @@ impl ResolveFile {
         ResolveFile { path: path.to_string(), original: text.to_vec(), regions }
     }
 
+    /// One aligned pair of lines of a conflict's A and B versions.  `None`
+    /// means a blank spacer; `changed` marks a line with no counterpart on
+    /// the other side (an added/removed line), `common` a matched line.
+    pub fn aligned(&self) -> Vec<Aligned> {
+        self.regions.iter().map(Aligned::of).collect()
+    }
+
     pub fn decided(&self) -> usize {
         self.regions.iter().filter(|r| r.choice != Choice::Undecided).count()
     }
@@ -201,6 +260,24 @@ mod tests {
         assert_eq!(f.regions.len(), 2);
         assert_eq!(f.regions[1].base.as_deref(), Some(&b"orig\n"[..]));
         assert_eq!(f.regions[1].upper, b"ours\n");
+    }
+
+    #[test]
+    fn aligns_lines_and_marks_changes() {
+        let f = ResolveFile::parse("f.txt", TWO.as_bytes());
+        let rows = &f.aligned()[0].rows;
+        // positional pairing: A[i] beside B[i], the shorter side padded
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (Some("ours1".into()), Some("theirs".into()), true));
+        assert_eq!(rows[1], (Some("ours2".into()), None, true));
+
+        // equal lines on both sides are marked unchanged
+        let text = b"<<<<<<< HEAD\nA1\nsame\n=======\nB1\nsame\n>>>>>>> x\n";
+        let f2 = ResolveFile::parse("f.txt", text);
+        let rows = &f2.aligned()[0].rows;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (Some("A1".into()), Some("B1".into()), true));
+        assert_eq!(rows[1], (Some("same".into()), Some("same".into()), false));
     }
 
     #[test]

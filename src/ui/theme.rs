@@ -591,6 +591,10 @@ fn mono(face: Face) -> Style {
         Face::SearchMatch => reverse,
         Face::PopupValue => Style { underline: true, ..Style::default() },
         Face::Meta | Face::PopupInapt => Style { italic: true, ..Style::default() },
+        // keep diff additions / removals distinguishable on a monochrome
+        // terminal (the colored styles use green / red backgrounds instead)
+        Face::Added => Style { underline: true, ..bold },
+        Face::Removed => Style { italic: true, ..Style::default() },
         // Exhaustive on purpose: adding a Face must force a decision about
         // how it looks on a mono terminal, instead of silently becoming
         // plain text.
@@ -613,8 +617,6 @@ fn mono(face: Face) -> Style {
         | Face::FileDeleted
         | Face::FileRenamed
         | Face::HunkHeading
-        | Face::Added
-        | Face::Removed
         | Face::Context
         | Face::BlameHeading
         | Face::Margin

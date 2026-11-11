@@ -14,6 +14,8 @@ pub struct ResolveEdit {
     pub file: ResolveFile,
     /// index of the conflict the cursor is on
     pub cursor: usize,
+    /// first display row shown (free vertical scrolling)
+    pub top: usize,
     /// C-c was typed
     pub cc: bool,
     /// any decision changed
@@ -30,7 +32,9 @@ b        keep B (theirs / lower)
 d        keep both versions, one after the other
 s        keep the base version (diff3 conflicts only)
 u        leave this conflict undecided (markers stay)
-n / p    move to the next / previous conflict (also C-n / C-p, arrows)
+n / p    next / previous conflict (scrolls it into view)
+SPC/DEL  page down / up (free scroll)
+up/down  scroll one line
 ?        show this help";
 
 impl App {
@@ -57,7 +61,7 @@ impl App {
             self.set_msg(&format!("No conflict markers in {file} (use E m for git mergetool)"));
             return Ok(false);
         }
-        self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, cc: false, modified: false });
+        self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, top: 0, cc: false, modified: false });
         self.setup_buffer(BufferMode::Resolve, Vec::new());
         self.set_msg("a/b/d choose a side, C-c C-c saves and stages, ? for help");
         Ok(true)
@@ -75,6 +79,24 @@ impl App {
     /// The resolved file bytes without writing (tests).
     pub fn resolve_result(&self) -> Option<String> {
         self.resolve.as_ref().map(|e| String::from_utf8_lossy(&e.file.resolved()).into_owned())
+    }
+
+    /// The rendered rows of the resolution view as (text, spans with their
+    /// styles) for tests.  W is the simulated terminal width.
+    pub fn resolve_view(&self, body: usize, w: usize) -> Vec<(String, Vec<(String, Style)>)> {
+        let (rows, _) = self.resolve_rows(body, w);
+        rows.into_iter()
+            .map(|r| {
+                let text = r.plain();
+                let spans = r.spans.into_iter().map(|s| (s.text, s.style)).collect();
+                (text, spans)
+            })
+            .collect()
+    }
+
+    /// The view's current scroll position (tests).
+    pub fn resolve_top(&self) -> Option<usize> {
+        self.resolve.as_ref().map(|e| e.top)
     }
 
     fn resolve_close(&mut self) -> Option<ResolveEdit> {
@@ -137,9 +159,16 @@ impl App {
                 self.resolve.as_mut().unwrap().cc = true;
                 self.set_msg("C-c-");
             }
-            // movement between conflicts
-            (false, "n" | "down") | (true, "n") => self.resolve_move(1),
-            (false, "p" | "up") | (true, "p") => self.resolve_move(-1),
+            // movement between conflicts (scrolls the new block into view)
+            (false, "n") | (true, "n") => self.resolve_move(1),
+            (false, "p") | (true, "p") => self.resolve_move(-1),
+            // free vertical scrolling of the whole page
+            (false, " ") => self.resolve_scroll(self.view_body_h(), true),
+            (false, "backspace" | "DEL") => self.resolve_scroll(self.view_body_h(), false),
+            (false, "pgdn") | (true, "v") => self.resolve_scroll(self.view_body_h(), true),
+            (false, "pgup") | (false, "M-v") => self.resolve_scroll(self.view_body_h(), false),
+            (false, "down") => self.resolve_scroll(1, true),
+            (false, "up") => self.resolve_scroll(1, false),
             // decisions
             (false, "a") => self.resolve_set(Choice::A),
             (false, "b") => self.resolve_set(Choice::B),
@@ -156,10 +185,39 @@ impl App {
         Ok(true)
     }
 
+    /// Number of body rows available for scrolling a page.
+    fn view_body_h(&self) -> isize {
+        let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
+        (h as isize).saturating_sub(3).max(1)
+    }
+
+    /// Free vertical scroll by DELTA display rows (down when DOWN).
+    fn resolve_scroll(&mut self, delta: isize, down: bool) {
+        let Some(ed) = self.resolve.as_mut() else { return };
+        let total = Self::resolve_display_len(&ed.file) as isize;
+        let d = if down { delta } else { -delta };
+        ed.top = (ed.top as isize + d).clamp(0, (total - 1).max(0)) as usize;
+    }
+
+    /// Total number of display rows of the whole view.
+    fn resolve_display_len(file: &ResolveFile) -> usize {
+        // 1 header + 1 column header per conflict, plus its aligned rows,
+        // plus a blank separator between conflicts
+        file.aligned().iter().map(|a| 2 + a.rows.len().max(1) + 1).sum()
+    }
+
+    /// The display-row index of a conflict's header.
+    fn resolve_conflict_row(ed: &ResolveEdit, idx: usize) -> usize {
+        let aligned = ed.file.aligned();
+        aligned.iter().take(idx).map(|a| 2 + a.rows.len().max(1) + 1).sum()
+    }
+
     fn resolve_move(&mut self, d: isize) {
         let Some(ed) = self.resolve.as_mut() else { return };
         let n = ed.file.regions.len() as isize;
         ed.cursor = (ed.cursor as isize + d).clamp(0, n - 1).max(0) as usize;
+        let row = Self::resolve_conflict_row(ed, ed.cursor);
+        ed.top = row;
     }
 
     fn resolve_set(&mut self, choice: Choice) {
@@ -170,78 +228,86 @@ impl App {
         }
         ed.file.regions[ed.cursor].choice = choice;
         ed.modified = true;
-        // auto-advance to the next undecided conflict
+        // auto-advance to the next undecided conflict and scroll it into view
         let n = ed.file.regions.len();
         let from = ed.cursor;
         for step in 1..=n {
             let i = (from + step) % n;
             if ed.file.regions[i].choice == Choice::Undecided {
                 ed.cursor = i;
+                ed.top = Self::resolve_conflict_row(ed, i);
                 break;
             }
         }
         self.set_msg(&format!("Conflict {}: {}", from + 1, choice.label()));
     }
 
-    /// The rows of the resolution view.  Each conflict is a header (with
-    /// its decision) followed by the A and B versions, labelled.
-    pub(super) fn resolve_rows(&self, body: usize, scroll: &mut usize) -> (Vec<Row>, String) {
+    /// The rows of the resolution view: each conflict is a header, then a
+    /// column header, then its A/B lines shown side by side.  Lines with no
+    /// counterpart on the other side are highlighted as a diff; the whole
+    /// page scrolls freely via `ed.top`.  W is the terminal width.
+    pub(super) fn resolve_rows(&self, body: usize, w: usize) -> (Vec<Row>, String) {
         let t = &self.theme;
         let Some(ed) = &self.resolve else { return (Vec::new(), String::new()) };
-        let mut rows: Vec<(bool, Row)> = Vec::new(); // (is the cursor's header, row)
-        for (i, r) in ed.file.regions.iter().enumerate() {
+        let col = (w.saturating_sub(3)) / 2; // two columns plus " | "
+        let col = col.max(8);
+        let aligned = ed.file.aligned();
+        let fit = |s: &str| -> String {
+            let tw = crate::ui::width::str_width(s);
+            if tw <= col {
+                format!("{s}{}", " ".repeat(col - tw))
+            } else {
+                let cut = crate::ui::width::truncate(s, col.saturating_sub(1)).to_string();
+                let cw = crate::ui::width::str_width(&cut);
+                format!("{cut}…{}", " ".repeat(col.saturating_sub(cw + 1)))
+            }
+        };
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, (r, al)) in ed.file.regions.iter().zip(aligned.iter()).enumerate() {
             let current = i == ed.cursor;
             let head_base = if current { t.style(Face::CursorLine) } else { Style::default() };
             let on = |f: Face| {
                 let s = t.style(f).over(head_base);
                 Style { bg: head_base.bg.or(s.bg), ..s }
             };
+            // conflict header with its decision
             let gutter = if current { t.glyphs.cursor } else { ' ' };
             let mut head = Row::new(head_base);
             head.push(format!("{gutter} "), on(Face::Gutter));
             head.push(format!("Conflict {} ", i + 1), on(Face::Label));
             let decided = r.choice != Choice::Undecided;
             head.push(format!("[{}]", r.choice.label()), on(if decided { Face::Keyword } else { Face::Dim }));
-            rows.push((current, head));
-            // the two versions, prefixed to distinguish them
-            let side = |label: &str, bytes: &[u8], face: Face| -> Vec<Row> {
-                let text = String::from_utf8_lossy(bytes);
-                let mut out = Vec::new();
-                let lines: Vec<&str> = text.split('\n').collect();
-                let shown = if lines.last() == Some(&"") { &lines[..lines.len() - 1] } else { &lines[..] };
-                for (n, l) in shown.iter().enumerate() {
-                    let mut r = Row::new(Style::default());
-                    let tag = if n == 0 { label } else { "  " };
-                    r.push(format!("  {tag} "), t.style(Face::Gutter));
-                    r.push(l.to_string(), t.style(face));
-                    out.push(r);
-                }
-                if shown.is_empty() {
-                    let mut r = Row::new(Style::default());
-                    r.push(format!("  {label} "), t.style(Face::Gutter));
-                    r.push("(empty)", t.style(Face::Dim));
-                    out.push(r);
-                }
-                out
+            rows.push(head);
+            // column titles
+            let mut titles = Row::new(t.style(Face::SectionHeading));
+            titles.push(format!("  {}", fit("A (ours/upper)")), t.style(Face::SectionHeading));
+            titles.push(" │ ", t.style(Face::Gutter));
+            titles.push(fit("B (theirs/lower)"), t.style(Face::SectionHeading));
+            rows.push(titles);
+            // the aligned A/B lines side by side
+            let pairs = if al.rows.is_empty() {
+                vec![(None, None, false)]
+            } else {
+                al.rows.clone()
             };
-            for r in side("A", &r.upper, Face::Added) {
-                rows.push((false, r));
+            for (a, b, changed) in pairs {
+                let mut row = Row::new(Style::default());
+                let a_text = a.as_deref().unwrap_or("");
+                let b_text = b.as_deref().unwrap_or("");
+                let a_face = if changed && a.is_some() { Face::Added } else if a.is_none() { Face::Dim } else { Face::Context };
+                let b_face = if changed && b.is_some() { Face::Removed } else if b.is_none() { Face::Dim } else { Face::Context };
+                row.push("  ", Style::default());
+                row.push(fit(a_text), t.style(a_face));
+                row.push(" │ ", t.style(Face::Gutter));
+                row.push(fit(b_text), t.style(b_face));
+                rows.push(row);
             }
-            for r in side("B", &r.lower, Face::Removed) {
-                rows.push((false, r));
-            }
-            let mut sep = Row::new(Style::default());
-            sep.push(String::new(), Style::default());
-            rows.push((false, sep));
+            // blank separator between conflicts
+            rows.push(Row::text(String::new(), Style::default()));
         }
-        // keep the current conflict's header visible
-        let cursor_row = rows.iter().position(|(c, _)| *c).unwrap_or(0);
-        if cursor_row < *scroll {
-            *scroll = cursor_row;
-        } else if cursor_row >= *scroll + body {
-            *scroll = cursor_row + 1 - body;
-        }
-        let visible: Vec<Row> = rows.into_iter().skip(*scroll).take(body).map(|(_, r)| r).collect();
+        let total = rows.len();
+        let top = ed.top.min(total.saturating_sub(1));
+        let visible: Vec<Row> = rows.into_iter().skip(top).take(body).collect();
         let n = ed.file.regions.len();
         (visible, format!("{}/{}", (ed.cursor + 1).min(n), n))
     }

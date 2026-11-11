@@ -165,8 +165,9 @@ impl App {
             &[
                 ("a/b/d", "ours/theirs/both"),
                 ("u", "undecide"),
-                ("n/p", "next/prev"),
-                ("C-c C-c", "save & stage"),
+                ("n/p", "conflict"),
+                ("SPC/DEL", "page"),
+                ("C-c C-c", "save"),
                 ("C-c C-k", "cancel"),
                 ("?", "help"),
             ]
@@ -228,9 +229,7 @@ impl App {
 
         let position;
         if self.mode == BufferMode::Resolve && self.view_text.is_none() {
-            let mut scroll = self.scroll;
-            let (r, pos) = self.resolve_rows(body, &mut scroll);
-            self.scroll = scroll;
+            let (r, pos) = self.resolve_rows(body, w);
             rows.extend(r);
             position = pos;
         } else if self.mode == BufferMode::RebaseTodo && self.view_text.is_none() {

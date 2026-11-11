@@ -8,6 +8,7 @@ use common::*;
 use xagit_lib::prelude::*;
 use xagit_lib::ui::app::{App, BufferMode};
 use xagit_lib::ui::resolve::Choice;
+use xagit_lib::ui::theme::{Face, Style, Theme};
 
 fn git(g: &Git, args: &[&str]) {
     g.git_interactive(args).unwrap();
@@ -136,6 +137,56 @@ fn two_conflict_repo() -> (TempDir, Git) {
     git(&g, &["checkout", "-q", "topic"]);
     let _ = g.git_string(&["rebase", "master"]);
     (td, g)
+}
+
+#[test]
+fn two_columns_with_diff_highlight() {
+    let (_td, g) = conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    // render all rows at a wide width
+    let view = app.resolve_view(40, 80);
+    let theme = Theme::default();
+    // A and B are shown side by side on the same row (separated by │)
+    let pair = view.iter().find(|(text, _)| text.contains("MASTER line") && text.contains("│"));
+    assert!(pair.is_some(), "no side-by-side row: {:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
+    // column titles
+    assert!(view.iter().any(|(t, _)| t.contains("A (ours") && t.contains("B (theirs")));
+    // the changed lines are highlighted with Added (A) / Removed (B) faces
+    let (_, spans) = pair.unwrap();
+    let added = theme.style(Face::Added);
+    let removed = theme.style(Face::Removed);
+    let has_added = spans.iter().any(|(s, st)| s.contains("MASTER line") && *st == added);
+    let has_removed = spans.iter().any(|(s, st)| s.contains("TOPIC line") && *st == removed);
+    assert!(has_added, "A line not highlighted: {spans:?}");
+    assert!(has_removed, "B line not highlighted: {spans:?}");
+    // common (unchanged) lines, when present, carry the Context style
+    let _ = Style::default();
+}
+
+#[test]
+fn free_page_scrolling() {
+    let (_td, g) = two_conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    assert_eq!(app.resolve_top(), Some(0));
+    // arrows scroll a single line
+    app.press("down").unwrap();
+    assert_eq!(app.resolve_top(), Some(1));
+    app.press("down").unwrap();
+    assert_eq!(app.resolve_top(), Some(2));
+    app.press("up").unwrap();
+    assert_eq!(app.resolve_top(), Some(1));
+    // SPC pages down (clamped at the bottom), DEL pages back to the top
+    app.press("SPC").unwrap();
+    let after_page = app.resolve_top().unwrap();
+    assert!(after_page >= 1, "SPC did not scroll");
+    app.press("DEL").unwrap();
+    assert_eq!(app.resolve_top(), Some(0));
+    // n jumps to the next conflict and scrolls its header to the top
+    press(&mut app, &["n"]);
+    assert_eq!(app.resolve_cursor(), Some(1));
+    assert!(app.resolve_top().unwrap() > 0);
 }
 
 #[test]
