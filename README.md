@@ -240,19 +240,26 @@ src/
     ├── paint.rs       # 样式行、按行类型的语义着色、整行绘制
     ├── theme.rs       # face 与深/浅配色、终端色深/背景/字形探测与降级
     ├── width.rs       # 终端显示宽度（CJK/emoji/组合字符/tab）
-    ├── app.rs         # App 状态 + 事件循环 + 命令分发（内聚方法组拆到 app/）
-    └── app/           # impl App 的分散实现（见下方拆分约定）
+    ├── app.rs         # App 状态、事件循环、类型定义与程序入口（约 1700 行）
+    └── app/           # impl App 的分散实现，共 30 个子模块（见下方拆分约定）
         ├── render.rs   # 帧绘制：header / mode line / hints / 缓冲区正文
         ├── input.rs    # minibuffer、补全、历史与 yes/no 提问
-        ├── sections.rs # section 导航与可见性（magit-section）
+        ├── commands.rs # 命令分派表 run_command 与 infix 参数读取
         ├── menus.rs    # transient 菜单、参数值 / 历史与扩展命令
+        ├── views.rs    # diff / log 视图与 commit 相关命令
+        ├── diffsel.rs  # diff selection：当前位置的 hunk / 文件范围
+        ├── sections.rs # section 导航与可见性（magit-section）
         ├── apply.rs    # stage / unstage / discard / reverse
+        ├── visit.rs    # 文件访问、blame 与 file-dispatch
+        ├── refs.rs     # 分支 / 标签 / 远程读取与 push / fetch
+        ├── buffers.rs  # 分支操作、buffer 切换与 visit
+        ├── extra.rs    # rebase / absorb / cherry-pick 等扩展命令
         ├── jobs.rs     # 后台刷新与后台 git 进程；on_refresh_done 统一恢复 UI 状态
         ├── isearch.rs  # C-s/C-r 本界面搜索（匹配、跳转、查询状态）
-        └── …           # gitvar / bisect / stash / tag / worktree 等命令子模块
+        └── …           # gitvar / bisect / stash / tag / worktree 等功能子模块
 ```
 
-`impl App` 分散在 `src/ui/app/*.rs`：子模块用 `use super::*;` 复用父模块的私有字段和 helper，反过来父模块或其它子模块要调用的方法显式写成 `pub(super)`（Rust 的私有项只对定义模块及其后代可见）。这些模块是纯代码位置调整，不改变行为；移动时原本的 `super::xxx`（指向 `ui`）要改成 `crate::ui::xxx`。目前 `app.rs` 约 6600 行，主要集中在事件循环、命令分派表与 visiting 相关的命令。
+`impl App` 分散在 `src/ui/app/*.rs`：子模块用 `use super::*;` 复用父模块的私有字段和 helper，反过来父模块或其它子模块要调用的方法显式写成 `pub(super)`（Rust 的私有项只对定义模块及其后代可见）。这些模块是纯代码位置调整，不改变行为；移动时原本的 `super::xxx`（指向 `ui`）要改成 `crate::ui::xxx`。`app.rs` 只保留状态、事件循环、类型定义与入口，约 1700 行。`run_command` 本身仍是一个较长的 `match` 分派表：其中的臂带 guard、内部宏和递归调用，按前缀拆成多个函数会改变语义，因此保持原样、只放在独立文件里。
 
 ### libgit2 只读查询层
 
