@@ -165,6 +165,35 @@ fn two_columns_with_diff_highlight() {
 }
 
 #[test]
+fn shows_undifferenced_context_lines() {
+    let (_td, g) = conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    // render the whole file (body large enough for all display lines)
+    let view = app.resolve_view(100, 80);
+    let theme = Theme::default();
+    let context_style = theme.style(Face::Context);
+    // "top", "mid", "bottom" are unchanged lines outside the conflict:
+    // they must appear identically in BOTH columns, without diff highlight
+    for text in ["top", "mid", "bottom"] {
+        let row = view.iter().find(|(t, spans)| {
+            t.contains("│")
+                && spans.len() >= 3
+                && spans.iter().any(|(s, _)| s.trim() == text)
+                && spans.iter().filter(|(s, _)| s.trim() == text).count() >= 2
+        });
+        assert!(row.is_some(), "context line {text:?} not shown in both columns: {:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
+        // both column spans carry the plain Context style (no Added/Removed)
+        let (_, spans) = row.unwrap();
+        let col_spans: Vec<_> = spans.iter().filter(|(s, _)| s.trim() == text || s.starts_with(text)).collect();
+        assert!(col_spans.iter().all(|(_, st)| *st == context_style), "context {text:?} highlighted: {col_spans:?}");
+    }
+    // the conflict's two different lines are still highlighted
+    assert!(view.iter().any(|(t, _)| t.contains("MASTER line") && t.contains("│")));
+    assert!(view.iter().any(|(t, _)| t.contains("TOPIC line") && t.contains("│")));
+}
+
+#[test]
 fn free_page_scrolling() {
     let (_td, g) = two_conflict_repo();
     let mut app = App::new(g.clone());

@@ -1,9 +1,11 @@
 //! The built-in conflict resolution view (an xagit addition): the A/B/both
 //! part of Emacs Ediff's three-way merge session.  `e` (ediff dwim) opens it
-//! when there are unmerged conflicts; each conflict region is shown with its
-//! A (ours) and B (theirs) versions and a per-region decision.  a/b/d/u set
-//! the decision, n/p move between conflicts, C-c C-c writes the file back
-//! and stages it, C-c C-k cancels without touching the file.
+//! when there are unmerged conflicts; the WHOLE file is shown — unchanged
+//! lines as context in both columns, each conflict with its A (ours) and B
+//! (theirs) versions side by side and a per-region decision.  a/b/d/u set
+//! the decision, n/p jump between conflicts, SPC/DEL and arrows scroll the
+//! page, C-c C-c writes the file back and stages it, C-c C-k cancels
+//! without touching the file.
 
 use super::*;
 use crate::ui::resolve::{Choice, ResolveFile};
@@ -199,17 +201,18 @@ impl App {
         ed.top = (ed.top as isize + d).clamp(0, (total - 1).max(0)) as usize;
     }
 
-    /// Total number of display rows of the whole view.
+    /// Total number of display rows of the whole view (including context).
     fn resolve_display_len(file: &ResolveFile) -> usize {
-        // 1 header + 1 column header per conflict, plus its aligned rows,
-        // plus a blank separator between conflicts
-        file.aligned().iter().map(|a| 2 + a.rows.len().max(1) + 1).sum()
+        file.view().len()
     }
 
     /// The display-row index of a conflict's header.
     fn resolve_conflict_row(ed: &ResolveEdit, idx: usize) -> usize {
-        let aligned = ed.file.aligned();
-        aligned.iter().take(idx).map(|a| 2 + a.rows.len().max(1) + 1).sum()
+        ed.file
+            .view()
+            .iter()
+            .position(|l| *l == crate::ui::resolve::ViewLine::Header(idx))
+            .unwrap_or(0)
     }
 
     fn resolve_move(&mut self, d: isize) {
@@ -242,16 +245,17 @@ impl App {
         self.set_msg(&format!("Conflict {}: {}", from + 1, choice.label()));
     }
 
-    /// The rows of the resolution view: each conflict is a header, then a
-    /// column header, then its A/B lines shown side by side.  Lines with no
-    /// counterpart on the other side are highlighted as a diff; the whole
-    /// page scrolls freely via `ed.top`.  W is the terminal width.
+    /// The rows of the resolution view: the WHOLE file is shown.  Ordinary
+    /// (non-conflict) lines appear in both columns alike as context; each
+    /// conflict is a header, a column-title row, its A/B pairs (diff-highlit
+    /// on changed lines) and a blank separator.  The page scrolls freely
+    /// via `ed.top`.  W is the terminal width.
     pub(super) fn resolve_rows(&self, body: usize, w: usize) -> (Vec<Row>, String) {
+        use crate::ui::resolve::ViewLine;
         let t = &self.theme;
         let Some(ed) = &self.resolve else { return (Vec::new(), String::new()) };
-        let col = (w.saturating_sub(3)) / 2; // two columns plus " | "
+        let col = (w.saturating_sub(3)) / 2; // two columns plus " │ "
         let col = col.max(8);
-        let aligned = ed.file.aligned();
         let fit = |s: &str| -> String {
             let tw = crate::ui::width::str_width(s);
             if tw <= col {
@@ -262,48 +266,55 @@ impl App {
                 format!("{cut}…{}", " ".repeat(col.saturating_sub(cw + 1)))
             }
         };
+        let columns = |a: &str, b: &str, a_face: Face, b_face: Face| -> Row {
+            let mut row = Row::new(Style::default());
+            row.push("  ", Style::default());
+            row.push(fit(a), t.style(a_face));
+            row.push(" │ ", t.style(Face::Gutter));
+            row.push(fit(b), t.style(b_face));
+            row
+        };
         let mut rows: Vec<Row> = Vec::new();
-        for (i, (r, al)) in ed.file.regions.iter().zip(aligned.iter()).enumerate() {
-            let current = i == ed.cursor;
-            let head_base = if current { t.style(Face::CursorLine) } else { Style::default() };
-            let on = |f: Face| {
-                let s = t.style(f).over(head_base);
-                Style { bg: head_base.bg.or(s.bg), ..s }
-            };
-            // conflict header with its decision
-            let gutter = if current { t.glyphs.cursor } else { ' ' };
-            let mut head = Row::new(head_base);
-            head.push(format!("{gutter} "), on(Face::Gutter));
-            head.push(format!("Conflict {} ", i + 1), on(Face::Label));
-            let decided = r.choice != Choice::Undecided;
-            head.push(format!("[{}]", r.choice.label()), on(if decided { Face::Keyword } else { Face::Dim }));
-            rows.push(head);
-            // column titles
-            let mut titles = Row::new(t.style(Face::SectionHeading));
-            titles.push(format!("  {}", fit("A (ours/upper)")), t.style(Face::SectionHeading));
-            titles.push(" │ ", t.style(Face::Gutter));
-            titles.push(fit("B (theirs/lower)"), t.style(Face::SectionHeading));
-            rows.push(titles);
-            // the aligned A/B lines side by side
-            let pairs = if al.rows.is_empty() {
-                vec![(None, None, false)]
-            } else {
-                al.rows.clone()
-            };
-            for (a, b, changed) in pairs {
-                let mut row = Row::new(Style::default());
-                let a_text = a.as_deref().unwrap_or("");
-                let b_text = b.as_deref().unwrap_or("");
-                let a_face = if changed && a.is_some() { Face::Added } else if a.is_none() { Face::Dim } else { Face::Context };
-                let b_face = if changed && b.is_some() { Face::Removed } else if b.is_none() { Face::Dim } else { Face::Context };
-                row.push("  ", Style::default());
-                row.push(fit(a_text), t.style(a_face));
-                row.push(" │ ", t.style(Face::Gutter));
-                row.push(fit(b_text), t.style(b_face));
-                rows.push(row);
+        for vl in ed.file.view() {
+            match vl {
+                ViewLine::Context(s) => {
+                    // the same text in both columns; no diff highlight
+                    rows.push(columns(&s, &s, Face::Context, Face::Context));
+                }
+                ViewLine::Header(i) => {
+                    let current = i == ed.cursor;
+                    let head_base = if current { t.style(Face::CursorLine) } else { Style::default() };
+                    let on = |f: Face| {
+                        let s = t.style(f).over(head_base);
+                        Style { bg: head_base.bg.or(s.bg), ..s }
+                    };
+                    let gutter = if current { t.glyphs.cursor } else { ' ' };
+                    let mut head = Row::new(head_base);
+                    head.push(format!("{gutter} "), on(Face::Gutter));
+                    head.push(format!("Conflict {} ", i + 1), on(Face::Label));
+                    let decided = ed.file.regions[i].choice != Choice::Undecided;
+                    head.push(
+                        format!("[{}]", ed.file.regions[i].choice.label()),
+                        on(if decided { Face::Keyword } else { Face::Dim }),
+                    );
+                    rows.push(head);
+                }
+                ViewLine::Columns => {
+                    let mut titles = Row::new(t.style(Face::SectionHeading));
+                    titles.push(format!("  {}", fit("A (ours/upper)")), t.style(Face::SectionHeading));
+                    titles.push(" │ ", t.style(Face::Gutter));
+                    titles.push(fit("B (theirs/lower)"), t.style(Face::SectionHeading));
+                    rows.push(titles);
+                }
+                ViewLine::Pair(_, a, b, changed) => {
+                    let a_text = a.as_deref().unwrap_or("");
+                    let b_text = b.as_deref().unwrap_or("");
+                    let a_face = if changed && a.is_some() { Face::Added } else if a.is_none() { Face::Dim } else { Face::Context };
+                    let b_face = if changed && b.is_some() { Face::Removed } else if b.is_none() { Face::Dim } else { Face::Context };
+                    rows.push(columns(a_text, b_text, a_face, b_face));
+                }
+                ViewLine::Blank => rows.push(Row::text(String::new(), Style::default())),
             }
-            // blank separator between conflicts
-            rows.push(Row::text(String::new(), Style::default()));
         }
         let total = rows.len();
         let top = ed.top.min(total.saturating_sub(1));

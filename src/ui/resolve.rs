@@ -95,6 +95,23 @@ fn lossy(t: &[u8]) -> String {
     String::from_utf8_lossy(t).into_owned()
 }
 
+/// One display line of the full-file resolution view.  The parts of the
+/// file that are NOT part of any conflict are shown in both columns alike
+/// as context; conflict regions carry their A/B versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewLine {
+    /// a line common to both versions (context, shown in both columns)
+    Context(String),
+    /// the header of conflict INDEX
+    Header(usize),
+    /// the column-title row of a conflict
+    Columns,
+    /// an A/B row of conflict INDEX (a, b, changed)
+    Pair(usize, Option<String>, Option<String>, bool),
+    /// a blank separator after a conflict
+    Blank,
+}
+
 /// A file with its conflict regions and the surrounding text.
 #[derive(Debug, Clone)]
 pub struct ResolveFile {
@@ -197,6 +214,35 @@ impl ResolveFile {
         self.regions.iter().map(Aligned::of).collect()
     }
 
+    /// The full-file display: ordinary (non-conflict) lines are shown as
+    /// context in both columns; each conflict is a header, a column-title
+    /// row, its A/B pairs and a blank separator.
+    pub fn view(&self) -> Vec<ViewLine> {
+        let mut out: Vec<ViewLine> = Vec::new();
+        let mut at = 0;
+        for (idx, r) in self.regions.iter().enumerate() {
+            for l in split_lines(&self.original[at..r.start]) {
+                out.push(ViewLine::Context(lossy(l)));
+            }
+            out.push(ViewLine::Header(idx));
+            out.push(ViewLine::Columns);
+            let al = Aligned::of(r);
+            if al.rows.is_empty() {
+                out.push(ViewLine::Pair(idx, None, None, false));
+            } else {
+                for (a, b, changed) in al.rows {
+                    out.push(ViewLine::Pair(idx, a, b, changed));
+                }
+            }
+            out.push(ViewLine::Blank);
+            at = r.end;
+        }
+        for l in split_lines(&self.original[at..]) {
+            out.push(ViewLine::Context(lossy(l)));
+        }
+        out
+    }
+
     pub fn decided(&self) -> usize {
         self.regions.iter().filter(|r| r.choice != Choice::Undecided).count()
     }
@@ -278,6 +324,26 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], (Some("A1".into()), Some("B1".into()), true));
         assert_eq!(rows[1], (Some("same".into()), Some("same".into()), false));
+    }
+
+    #[test]
+    fn view_shows_context_lines() {
+        let f = ResolveFile::parse("f.txt", TWO.as_bytes());
+        let v = f.view();
+        // "top" before the conflict, "bottom" after: both as context
+        assert_eq!(v.first(), Some(&ViewLine::Context("top".into())));
+        assert_eq!(v.last(), Some(&ViewLine::Context("bottom".into())));
+        assert!(v.iter().any(|l| *l == ViewLine::Header(0)));
+        assert!(v.iter().any(|l| *l == ViewLine::Columns));
+        let pairs: Vec<_> = v.iter().filter(|l| matches!(l, ViewLine::Pair(..))).collect();
+        assert_eq!(pairs.len(), 2);
+        // context lines surround the conflict in the two_conflicts case
+        let text = format!("head\n{TWO}mid\n{THREE}tail\n");
+        let f2 = ResolveFile::parse("f.txt", text.as_bytes());
+        let v2 = f2.view();
+        let contexts: Vec<&str> = v2.iter().filter_map(|l| match l { ViewLine::Context(s) => Some(s.as_str()), _ => None }).collect();
+        assert_eq!(contexts, ["head", "top", "bottom", "mid", "top", "bottom", "tail"]);
+        assert_eq!(v2.iter().filter(|l| matches!(l, ViewLine::Header(_))).count(), 2);
     }
 
     #[test]
