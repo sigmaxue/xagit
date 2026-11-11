@@ -12,6 +12,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - [快速开始](#快速开始)
 - [界面与终端](#界面与终端)
 - [常用快捷键与多键解释](#常用快捷键与多键解释)
+  - [本界面搜索（C-s）](#本界面搜索c-s)
 - [测试与开发](#测试与开发)
   - [libgit2 只读查询层](#libgit2-只读查询层)
 - [Magit 兼容范围与已知限制](#magit-兼容范围与已知限制)
@@ -30,6 +31,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - 提供分支、提交、远端、fetch/pull/push、merge/rebase、tag、stash、reset、cherry-pick 与 revert 菜单；进行中操作按仓库状态提供 continue/skip/abort 等入口。
 - 支持 diff、log、refs、blame、补全、历史选择及 transient 参数；支持多键序列与 Ctrl/Meta 按键。
 - 包含 bisect、worktree、submodule、subtree、notes、patch/am 与分支配置功能，以及进程日志视图。
+- 支持 `C-s` / `C-r` 在当前 buffer 内搜索并高亮所有匹配，可循环跳转，覆盖 status、refs、log 等 Magit 缓冲区。
   
 
   
@@ -122,6 +124,8 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 | `g` | magit-refresh | 刷新状态缓冲区 |
 | `q` / `Esc` | bury-buffer | 退出文本视图 / 返回上一视图；状态页不会退出（`C-u C-u q` 关闭其他所有视图，回到状态页） |
 | `C-x C-c` | save-buffers-kill-terminal | 退出程序 |
+| `C-s` / `C-r` | isearch-forward / -backward | 在当前 buffer 内搜索（详见 [本界面搜索](#本界面搜索c-s)） |
+| `C-g` | keyboard-quit | 取消选区、清除搜索高亮 |
 | `TAB` | toggle-section | 折叠/展开 section |
 | `RET` | visit-thing | 查看光标处内容（diff / stash / 文件） |
 | `n` / `p`；`C-n` / `C-p` / 方向键 | 移动 | 前者按 section 移动，后者按行移动（Magit 没有 vi 式移动：`k` 是 discard，`j` 是跳转） |
@@ -143,6 +147,15 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 | `H` / `J` / `Y` | section info / display buffer / cherries | 当前行信息、状态缓冲区文本、cherry 视图 |
 | `w` / `W` | am / patch 菜单 | `git am` 菜单；patch 菜单（创建 patch、应用 patch、保存 patch、request-pull） |
 | `b C` / `l r` | branch configure / reflog | 分支配置菜单与 reflog 视图 |
+
+### 本界面搜索（C-s）
+
+`C-s` 在**当前显示的 buffer** 内搜索，覆盖 status、refs、log、diff、revision、blame、cherry 等 Magit 缓冲区（含右侧 author/age margin）：
+
+- 第一次按 `C-s` 读取查询（默认值为上一次的查询），按大小写不敏感的子串匹配。回车后所有匹配以醒目底色高亮，光标跳到当前位置之后的第一个匹配；底部按键提示切换为 `C-s next` / `C-r prev` / `C-g clear`。
+- 再按 `C-s` 跳下一个匹配，`C-r` 跳上一个，到末尾循环；`C-g` 清除高亮，`C-u C-s` 重新输入查询。切换 buffer 时自动清除搜索状态；后台刷新后高亮按新内容重新计算，不会残留旧行号。
+- 只搜索当前 buffer 里存在的**可见行**：折叠的 section、被 refs 过滤规则排除的 ref、超过文件列表上限或 log `-n` 限制而未列出的内容都不会命中，需要先展开或增加数量。纯文本视图（`$` 进程日志、`E` 文本 diff、`git show` 输出等）不是 Magit 缓冲区，按 `C-s` 会提示不支持。
+- 某些终端把 `C-s` 用作 XOFF 流控键，导致按键发不到程序；可执行 `stty -ixon` 关闭（或在终端设置里禁用 flow control）。
 
 ### 总菜单与主要子菜单
 
@@ -256,6 +269,7 @@ cargo test
 - `completion.rs`、`history.rs`、`transient_args.rs`、`transient_values.rs`、`options.rs`、`wip.rs`：补全、历史、参数持久化、配置及 WIP 行为。
 - `run.rs`、`status_jump.rs`：run/ediff/mergetool 命令与进程日志、状态跳转与 imenu。
 - `help.rs`：命令行 `--help`/`--version` 的输出与退出码、优先级及路径参数不受影响。
+- `isearch.rs`：`C-s`/`C-r` 在 status/refs/log 内的匹配、跳转、循环、清除与切换 buffer 时的状态。
 
 这里描述的是现有测试覆盖范围，不是对 Magit 全等的保证，也不代表所有平台已经验证。
 

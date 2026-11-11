@@ -116,6 +116,8 @@ pub enum Face {
     CursorLine,
     SectionHighlight,
     Region,
+    /// matches of the current buffer search (C-s)
+    SearchMatch,
     Gutter,
     Fringe,
 }
@@ -544,6 +546,13 @@ impl Theme {
                     Style { bg: Some(p.region_bg), ..Style::default() }
                 }
             }
+            Face::SearchMatch => {
+                if basic {
+                    Style { reverse: true, bold: true, ..Style::default() }
+                } else {
+                    Style::fg(p.accent_fg).on(p.accent).bold()
+                }
+            }
             Face::Gutter => Style::fg(p.accent).bold(),
         }
     }
@@ -579,6 +588,7 @@ fn mono(face: Face) -> Style {
         Face::Error => Style { bold: true, ..reverse },
         Face::BranchCurrent | Face::Head | Face::HintKey | Face::PopupKey | Face::PopupTitle | Face::Prompt => bold,
         Face::PopupGroup | Face::HunkRange | Face::Conflict | Face::FileUnmerged | Face::CursorLine | Face::Gutter => bold,
+        Face::SearchMatch => reverse,
         Face::PopupValue => Style { underline: true, ..Style::default() },
         Face::Meta | Face::PopupInapt => Style { italic: true, ..Style::default() },
         _ => Style::default(),

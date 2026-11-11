@@ -84,6 +84,10 @@ pub struct App {
     scroll: usize,
     /// the mark (index into `buf.all`) while the region is active (C-SPC)
     mark: Option<usize>,
+    /// the query of the buffer search (C-s), highlighted while active
+    search_query: Option<String>,
+    /// the last query, offered as the default of the next search
+    last_search: String,
     /// the major mode of the buffer shown (status, diff, revision, stash)
     mode: BufferMode,
     /// magit-buffer-diff-args of the diff / revision / stash buffer shown
@@ -385,6 +389,9 @@ pub enum Binding {
     SetMark,
     /// keyboard-quit (C-g): deactivate the region
     KeyboardQuit,
+    /// search in the current buffer (C-s / C-r)
+    IsearchForward,
+    IsearchBackward,
     Visit,
     Menu(&'static str),
     Command(&'static str),
@@ -396,7 +403,13 @@ impl Binding {
     fn is_global(&self) -> bool {
         matches!(
             self,
-            Binding::Down | Binding::Up | Binding::SetMark | Binding::KeyboardQuit | Binding::Command("execute-extended-command")
+            Binding::Down
+                | Binding::Up
+                | Binding::SetMark
+                | Binding::KeyboardQuit
+                | Binding::IsearchForward
+                | Binding::IsearchBackward
+                | Binding::Command("execute-extended-command")
         )
     }
 }
@@ -479,6 +492,8 @@ fn binding_command(b: &Binding) -> String {
         Binding::ShowLevelAll(n) => return format!("magit-section-show-level-{n}-all"),
         Binding::SetMark => "set-mark-command",
         Binding::KeyboardQuit => "keyboard-quit",
+        Binding::IsearchForward => "isearch-forward",
+        Binding::IsearchBackward => "isearch-backward",
         Binding::Visit => "magit-visit-thing",
         Binding::Command("stage-all") => "magit-stage-modified",
         Binding::Command("jump") => "magit-status-jump",
@@ -507,6 +522,8 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
             "p" => Some(Up),
             " " => Some(SetMark),
             "g" => Some(KeyboardQuit),
+            "s" => Some(IsearchForward),
+            "r" => Some(IsearchBackward),
             "tab" => Some(Cycle),
             "j" | "enter" => Some(Command("diff-visit-worktree-file")),
             _ => None,
@@ -593,6 +610,52 @@ pub fn status_binding(key: &Key) -> Option<Binding> {
     })
 }
 
+/// ASCII-folded bytes of TEXT. Folding leaves byte lengths unchanged, so
+/// indices stay at UTF-8 character boundaries and non-ASCII text is matched
+/// literally (no locale-dependent case conversion).
+fn folded_bytes(text: &str) -> Vec<u8> {
+    text.bytes().map(|b| b.to_ascii_lowercase()).collect()
+}
+
+/// The byte ranges of QUERY's occurrences in TEXT.
+fn search_ranges(text: &str, query: &[u8]) -> Vec<(usize, usize)> {
+    let folded = folded_bytes(text);
+    if query.is_empty() || query.len() > folded.len() {
+        return Vec::new();
+    }
+    let mut v = Vec::new();
+    let mut at = 0;
+    while at + query.len() <= folded.len() {
+        if &folded[at..at + query.len()] == query {
+            v.push((at, at + query.len()));
+            at += query.len();
+        } else {
+            at += 1;
+        }
+    }
+    v
+}
+
+/// TEXT split into (part, is-a-match) pieces for the search highlighting.
+fn search_parts<'a>(text: &'a str, query: &[u8]) -> Vec<(&'a str, bool)> {
+    let mut out = Vec::new();
+    let mut last = 0;
+    for (a, b) in search_ranges(text, query) {
+        if !text.is_char_boundary(a) || !text.is_char_boundary(b) {
+            continue;
+        }
+        if a > last {
+            out.push((&text[last..a], false));
+        }
+        out.push((&text[a..b], true));
+        last = b;
+    }
+    if last < text.len() {
+        out.push((&text[last..], false));
+    }
+    out
+}
+
 impl App {
     pub fn new(git: Git) -> App {
         let cwd = git.toplevel.clone();
@@ -607,6 +670,8 @@ impl App {
             cursor: 0,
             scroll: 0,
             mark: None,
+            search_query: None,
+            last_search: String::new(),
             mode: BufferMode::Status,
             buf_args: Vec::new(),
             status_args: vec!["--no-ext-diff".into(), "--ignore-submodules=none".into()],
@@ -751,6 +816,7 @@ impl App {
     /// buffer of that mode (or burying the buffer shown).
     fn setup_buffer(&mut self, mode: BufferMode, args: Vec<String>) {
         self.view_text = None;
+        self.search_query = None;
         let mut same = self.mode == mode;
         if !self.mode.same_kind(&mode) {
             let saved = self.take_current();
@@ -828,6 +894,7 @@ impl App {
             self.set_msg("");
             return;
         }
+        self.search_query = None;
         let Some(b) = self.buried.pop() else {
             if self.mode == BufferMode::Status {
                 self.set_msg("Type C-x C-c to quit xagit");
@@ -848,6 +915,7 @@ impl App {
 
     /// Show the status buffer in place of the buffer shown (killed).
     fn show_status_buffer(&mut self) {
+        self.search_query = None;
         self.mode = BufferMode::Status;
         self.buf_args.clear();
         self.buf = StatusBuffer::default();
@@ -1096,10 +1164,13 @@ impl App {
                 ("M-p/M-n", "move"),
                 ("?", "help"),
             ]
+        } else if self.search_query.is_some() {
+            &[("C-s", "next"), ("C-r", "prev"), ("C-g", "clear"), ("q", "back"), ("C-x C-c", "quit")]
         } else {
             &[
                 ("h/?", "dispatch"),
                 ("g", "refresh"),
+                ("C-s", "search"),
                 ("TAB", "toggle"),
                 ("RET", "visit"),
                 ("q", "back"),
@@ -1125,6 +1196,11 @@ impl App {
         let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
         let (w, h) = (w as usize, h as usize);
         let t = self.theme.clone();
+        let needle = self
+            .search_query
+            .as_ref()
+            .filter(|q| !q.is_empty())
+            .map(|q| folded_bytes(q));
         if self.head_label.is_empty() {
             self.head_label = self.git.head_desc();
         }
@@ -1220,12 +1296,27 @@ impl App {
                 };
                 r.push(fringe.to_string(), on_base(t.style(Face::Fringe)));
                 for s in paint::highlight(&t, line) {
-                    r.push(s.text, on_base(s.style));
+                    if let Some(q) = &needle {
+                        for (part, matched) in search_parts(&s.text, q) {
+                            let style = if matched { t.style(Face::SearchMatch) } else { on_base(s.style) };
+                            r.push(part, style);
+                        }
+                    } else {
+                        r.push(s.text, on_base(s.style));
+                    }
                 }
                 if mw > 0 && w > mw + 2 {
                     // the right margin (magit-log-margin)
                     let mut m = Row::new(base);
-                    m.push(line.margin.clone(), on_base(t.style(Face::Margin)));
+                    let margin_style = on_base(t.style(Face::Margin));
+                    if let Some(q) = &needle {
+                        for (part, matched) in search_parts(&line.margin, q) {
+                            let style = if matched { t.style(Face::SearchMatch) } else { margin_style };
+                            m.push(part, style);
+                        }
+                    } else {
+                        m.push(line.margin.clone(), margin_style);
+                    }
                     let left = r.truncated(w - mw);
                     rows.push(Row::split(left, m, w));
                 } else {
@@ -1680,6 +1771,99 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------ buffer search
+
+    /// The query highlighted in the current buffer, if a search is active.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search_query.as_deref()
+    }
+
+    /// The visible lines matching QUERY, including the right margin. The
+    /// list is rebuilt for every step: a refresh or a section toggle can
+    /// replace `lines`, so caching line numbers would go stale.
+    fn search_matches(&self, query: &str) -> Vec<usize> {
+        let needle = folded_bytes(query);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                let mut text = l.text.clone();
+                if !l.margin.is_empty() {
+                    text.push(' ');
+                    text.push_str(&l.margin);
+                }
+                let folded = folded_bytes(&text);
+                folded.windows(needle.len()).any(|w| w == needle.as_slice())
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// C-s / C-r: read a query on the first call (or with a prefix arg),
+    /// then move point through the matches of the current buffer.
+    fn isearch(&mut self, forward: bool) -> Result<()> {
+        if self.view_text.is_some() || self.mode == BufferMode::RebaseTodo {
+            self.set_msg("Search is only available in Magit buffers");
+            return Ok(());
+        }
+        let repeat = self.search_query.is_some() && self.prefix_arg.is_none();
+        let query = if repeat {
+            self.search_query.clone().unwrap_or_default()
+        } else {
+            let default = (!self.last_search.is_empty()).then_some(self.last_search.as_str());
+            match self.read_line_prompt("Search: ", default)? {
+                Some(q) => q,
+                None => {
+                    self.search_query = None;
+                    self.set_msg("Search cancelled");
+                    return Ok(());
+                }
+            }
+        };
+        if query.is_empty() {
+            self.search_query = None;
+            self.set_msg("Search cancelled");
+            return Ok(());
+        }
+        self.last_search = query.clone();
+        self.search_query = Some(query.clone());
+        let matches = self.search_matches(&query);
+        self.search_goto(&matches, forward, !repeat, &query);
+        Ok(())
+    }
+
+    /// Move point to the next match, wrapping around at either end.
+    fn search_goto(&mut self, matches: &[usize], forward: bool, include_current: bool, query: &str) {
+        let short: String = query.chars().take(40).collect();
+        if matches.is_empty() {
+            self.set_msg(&format!("[no match] {short}"));
+            return;
+        }
+        let cur = self.cursor;
+        let next = if forward {
+            matches
+                .iter()
+                .copied()
+                .find(|&i| if include_current { i >= cur } else { i > cur })
+                .or_else(|| matches.first().copied())
+        } else {
+            matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|&i| if include_current { i <= cur } else { i < cur })
+                .or_else(|| matches.last().copied())
+        };
+        if let Some(i) = next {
+            self.cursor = i;
+        }
+        let n = matches.len();
+        self.set_msg(&format!("{n} matches for {short}"));
+    }
+
     // ------------------------------------------------------------ selection helpers
 
     fn current_line(&self) -> Option<&BufferLine> {
@@ -2094,8 +2278,11 @@ impl App {
             }
             Binding::KeyboardQuit => {
                 self.mark = None;
+                self.search_query = None;
                 self.set_msg("Quit");
             }
+            Binding::IsearchForward => self.isearch(true)?,
+            Binding::IsearchBackward => self.isearch(false)?,
             Binding::Visit => self.visit_thing()?,
             Binding::Menu(m) => self.open_menu(m),
             Binding::Command(c) => self.run_command(c, &BTreeMap::new())?,
