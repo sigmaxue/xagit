@@ -9,6 +9,7 @@ pub mod options;
 pub mod paint;
 pub mod rebase_todo;
 pub mod refs;
+pub mod resolve;
 pub mod regexp;
 pub mod smerge;
 pub mod theme;

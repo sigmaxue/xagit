@@ -680,6 +680,7 @@ impl App {
             BufferMode::LogSelect { .. } => "magit-log-select",
             BufferMode::Refs { .. } => "magit-refs",
             BufferMode::RebaseTodo => return "git-rebase-todo".into(),
+            BufferMode::Resolve => "magit-resolve",
             BufferMode::File { rev, file, .. } => return crate::ui::blame::buffer_name(rev, file),
         };
         format!("{m}: {repo}")

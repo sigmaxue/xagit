@@ -67,6 +67,7 @@ mod stash;
 mod tag;
 mod worktree;
 mod rebase_todo;
+mod resolve;
 mod render;
 mod input;
 mod sections;
@@ -159,6 +160,8 @@ pub struct App {
     view_scroll: usize,
     /// the git-rebase-todo being edited (BufferMode::RebaseTodo)
     rebase_todo: Option<RebaseTodoEdit>,
+    /// the conflict resolution view (BufferMode::Resolve)
+    resolve: Option<resolve::ResolveEdit>,
     /// directory xagit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
     /// arguments of new diff / revision / stash buffers (the current value
@@ -262,6 +265,9 @@ pub enum BufferMode {
     /// git-rebase-mode: the todo list of an interactive rebase edited in
     /// xagit (the list itself is App::rebase_todo)
     RebaseTodo,
+    /// the built-in conflict resolution view (`e` with conflicts): its
+    /// state is App::resolve
+    Resolve,
 }
 
 /// An interactive rebase whose todo list is being edited in xagit.
@@ -744,6 +750,7 @@ impl App {
             view_text: None,
             view_scroll: 0,
             rebase_todo: None,
+            resolve: None,
             cwd,
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
@@ -1294,6 +1301,10 @@ impl App {
     fn dispatch_buffer_key(&mut self, key: Key) -> Result<()> {
         // git-rebase-mode-map
         if self.rebase_todo_key(&key)? {
+            return Ok(());
+        }
+        // the built-in conflict resolution view
+        if self.resolve_key(&key)? {
             return Ok(());
         }
         if std::mem::take(&mut self.smerge_prefix) {

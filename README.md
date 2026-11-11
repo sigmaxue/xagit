@@ -142,7 +142,7 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 | `!` | run 菜单 | `!`/`p` 在仓库根目录/启动目录运行 git 命令，`s`/`S` 运行任意 shell 命令，`k`/`a`/`b` 启动 gitk（默认/--all/--branches），`g` 启动 git gui，`m` 用 mergetool 解决冲突 |
 | `$` | process-buffer | 显示最近执行的 git 命令（含退出码与 stderr，失败行以 `!` 开头；查询类命令不记录） |
 | `B` / `Z` / `%` / `o` / `O` / `T` | bisect / worktree / worktree / submodule / subtree / notes | 对应菜单 |
-| `e` / `E` | ediff dwim / ediff 菜单 | 文本 diff 视图；`E s` 用 `git add -p` 选择性暂存，`E m`/`E M` 用 `git mergetool` 解决冲突，`E t` 用 `git mergetool --gui`；`! m` 与 `E t` 相同 |
+| `e` / `E` | ediff dwim / ediff 菜单 | 有冲突时 `e` 打开内建冲突解决视图（见下）；否则显示文本 diff 视图。`E s` 用 `git add -p` 选择性暂存，`E m`/`E M` 用 `git mergetool` 解决冲突，`E t` 用 `git mergetool --gui`；`! m` 与 `E t` 相同 |
 | `D` / `L` | diff-refresh / log-refresh | 修改当前 diff / log 视图的参数，`g` 按新参数重新显示 |
 | `V` | revert 菜单 | `V` 生成 revert 提交、`v` 只在工作区反向应用 |
 | `H` / `J` / `Y` | section info / display buffer / cherries | 当前行信息、状态缓冲区文本、cherry 视图 |
@@ -203,6 +203,7 @@ macOS 提示：Meta 键（如 `M-w`、`M-x`）需要终端把 Option 作为 Meta
 - **Remote (`M`)**：变量组 `u` `remote.<r>.url`、`U` `.fetch`、`s` `.pushurl`、`S` `.push`、`O` `.tagOpt`（--no-tags/--tags）、`h` `.followRemoteHEAD`（create/always/warn）；url 与 pushurl 通过 `git remote set-url [--push] --add/--delete` 增删，二者共用输入历史。`-f` 默认打开（添加后 fetch）；`a` 添加（url 初始值由 origin 的 url 把 owner 换成新远端名得到；按 `magit-remote-add-set-remote.pushDefault` 决定是否设置 `remote.pushDefault`，默认 `ask-if-unset`，可设为 `ask`、`nil` 或某个远端名）、`r` 改名、`k` 删除（改名/删除会同步修改 `remote.pushDefault` 与各分支的 `pushRemote`）、`C` 配置菜单、`p` prune 失效的远程分支、`P` 清理失效的 refspec（连同它们创建的远程分支；全部失效时可选择换成默认 refspec 或删除远端）、`z` unshallow（level 7；唯一的非通配 refspec 会询问是否换成标准 refspec）、`d u` 更新默认分支
 
 - **Run (`!`)**：`!`/`p` 读取完整命令行（初始输入 `git `），`s`/`S` 读取任意 shell 命令；`!`/`s` 在仓库根目录、`p`/`S` 在启动目录用 `$SHELL -c` 执行，`GIT_PAGER=cat`，输出显示在文本视图并记入 `$` 进程日志；`k`/`a`/`b`/`g` 在后台启动图形程序。
+- **冲突解决（`e`，内建视图）**：rebase/merge/cherry-pick 等产生未解决冲突时，按 `e`（ediff dwim）会打开内建的冲突解决视图，替代 Emacs 的三方 Ediff 会话。视图为每个冲突块并排显示 **A（ours，upper）** 与 **B（theirs，lower）** 的内容：光标处按 `a` 保留 A、`b` 保留 B、`d` 两者都保留、`s` 保留 base（仅 diff3/zdiff3）、`u` 撤销该块决定（保留冲突标记）；`n`/`p`（或方向键、`C-n`/`C-p`）在冲突块间移动，做出决定后自动跳到下一个未决定块；`?` 查看帮助。按 `C-c C-c` 把结果写回工作区文件，全部块都已决定时自动 `git add` 暂存（之后用 `r r` 继续 rebase），仍有未决定块时保留标记、不暂存；`C-c C-k` 取消，不改动文件（有改动时先确认）。无冲突时 `e` 仍显示文本 diff，`E m`/`E M`/`E t` 仍可用外部 `git mergetool`。
 - **Ediff (`E`)**：`E/u/i/w/c/r/z` 显示对应的文本 diff；`s` 用 `git add -p` 选择性暂存一个已跟踪文件；`m`/`M` 用 `git mergetool` 解决当前冲突；`t` 用 `git mergetool --gui`。`s` 在没有改动时、`m`/`M` 在没有未解决冲突时显示为括号内的 inapt 后缀（按下只提示 `Inapt command`）。
 - **mergetool 参数**：在 `E`/`!` 菜单里先按 `C-u` 再按 `t`/`m` 时，打开 Magit 的 `magit-git-mergetool` 参数菜单：`-t` 覆盖 `--tool=`，`=t`/`=T` 设置全局 `merge.guitool`/`merge.tool`，`-r`/`-b`/`-k`/`-w` 切换全局 `mergetool.hideResolved`/`keepBackup`/`keepTemporaries`/`writeToTemp`，`SPC m`（先按空格键再按 `m`）执行 `git mergetool --gui ARGS -- FILE`。没有未解决冲突时提示 `There are no unresolved conflicts`。
 
@@ -307,7 +308,7 @@ cargo test
 xagit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
 
 - 提交消息及 `m e` 的合并消息主要通过提示行输入；rebase todo 在内建的 `git-rebase-mode` 缓冲区里编辑；提交消息仍然使用外部编辑器，替代 Emacs 的 with-editor 会话。编辑器退出后返回 TUI。
-- `e`/`E` 用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；`E s` 用 `git add -p` 替代 Ediff 的选择性暂存，`E m`/`E M`/`E t` 用 `git mergetool` 替代 Ediff 的冲突解决会话，效果取决于本机配置的 merge 工具，不等同于 Emacs 的三方 Ediff。
+- `e` 在有未解决冲突时提供内建的 A/B/both 冲突解决视图（见上），其余情况用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；`E s` 用 `git add -p` 替代 Ediff 的选择性暂存，`E m`/`E M`/`E t` 用 `git mergetool` 替代 Ediff 的冲突解决会话，效果取决于本机配置的 merge 工具，不等同于 Emacs 的三方 Ediff（内建视图只覆盖"选边/两者都留"，不做逐行合并编辑）。
 - 部分命令用统一文本视图替代 Magit 专用 buffer，不能据此推断完全没有结构化视图：项目已有专门的 status、diff、log、refs、blame 等模块。`!` 的 shell 命令与 `E t` 的 `git mergetool --gui` 同步捕获输出显示在文本视图，而不是 Magit 的异步 process buffer；`E m`/`E M` 与 `E s` 会把终端交给 merge 工具或 `git add -p`，`gitk`、`git gui` 等图形程序只在后台启动，不会嵌入 TUI。
 - refs 候选、最近提交列表及提示行输入与 Magit 的历史/log 选择交互不同。例如部分 rebase 操作从最近 30 个提交中选择，cherry 搬移可输入 commit 或 `A..B` 区间。
 - `D`/`L` 用于当前视图参数调整，按 `g` 刷新；现有测试断言 diff/log 参数修改只影响所显示的 buffer，新视图仍使用默认参数。旧的"运行内所有 diff/log 共享参数"说明不适用于当前实现。

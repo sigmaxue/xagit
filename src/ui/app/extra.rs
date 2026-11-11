@@ -42,8 +42,15 @@ impl App {
             }
 
             // ---- ediff (text diff buffers instead of Emacs ediff sessions)
-            "ediff-dwim" | "ediff-unstaged" | "ediff-staged" | "ediff-worktree" | "ediff-range"
-            | "ediff-commit" | "ediff-stash" => {
+            "ediff-dwim" => {
+                // `e` with unmerged conflicts opens the built-in resolution
+                // view (the A/B/both part of an Ediff merge session)
+                if !self.resolve_open()? {
+                    self.diff_view("dwim")?;
+                }
+            }
+            "ediff-unstaged" | "ediff-staged" | "ediff-worktree" | "ediff-range" | "ediff-commit"
+            | "ediff-stash" => {
                 self.diff_view(&cmd["ediff-".len()..])?;
             }
 

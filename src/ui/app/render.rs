@@ -161,6 +161,15 @@ impl App {
             &[("C-x", "common commands"), ("?", "help on a key"), ("C-u", "prefix argument")]
         } else if self.view_text.is_some() {
             &[("SPC/DEL", "page"), ("n/p", "scroll"), ("q", "close")]
+        } else if self.mode == BufferMode::Resolve {
+            &[
+                ("a/b/d", "ours/theirs/both"),
+                ("u", "undecide"),
+                ("n/p", "next/prev"),
+                ("C-c C-c", "save & stage"),
+                ("C-c C-k", "cancel"),
+                ("?", "help"),
+            ]
         } else if self.mode == BufferMode::RebaseTodo {
             &[
                 ("C-c C-c", "rebase"),
@@ -218,7 +227,13 @@ impl App {
         let mut rows: Vec<Row> = vec![self.header_row(w, &branch)];
 
         let position;
-        if self.mode == BufferMode::RebaseTodo && self.view_text.is_none() {
+        if self.mode == BufferMode::Resolve && self.view_text.is_none() {
+            let mut scroll = self.scroll;
+            let (r, pos) = self.resolve_rows(body, &mut scroll);
+            self.scroll = scroll;
+            rows.extend(r);
+            position = pos;
+        } else if self.mode == BufferMode::RebaseTodo && self.view_text.is_none() {
             let mut scroll = self.scroll;
             let (r, pos) = self.rebase_todo_rows(body, &mut scroll);
             self.scroll = scroll;
