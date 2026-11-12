@@ -95,9 +95,13 @@ impl App {
         let Some(ed) = self.rebase_todo_close() else { return Ok(()) };
         let text = ed.todo.text();
         let res = match &ed.target {
+            // reword / squash / edit messages are written in xagit's text
+            // buffer; the todo itself comes from this buffer
             RebaseTodoTarget::Start { commit, args } => {
                 let (commit, args) = (commit.clone(), args.clone());
-                self.with_terminal(|g| g.rebase_interactive_todo(&commit, &args, &text, Editor::User))
+                let (todo, file) = self.git.todo_install_editor(&text)?;
+                let a = self.git.rebase_i_args(&commit, &args, &[])?;
+                return self.start_edit_git(a, Some(todo), EditDone::Rebase, Some(file));
             }
             RebaseTodoTarget::InProgress => self.git.rebase_edit_todo_with(&text),
         };

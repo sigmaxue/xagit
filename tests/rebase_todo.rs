@@ -93,10 +93,13 @@ fn action_keys_advance_and_finish_rebases() {
     assert_eq!(app.rebase_todo_cursor(), Some(1));
     press(&mut app, &["d", "f"]);
     assert_eq!(actions(&app), ["reword c2", "drop c3", "fixup c4"]);
-    // the reworded message comes from the editor
-    git(&g, &["config", "core.editor", "sh -c 'echo reworded > \"$1\"' x"]);
     press(&mut app, &["C-c", "C-c"]);
     assert_ne!(app.mode(), &BufferMode::RebaseTodo);
+    // git stops at the reworded commit: xagit's text buffer edits the
+    // message (instead of an external editor), C-c C-c lets rebase go on
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    app.text_edit_set("reworded\n");
+    press(&mut app, &["C-c", "C-c"]);
     assert!(!g.rebase_in_progress(), "{}", app.message());
     assert_eq!(subjects(&g), ["reworded", "c1"], "{}", app.message());
     assert!(!exists(&g, "f3"), "c3 dropped");
@@ -261,4 +264,27 @@ fn dirty_worktree_is_reported() {
     press(&mut app, &["d", "C-c", "C-c"]);
     assert_eq!(subjects(&g), ["c4", "c3", "c1"], "{}", app.message());
     assert_eq!(read(&g, "f1"), "dirty\n");
+}
+
+/// Two `reword` commits ask git to open its editor twice: xagit answers
+/// both requests from the built-in text buffer, one after the other.
+#[test]
+fn two_reword_messages_use_the_builtin_buffer() {
+    let (_td, g) = repo();
+    let mut app = open_todo(&g);
+    press(&mut app, &["r", "r"]); // reword c2 and c3
+    assert_eq!(actions(&app), ["reword c2", "reword c3", "pick c4"]);
+    press(&mut app, &["C-c", "C-c"]);
+    // first message (c2)
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert!(app.text_edit_text().unwrap().contains("c2"));
+    app.text_edit_set("c2 new\n");
+    press(&mut app, &["C-c", "C-c"]);
+    // second message (c3)
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert!(app.text_edit_text().unwrap().contains("c3"));
+    app.text_edit_set("c3 new\n");
+    press(&mut app, &["C-c", "C-c"]);
+    assert!(!g.rebase_in_progress(), "{}", app.message());
+    assert_eq!(subjects(&g), ["c4", "c3 new", "c2 new", "c1"], "{}", app.message());
 }

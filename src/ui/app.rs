@@ -70,6 +70,8 @@ mod rebase_todo;
 mod resolve;
 mod commit_msg;
 mod text_edit;
+mod edit_session;
+use edit_session::EditDone;
 mod render;
 mod input;
 mod sections;
@@ -168,6 +170,8 @@ pub struct App {
     commit_edit: Option<commit_msg::CommitEdit>,
     /// the built-in text buffer (BufferMode::TextEdit)
     text_edit: Option<text_edit::TextEdit>,
+    /// a git command running with xagit as its editor (worker thread)
+    edit_session: Option<edit_session::EditSession>,
     /// directory xagit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
     /// arguments of new diff / revision / stash buffers (the current value
@@ -765,6 +769,7 @@ impl App {
             resolve: None,
             commit_edit: None,
             text_edit: None,
+            edit_session: None,
             cwd,
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],

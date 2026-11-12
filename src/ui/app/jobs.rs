@@ -35,6 +35,8 @@ pub(super) struct Jobs {
     rx: Receiver<Done>,
     /// work is handed to worker threads (the TUI runs in a terminal)
     pub enabled: bool,
+    /// a git command with xagit as its editor is running (short polls)
+    pub editing: bool,
     /// commands being run: a refresh waits for the outermost
     pub depth: usize,
     /// a refresh was asked for and not started yet
@@ -56,6 +58,7 @@ impl Default for Jobs {
             tx,
             rx,
             enabled: false,
+            editing: false,
             depth: 0,
             wanted: false,
             gen: 0,
@@ -70,7 +73,7 @@ impl Default for Jobs {
 impl Jobs {
     /// Whether anything runs in the background.
     pub fn busy(&self) -> bool {
-        self.refreshing || !self.running.is_empty()
+        self.refreshing || self.editing || !self.running.is_empty()
     }
 
     /// How long the event loop waits for a key before it looks for
@@ -89,13 +92,13 @@ impl Jobs {
         Some((since.elapsed().as_millis() / 100) as usize)
     }
 
-    fn mark_busy(&mut self) {
+    pub(super) fn mark_busy(&mut self) {
         if self.since.is_none() {
             self.since = Some(Instant::now());
         }
     }
 
-    fn mark_idle(&mut self) {
+    pub(super) fn mark_idle(&mut self) {
         if !self.busy() {
             self.since = None;
         }
@@ -298,6 +301,7 @@ impl App {
             self.finish(done);
             any = true;
         }
+        self.poll_edit();
         any
     }
 
@@ -438,6 +442,23 @@ impl App {
     /// Before quitting: the git processes still running are killed when
     /// the user agrees, else xagit stays. True if xagit may quit.
     pub(super) fn quit_with_jobs(&mut self) -> bool {
+        // a background git command with xagit as its editor is waiting
+        // on a script: confirm, then release it so the worker can end
+        if self.edit_session.is_some() {
+            if !self.yes_no("A git command is waiting for an edited message; cancel it and quit? ").unwrap_or(false) {
+                self.quit = false;
+                self.set_msg("");
+                return false;
+            }
+            if let Some(s) = &self.edit_session {
+                s.cancel_pending();
+            }
+            if let Some(s) = self.edit_session.take() {
+                s.server_stop();
+            }
+            self.jobs.editing = false;
+            self.jobs.mark_idle();
+        }
         if self.jobs.running.is_empty() {
             return true;
         }

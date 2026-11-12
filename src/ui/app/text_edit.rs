@@ -1,12 +1,11 @@
 //! The built-in text buffer used to edit files git would otherwise hand
-//! to an external editor (an xagit addition, like Emacs' with-editor but
-//! synchronous): git notes, branch descriptions and patch cover letters.
-//! The file's text is read into the buffer, edited here, and written back
-//! by the matching git command on C-c C-c.  C-c C-k cancels.
-//!
-//! Rebase/sequencer messages (reword/squash, `--edit`, continue) are still
-//! edited by git's configured editor: those editors are called by git
-//! itself while a sequencer step is in progress.
+//! to an external editor.  Two kinds:
+//!   * git notes, branch descriptions and patch cover letters: read the
+//!     text into the buffer and write it back on C-c C-c (synchronous).
+//!   * rebase/sequencer messages (reword/squash, `--edit`, `--continue`):
+//!     git waits on an EditorServer while its command runs on a worker
+//!     thread; the buffer edits the file git passed and answers the server
+//!     on C-c C-c / C-c C-k (see `edit_session.rs`).
 
 use super::*;
 use crate::ui::commit_msg::Message;
@@ -20,6 +19,9 @@ pub enum TextEditSave {
     BranchDescription { branch: String },
     /// write the file PATH back (the cover letter of a patch series)
     File { path: std::path::PathBuf },
+    /// answer the git editor request SEQ: write PATH, then reply "ok".
+    /// C-c C-k replies "cancel" without writing.
+    Reply { seq: u64, path: std::path::PathBuf },
 }
 
 /// The state of the built-in text buffer.
@@ -80,19 +82,38 @@ impl App {
         ed
     }
 
-    /// C-c C-c: apply the edited text (write it back / run git), then
-    /// refresh.  The text is used verbatim (with a trailing newline).
+    /// C-c C-c: apply the edited text (write it back / run git / answer
+    /// the waiting git editor), then refresh.  Verbatim with a trailing
+    /// newline; comment lines are NOT stripped here (git does that itself
+    /// for commit messages).
     fn text_edit_finish(&mut self) -> Result<()> {
         let Some(ed) = self.text_edit_close() else { return Ok(()) };
         let text = ed.message.text();
         let body = text.trim_end_matches('\n');
-        let res = match &ed.save {
-            TextEditSave::Notes { r, rev } => self.save_note(r.as_deref(), rev, body),
-            TextEditSave::BranchDescription { branch } => self.save_branch_description(branch, body),
-            TextEditSave::File { path } => std::fs::write(path, text.as_bytes())
-                .map_err(|e| anyhow::anyhow!("Cannot write {}: {e}", path.display())),
-        };
-        self.done("", res.map(|()| String::new()));
+        match &ed.save {
+            TextEditSave::Notes { r, rev } => {
+                let res = self.save_note(r.as_deref(), rev, body);
+                self.done("", res.map(|()| String::new()));
+            }
+            TextEditSave::BranchDescription { branch } => {
+                let res = self.save_branch_description(branch, body);
+                self.done("", res.map(|()| String::new()));
+            }
+            TextEditSave::File { path } => {
+                let res = std::fs::write(path, text.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("Cannot write {}: {e}", path.display()));
+                self.done("", res.map(|()| String::new()));
+            }
+            TextEditSave::Reply { seq, path } => {
+                let res = std::fs::write(path, text.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("Cannot write {}: {e}", path.display()));
+                let ok = res.is_ok();
+                if let Err(e) = res {
+                    self.set_msg(&format!("{e:#}"));
+                }
+                self.answer_edit(*seq, ok);
+            }
+        }
         Ok(())
     }
 
@@ -136,7 +157,12 @@ impl App {
     }
 
     fn text_edit_cancel(&mut self) -> Result<()> {
-        self.text_edit_close();
+        let ed = self.text_edit_close();
+        if let Some(TextEdit { save: TextEditSave::Reply { seq, .. }, .. }) = ed {
+            // git aborts that sequencer step (a stopped rebase stays)
+            self.answer_edit(seq, false);
+            return Ok(());
+        }
         self.set_msg("Edit aborted");
         self.refresh();
         Ok(())

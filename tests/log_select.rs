@@ -286,3 +286,40 @@ fn reshelve_since_selects_and_changes_dates() {
     app.press("t").unwrap();
     assert_eq!(app.message(), "Refusing to reshelve detached head");
 }
+
+/// `r w` (rebase-reword-commit) edits the past message in xagit's built-in
+/// text buffer, not an external editor.
+#[test]
+fn reword_past_uses_the_builtin_buffer() {
+    let (_td, g) = repo();
+    let mut app = App::new(g.clone());
+    app.press("r").unwrap();
+    app.press("w").unwrap();
+    assert!(is_select(&app), "{:?}", app.mode());
+    goto(&mut app, " two");
+    press(&mut app, &["C-c", "C-c"]);
+    // git rewords `two`: the message is shown in the built-in buffer
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert_eq!(app.text_edit_title().as_deref(), Some("COMMIT_EDITMSG"));
+    assert!(app.text_edit_text().unwrap().contains("two"), "{}", app.message());
+    finish_edits(&mut app, Some("two reworded\n"));
+    assert_eq!(subjects(&g), ["three", "two reworded", "initial"], "{}", app.message());
+}
+
+/// `c A` (commit-alter, a fixup with --edit) edits the fixup message in
+/// xagit's built-in text buffer.
+#[test]
+fn commit_alter_uses_the_builtin_buffer() {
+    let (_td, g) = repo();
+    write(&g, "two.txt", "changed\n");
+    g.git_interactive(&["add", "."]).unwrap();
+    let mut app = App::new(g.clone());
+    press(&mut app, &["c", "A"]);
+    assert!(is_select(&app), "{:?}", app.mode());
+    goto(&mut app, " two");
+    press(&mut app, &["C-c", "C-c"]);
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert_eq!(app.text_edit_title().as_deref(), Some("COMMIT_EDITMSG"));
+    finish_edits(&mut app, Some("just a message\n"));
+    assert_eq!(subjects(&g), ["just a message", "three", "two", "initial"], "{}", app.message());
+}

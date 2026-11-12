@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod diff;
+pub mod editor_server;
 pub mod exec;
 pub mod libgit2;
 pub mod ops;

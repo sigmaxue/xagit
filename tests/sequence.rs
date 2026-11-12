@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use xagit_lib::prelude::*;
-use xagit_lib::ui::app::App;
+use xagit_lib::ui::app::{App, BufferMode};
 
 fn commit_file(g: &Git, file: &str, msg: &str) {
     write(g, file, &format!("{msg}\n"));
@@ -111,6 +111,9 @@ fn revert_region() {
     goto(&mut app, " a");
     app.press("V").unwrap();
     app.press("V").unwrap();
+    // `--edit` messages are written in xagit's text buffer; accept the
+    // messages git prepared for each revert
+    finish_edits(&mut app, None);
     assert_eq!(subjects(&g), ["Revert \"a\"", "Revert \"b\"", "b", "a", "initial"]);
 }
 
@@ -131,6 +134,7 @@ fn merge_and_non_merge_commits() {
     app.press("V").unwrap();
     app.script_answers(&["HEAD", "x", "1"]);
     app.press("V").unwrap();
+    finish_edits(&mut app, None);
     assert_eq!(subjects(&g)[0], "Revert \"Merge branch 'side'\"");
     assert!(!exists(&g, "s.txt"));
 }
@@ -152,4 +156,24 @@ fn commit_create_uses_the_builtin_buffer() {
     app.press("C-c").unwrap();
     app.press("C-c").unwrap();
     assert_eq!(subjects(&g), ["edited", "initial"]);
+}
+
+/// git's `--edit` message really comes from xagit's text buffer: replacing
+/// the prepared text changes the resulting commit message.
+#[test]
+fn revert_edit_uses_the_builtin_buffer() {
+    let (_td, g) = picks_repo();
+    g.git_interactive(&["checkout", "-q", "master"]).unwrap();
+    let mut app = App::new(g.clone());
+    log_master(&mut app);
+    goto(&mut app, " b");
+    app.press("V").unwrap();
+    app.script_answers(&["HEAD"]);
+    app.press("V").unwrap();
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert_eq!(app.text_edit_title().as_deref(), Some("COMMIT_EDITMSG"));
+    assert!(app.text_edit_text().unwrap().contains("Revert \"b\""));
+    finish_edits(&mut app, Some("my revert message\n"));
+    assert_eq!(subjects(&g)[0], "my revert message", "{}", app.message());
+    assert!(!exists(&g, "b.txt"));
 }

@@ -1679,7 +1679,7 @@ impl Git {
     }
 
     /// The arguments of `git rebase -i` for COMMIT and later commits.
-    fn rebase_i_args(&self, commit: &str, args: &[String], global: &[&str]) -> Result<Vec<String>> {
+    pub fn rebase_i_args(&self, commit: &str, args: &[String], global: &[&str]) -> Result<Vec<String>> {
         let since = self.rebase_since(commit)?;
         let mut a: Vec<String> = global.iter().map(|s| s.to_string()).collect();
         a.extend(["rebase".to_string(), "-i".to_string()]);
@@ -1762,6 +1762,20 @@ impl Git {
     pub fn rebase_reword_commit(&self, commit: &str, args: &[String], message: Editor) -> Result<()> {
         let ed = perl_pick_editor(&self.abbrev(commit)?, "reword");
         self.rebase_i(commit, args, Editor::Command(&ed), message, &[])
+    }
+
+    /// The todo editor that marks COMMIT as `reword` (for `r w` with the
+    /// built-in message buffer).
+    pub fn rebase_reword_todo_editor(&self, commit: &str) -> Result<String> {
+        Ok(perl_pick_editor(&self.abbrev(commit)?, "reword"))
+    }
+
+    /// Install TODO as the rebase todo list: returns the sequence editor
+    /// command and the temp file backing it (keep it alive until git ends).
+    pub fn todo_install_editor(&self, todo: &str) -> Result<(String, tempfile::NamedTempFile)> {
+        let file = write_temp(todo)?;
+        let editor = format!("cp {}", sh_quote(&file.path().to_string_lossy()));
+        Ok((editor, file))
     }
 
     /// magit-rebase-remove-commit ("r k"): drop COMMIT from the history.

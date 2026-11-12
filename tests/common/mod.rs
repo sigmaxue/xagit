@@ -66,3 +66,19 @@ pub fn read(g: &Git, path: &str) -> String {
 pub fn exists(g: &Git, path: &str) -> bool {
     g.toplevel.join(path).exists()
 }
+
+/// Drive all the built-in text buffers a git sequence opens (reword /
+/// squash / `--edit` messages): accept each prepared message with C-c C-c
+/// until the sequence finishes.  With `text`, replace each message first.
+pub fn finish_edits(app: &mut App, text: Option<&str>) {
+    for _ in 0..64 {
+        if app.text_edit_text().is_none() {
+            return;
+        }
+        if let Some(t) = text {
+            app.text_edit_set(t);
+        }
+        press(app, &["C-c", "C-c"]);
+    }
+    panic!("editor session did not finish");
+}

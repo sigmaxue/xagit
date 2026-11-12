@@ -529,13 +529,12 @@ impl App {
             a.extend(args);
             a
         };
-        let res = self.with_terminal(|g| g.sequencer_run(command, &args, &commits));
-        match res {
-            Ok(()) => self.set_msg(command),
-            Err(e) => self.report_error(&e),
-        }
-        self.refresh();
-        Ok(())
+        // the messages (with --edit, one per commit) are written in
+        // xagit's text buffer
+        let mut full = vec![command.to_string()];
+        full.extend(args);
+        full.extend(commits);
+        self.start_edit_git(full, None, EditDone::Sequence(command.to_string()), None)
     }
 
     /// magit-log-select: show the log of the current branch to pick a
@@ -615,7 +614,12 @@ impl App {
             // the todo is edited in xagit's git-rebase-mode buffer
             "rebase-interactive" => return self.rebase_todo_start(commit, args),
             "rebase-edit-commit" => self.git.rebase_edit_commit(commit, args),
-            "rebase-reword-commit" => self.with_terminal(|g| g.rebase_reword_commit(commit, args, Editor::User)),
+            // `r w`: the new message is written in xagit's text buffer
+            "rebase-reword-commit" => {
+                let todo = self.git.rebase_reword_todo_editor(commit)?;
+                let a = self.git.rebase_i_args(commit, args, &[])?;
+                return self.start_edit_git(a, Some(todo), EditDone::Rebase, None);
+            }
             _ => self.git.rebase_remove_commit(commit, args),
         };
         self.after_rebase(res);
@@ -697,7 +701,10 @@ impl App {
             a.extend(args.iter().cloned());
         }
         let res = if edit {
-            self.with_terminal(|g| g.commit_with_editor(&a, Editor::User))
+            // the fixup/squash message is written in xagit's text buffer
+            let mut full = vec!["commit".to_string()];
+            full.extend(a.iter().cloned());
+            return self.start_edit_git(full, None, EditDone::Plain(String::new()), None);
         } else {
             self.git.commit(None, &a)
         };

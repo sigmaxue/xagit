@@ -622,6 +622,46 @@ impl Git {
         Ok(())
     }
 
+    /// Like `git_with_editors_env` but with stdin/stdout/stderr captured
+    /// instead of inherited: for a git command run on a worker thread
+    /// whose editor is xagit's built-in text buffer (the TUI owns the
+    /// terminal).  Returns Ok(()) on success, else the failure text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn git_with_editors_capture(
+        &self,
+        todo: Editor,
+        message: Editor,
+        env: &[(&str, &str)],
+        args: &[&str],
+    ) -> Result<(), String> {
+        use std::process::Stdio;
+        let mut cmd = Command::new(env_git());
+        cmd.args(["-c", "color.ui=false"]).envs(env.iter().copied()).current_dir(&self.toplevel);
+        match todo {
+            Editor::Accept => { cmd.env("GIT_SEQUENCE_EDITOR", "true"); }
+            Editor::Command(c) => { cmd.env("GIT_SEQUENCE_EDITOR", c); }
+            Editor::User => {}
+        }
+        match message {
+            Editor::Accept => { cmd.env("GIT_EDITOR", "true"); }
+            Editor::Command(c) => { cmd.env("GIT_EDITOR", c); }
+            Editor::User => {}
+        }
+        let out = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(args)
+            .output()
+            .map_err(|e| format!("{:#}", spawn_failure(&self.toplevel, args, e)))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        record(&self.toplevel, args, out.status.success(), out.status.code(), &stderr);
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(failure(&self.toplevel, args, &out))
+    }
+
     /// Run a side-effecting git command and return its stdout (recorded in the
     /// process log, unlike `git_string` which is used for queries).
     pub fn git_fmt(&self, args: &[String]) -> Result<String> {
