@@ -271,3 +271,34 @@ fn staged_binary_files() {
     );
     assert_eq!(status(&g), "MM bin.dat");
 }
+
+/// magit-confirm-files with several files: the file list is displayed in a
+/// panel ABOVE the minibuffer, so the prompt itself is a single clean line.
+#[test]
+fn multi_file_confirm_prompt_is_not_squeezed() {
+    let (_td, g, _) = repo_with_commit();
+    for f in ["a.txt", "b.txt", "c.txt"] {
+        write(&g, f, "changed\n");
+        git(&g, &["add", f]);
+    }
+    // make them unstaged modifications (tracked, committed, then changed)
+    git(&g, &["commit", "-q", "-m", "add three"]);
+    for f in ["a.txt", "b.txt", "c.txt"] {
+        write(&g, f, "modified\n");
+    }
+    let mut app = App::new(g.clone());
+    // select the three file lines of the Unstaged changes section
+    goto_file(&mut app, "Unstaged changes", "modified   a.txt");
+    press(&mut app, &["C-SPC", "C-n", "C-n"]);
+    app.script_answers(&["y"]);
+    app.press("k").unwrap();
+    let p = app.prompts().last().cloned().unwrap_or_default();
+    assert!(!p.contains('\n'), "multi-line prompt leaked into the minibuffer: {p:?}");
+    assert!(!p.contains("a.txt") && !p.contains("b.txt") && !p.contains("c.txt"),
+        "file names leaked into the single-line prompt: {p:?}");
+    assert!(p.contains("3 files") && p.contains("(y or n)"), "wrong question: {p:?}");
+    // all three files were discarded
+    assert_eq!(read(&g, "a.txt"), "changed\n");
+    assert_eq!(read(&g, "b.txt"), "changed\n");
+    assert_eq!(read(&g, "c.txt"), "changed\n");
+}

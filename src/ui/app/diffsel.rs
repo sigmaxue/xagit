@@ -142,12 +142,30 @@ impl App {
         Ok(ok)
     }
 
-    /// magit-confirm with NOABORT: declining isn't an error.
+    /// magit-confirm with NOABORT: declining isn't an error.  A multi-line
+    /// prompt (a list of files followed by the question) is shown with the
+    /// list in a panel above the minibuffer, so the file names line up
+    /// instead of being squeezed into the single-line prompt.
     pub(super) fn confirm_noabort(&mut self, action: &str, prompt: &str) -> Result<bool> {
         if self.options.no_confirm(action) {
             return Ok(true);
         }
-        self.magit_y_or_n_p(&format!("{prompt}?"), Some(action))
+        let (above, last) = match prompt.rsplit_once('\n') {
+            Some((head, tail)) => {
+                let lines: Vec<String> = head
+                    .lines()
+                    .map(|l| l.trim_end())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| format!("  {l}"))
+                    .collect();
+                (lines, tail.trim().to_string())
+            }
+            None => (Vec::new(), prompt.to_string()),
+        };
+        *self.minibuffer_above.borrow_mut() = above;
+        let r = self.magit_y_or_n_p(&format!("{last}?"), Some(action));
+        self.minibuffer_above.borrow_mut().clear();
+        r
     }
 
     /// magit-read-stash: one of the stashes ("stash@{N} subject",
@@ -221,7 +239,7 @@ impl App {
         match items {
             [] => Ok(true),
             [i] => self.confirm(action, &one.replacen("%s", i, 1)),
-            is => self.confirm(action, &format!("{}\n\n{}", is.join("\n"), many.replacen("%d", &is.len().to_string(), 1))),
+            is => self.confirm(action, &format!("{}\n{}", is.join("\n"), many.replacen("%d", &is.len().to_string(), 1))),
         }
     }
 
@@ -230,7 +248,7 @@ impl App {
         match files {
             [] => Ok(true),
             [f] => self.confirm(action, &format!("{prompt} \"{f}\"")),
-            fs => self.confirm(action, &format!("{}\n\n{prompt} {} files", fs.join("\n"), fs.len())),
+            fs => self.confirm(action, &format!("{}\n{prompt} {} files", fs.join("\n"), fs.len())),
         }
     }
 

@@ -223,7 +223,9 @@ fn read_and_drop_stashes() {
     let n = app.prompts().len();
     app.script_answers(&["y", "yes"]);
     app.press("k").unwrap();
-    let p = "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (yes or no) ";
+    // the stash list is shown in a panel above the minibuffer; the prompt
+    // itself is a single line (and "y" is not a valid yes-or-no answer)
+    let p = "Drop 2 stashes? (yes or no) ";
     assert_eq!(app.prompts()[n..], [p, p], "y isn't an answer");
     assert!(stash_list(&g).is_empty());
     assert!(app.message().starts_with("Deleted refs/stash@{0} (was "), "{}", app.message());
@@ -304,7 +306,7 @@ fn slow_confirm() {
     press(&mut app, &["C-SPC", "C-n"]);
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts().last().unwrap(), "stash@{0}\nstash@{1}\n\nDrop 2 stashes? (y or n) ");
+    assert_eq!(app.prompts().last().unwrap(), "Drop 2 stashes? (y or n) ");
     assert!(stash_list(&g).is_empty());
 }
 
@@ -321,31 +323,23 @@ fn published_branches() {
     // magit-published-branches: origin/master
     app.script_answers(&["n"]);
     press(&mut app, &["c", "e"]);
-    assert_eq!(
-        app.prompts().last().unwrap(),
-        "This commit has already been published to origin/master.\nDo you really want to modify it? (y or n) "
-    );
+    // the "already published" line is shown above the minibuffer now
+    assert_eq!(app.prompts().last().unwrap(), "Do you really want to modify it? (y or n) ");
     assert_eq!(app.message(), "Abort");
     assert_eq!(g.rev_parse("HEAD").unwrap(), head);
     // several: listed, then counted
     app.set_options(options("magit-published-branches origin/master origin/main"));
     app.script_answers(&["n"]);
     press(&mut app, &["c", "e"]);
-    assert_eq!(
-        app.prompts().last().unwrap(),
-        "origin/master\norigin/main\n\nThis commit has already been published to 2 public branches.\n\
-         Do you really want to modify it? (y or n) "
-    );
+    // the branch list and the "already published" line are shown above
+    // the minibuffer; the prompt itself is a single clean line
+    assert_eq!(app.prompts().last().unwrap(), "Do you really want to modify it? (y or n) ");
     // rebasing them
     app.script_answers(&["n"]);
     press(&mut app, &["l", "l"]);
     goto(&mut app, |t| t.ends_with(" two"));
     press(&mut app, &["r", "w"]);
-    assert_eq!(
-        app.prompts().last().unwrap(),
-        "origin/master\norigin/main\n\nSome of these commits have already been published to 2 public branches.\n\
-         Do you really want to modify them? (y or n) "
-    );
+    assert_eq!(app.prompts().last().unwrap(), "Do you really want to modify them? (y or n) ");
     assert_eq!(g.rev_parse("HEAD").unwrap(), head);
     // none: not asked
     app.set_options(options("magit-published-branches nil"));
@@ -465,7 +459,7 @@ fn discard_untracked_delete() {
     press(&mut app, &["C-SPC", "C-n"]);
     app.script_answers(&["y"]);
     app.press("k").unwrap();
-    assert_eq!(app.prompts(), ["a.txt\nb.txt\n\nDelete 2 files? (y or n) "]);
+    assert_eq!(app.prompts(), ["Delete 2 files? (y or n) "]);
     assert!(!exists(&g, "a.txt") && !exists(&g, "b.txt"));
     assert!(names(&trash).is_empty(), "deleted, not trashed");
     // the untracked section: magit-list-untracked-files, directories
@@ -480,7 +474,7 @@ fn discard_untracked_delete() {
     let n = app.prompts().len();
     assert_eq!(
         app.prompts()[n - 2..],
-        ["d.txt\ndir/\n\nDelete 2 files? (y or n) ", "Recursively delete dir/? (yes, no, all, quit, help)"]
+        ["Delete 2 files? (y or n) ", "Recursively delete dir/? (yes, no, all, quit, help)"]
     );
     assert_eq!(app.message(), "Quit");
     assert!(!exists(&g, "d.txt") && exists(&g, "dir/c.txt"));

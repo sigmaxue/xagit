@@ -140,7 +140,7 @@ fn tag_prune() {
     press(&mut app, &["t", "p"]);
     let prompts = app.prompts();
     assert_eq!(prompts[prompts.len() - 3], "Prune tags using remote");
-    assert!(prompts[prompts.len() - 2].contains("local-1\nlocal-2\n\nDelete 2 tags locally?"), "{prompts:?}");
+    assert!(prompts[prompts.len() - 2].contains("Delete 2 tags locally?"), "{prompts:?}");
     assert!(prompts[prompts.len() - 1].starts_with("Delete remote-only from remote?"), "{prompts:?}");
     assert_eq!(out(&g, &["tag", "-l"]), "both");
     assert_eq!(out(&g, &["ls-remote", "--tags", "origin"]).lines().count(), 1);

@@ -299,10 +299,8 @@ fn wip_purge() {
     git(&g, &["branch", "-D", "gone"]);
     // declined
     mx(&mut app, &[], &["magit-wip-purge", "n"]);
-    assert_eq!(
-        app.prompts().last().unwrap(),
-        "refs/wip/index/refs/heads/gone\nrefs/wip/wtree/refs/heads/gone\n\nDelete 2 wip-refs without corresponding ref? (y or n) "
-    );
+    // the wip-ref list is shown above the minibuffer
+    assert_eq!(app.prompts().last().unwrap(), "Delete 2 wip-refs without corresponding ref? (y or n) ");
     assert_eq!(app.message(), "Abort");
     mx(&mut app, &[], &["magit-wip-purge", "y"]);
     assert_eq!(app.message(), "Deleting wip-refs...done");
