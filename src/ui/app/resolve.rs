@@ -77,12 +77,19 @@ impl App {
         let file = file.to_string();
         let abs = self.git.toplevel.join(&file);
         let text = std::fs::read(&abs).map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
-        let parsed = ResolveFile::parse(&file, &text);
+        let mut parsed = ResolveFile::parse(&file, &text);
         if parsed.regions.is_empty() {
             self.set_msg(&format!("No conflict markers in {file} (use E t for git mergetool)"));
             return Ok(false);
         }
-        let (a_name, b_name) = self.resolve_side_names(&parsed);
+        let (mut a_name, mut b_name) = self.resolve_side_names(&parsed);
+        // During a rebase, git writes the onto (target) branch as the upper
+        // side of the conflict.  Show the target on the RIGHT, like Ediff's
+        // "B = the newer version": swap the columns and their names once.
+        if self.git.rebase_in_progress() {
+            parsed.swap_sides();
+            std::mem::swap(&mut a_name, &mut b_name);
+        }
         self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, top: 0, cc: false, modified: false, a_name, b_name });
         self.setup_buffer(BufferMode::Resolve, Vec::new());
         self.set_msg("Type ? for help (n/p move, a/b/+ choose, q to finish)");
@@ -228,10 +235,14 @@ impl App {
         let Some(ed) = self.resolve.as_ref() else { return Ok(()) };
         let path = ed.file.path.clone();
         let text = std::fs::read(self.git.toplevel.join(&path)).map_err(|e| anyhow::anyhow!("Cannot read {path}: {e}"))?;
-        let parsed = ResolveFile::parse(&path, &text);
+        let mut parsed = ResolveFile::parse(&path, &text);
         if parsed.regions.is_empty() {
             self.set_msg(&format!("No conflict markers left in {path}"));
             return Ok(());
+        }
+        // keep the rebase column order (target on the right) on a recompute
+        if self.git.rebase_in_progress() {
+            parsed.swap_sides();
         }
         let n = parsed.regions.len();
         let ed = self.resolve.as_mut().unwrap();

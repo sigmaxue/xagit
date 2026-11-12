@@ -299,6 +299,18 @@ impl ResolveFile {
         self.regions.iter().filter(|r| r.choice != Choice::Undecided).count()
     }
 
+    /// Swap the two sides of every conflict.  During a rebase the "onto"
+    /// (target) branch is the file's upper (HEAD) side; xagit shows the
+    /// target on the right, so the columns — and therefore the byte ranges
+    /// that A/B choices write — are swapped here once, when the view opens.
+    pub fn swap_sides(&mut self) {
+        for r in &mut self.regions {
+            std::mem::swap(&mut r.upper, &mut r.lower);
+            std::mem::swap(&mut r.upper_label, &mut r.lower_label);
+            r.choice = Choice::Undecided;
+        }
+    }
+
     pub fn all_decided(&self) -> bool {
         self.regions.iter().all(|r| r.choice != Choice::Undecided)
     }
@@ -376,6 +388,24 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], (Some("A1".into()), Some("B1".into()), true));
         assert_eq!(rows[1], (Some("same".into()), Some("same".into()), false));
+    }
+
+    #[test]
+    fn swap_sides_puts_the_target_on_the_right() {
+        // rebase conflict: upper = onto (master), lower = branch (topic)
+        let text = b"top\n<<<<<<< HEAD\nMASTER\n=======\nTOPIC\n>>>>>>> topic\n";
+        let mut f = ResolveFile::parse("f.txt", text);
+        f.swap_sides();
+        let r = &f.regions[0];
+        assert_eq!(r.upper, b"TOPIC\n");
+        assert_eq!(r.lower, b"MASTER\n");
+        assert_eq!(r.upper_label, "topic");
+        assert_eq!(r.lower_label, "HEAD");
+        // A (left) is now topic, B (right) is the target master
+        f.regions[0].choice = Choice::A;
+        assert_eq!(String::from_utf8(f.resolved()).unwrap(), "top\nTOPIC\n");
+        f.regions[0].choice = Choice::B;
+        assert_eq!(String::from_utf8(f.resolved()).unwrap(), "top\nMASTER\n");
     }
 
     #[test]

@@ -69,20 +69,21 @@ fn choose_a_b_both_and_save() {
     // conflict markers are still in the worktree file until C-c C-c
     assert!(read(&g, "f.txt").contains("<<<<<<<"));
 
-    // a: keep A (ours = the version of the branch being rebased onto,
-    // i.e. the upper side shown in the file)
+    // rebase: the target (master) is the RIGHT column (B); the left (A)
+    // is the branch being rebased (topic)
+    // a: keep A = topic
     press(&mut app, &["a"]);
     assert_eq!(app.resolve_choices().unwrap(), [Choice::A]);
     let out = app.resolve_result().unwrap();
-    assert!(out.contains("MASTER line") && !out.contains("TOPIC line"), "a: {out:?}");
+    assert!(out.contains("TOPIC line") && !out.contains("MASTER line"), "a: {out:?}");
 
-    // r (restore) then b: keep B (theirs); point stays on the difference
+    // r (restore) then b: keep B = the target master
     press(&mut app, &["r"]);
     assert_eq!(app.resolve_choices().unwrap(), [Choice::Undecided]);
     press(&mut app, &["b"]);
     assert_eq!(app.resolve_choices().unwrap(), [Choice::B]);
     let out = app.resolve_result().unwrap();
-    assert!(out.contains("TOPIC line") && !out.contains("MASTER line"), "b: {out:?}");
+    assert!(out.contains("MASTER line") && !out.contains("TOPIC line"), "b: {out:?}");
 
     // + (ediff-combine-diffs): keep both
     press(&mut app, &["+"]);
@@ -148,18 +149,16 @@ fn two_columns_with_diff_highlight() {
     // render all rows at a wide width
     let view = app.resolve_view(40, 80);
     let theme = Theme::default();
-    // A and B are shown side by side on the same row (separated by │)
+    // the target (master) is on the RIGHT (B); topic is on the LEFT (A)
     let pair = view.iter().find(|(text, _)| text.contains("MASTER line") && text.contains("│"));
     assert!(pair.is_some(), "no side-by-side row: {:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
-    // column titles
-    // the column titles name the two sides: rebase onto master, topic
-    assert!(view.iter().any(|(t, _)| t.contains("A: master") && t.contains("B: topic")), "{:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
-    // the changed lines are highlighted with Added (A) / Removed (B) faces
+    assert!(view.iter().any(|(t, _)| t.contains("A: topic") && t.contains("B: master")), "{:?}", view.iter().map(|(t, _)| t).collect::<Vec<_>>());
+    // A's line (topic) uses Added, B's (master) uses Removed
     let (_, spans) = pair.unwrap();
     let added = theme.style(Face::Added);
     let removed = theme.style(Face::Removed);
-    let has_added = spans.iter().any(|(s, st)| s.contains("MASTER line") && *st == added);
-    let has_removed = spans.iter().any(|(s, st)| s.contains("TOPIC line") && *st == removed);
+    let has_added = spans.iter().any(|(s, st)| s.contains("TOPIC line") && *st == added);
+    let has_removed = spans.iter().any(|(s, st)| s.contains("MASTER line") && *st == removed);
     assert!(has_added, "A line not highlighted: {spans:?}");
     assert!(has_removed, "B line not highlighted: {spans:?}");
     // common (unchanged) lines, when present, carry the Context style
@@ -278,7 +277,7 @@ fn q_asks_to_save() {
     app.script_answers(&["yes"]);
     press(&mut app, &["q"]);
     let body = read(&g, "f.txt");
-    assert!(body.contains("TOPIC line") && !body.contains("<<<<<<< "), "{body:?}");
+    assert!(body.contains("MASTER line") && !body.contains("<<<<<<< "), "{body:?}");
     assert!(g.unmerged_files().is_empty(), "{}", app.message());
 }
 
@@ -332,17 +331,18 @@ fn branch_names_and_result_window() {
     let (_td, g) = conflict_repo();
     let mut app = App::new(g.clone());
     open(&mut app);
-    // rebase topic onto master: A = master (upper, HEAD side), B = topic
+    // rebase topic onto master: the target master is on the RIGHT (B),
+    // the branch being rebased (topic) is on the LEFT (A)
     let (a, b) = app.resolve_side_names_shown().unwrap();
-    assert_eq!(a, "master");
-    assert!(b.starts_with("topic (") && b.contains("topic"), "{b}");
+    assert!(a.starts_with("topic (") && a.contains("topic"), "{a}");
+    assert_eq!(b, "master");
     let texts = |app: &App| app.resolve_view(30, 100).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
     let v = texts(&app);
     let c = v.iter().position(|t| t.contains("C: merge result")).expect("C window");
     // undecided: C still shows the conflict markers
     assert!(v[c..].iter().any(|t| t.contains("<<<<<<<")), "{v:?}");
-    // b: C shows B's line in place of the conflict, with the context
-    press(&mut app, &["b"]);
+    // a: C shows A's (topic) line in place of the conflict, with context
+    press(&mut app, &["a"]);
     let v = texts(&app);
     let c = v.iter().position(|t| t.contains("C: merge result")).unwrap();
     let below = &v[c + 1..];
@@ -350,16 +350,17 @@ fn branch_names_and_result_window() {
     assert!(!below.iter().any(|t| t.contains("MASTER line") || t.contains("<<<<<<<")), "{v:?}");
     assert!(below.iter().any(|t| t.trim() == "top") && below.iter().any(|t| t.trim() == "bottom"), "{v:?}");
     // the header and message name the chosen branch
-    assert!(v.iter().any(|t| t.contains("Conflict 1") && t.contains("B: topic")), "{v:?}");
-    assert!(app.message().contains("B: topic"), "{}", app.message());
+    assert!(v.iter().any(|t| t.contains("Conflict 1") && t.contains("A: topic")), "{v:?}");
+    assert!(app.message().contains("A: topic"), "{}", app.message());
     // +: both, in order
     press(&mut app, &["+"]);
     let v = texts(&app);
     let c = v.iter().position(|t| t.contains("C: merge result")).unwrap();
     let below: Vec<&String> = v[c + 1..].iter().collect();
-    let m = below.iter().position(|t| t.contains("MASTER line")).expect("A in C");
-    let tp = below.iter().position(|t| t.contains("TOPIC line")).expect("B in C");
-    assert!(m < tp, "{below:?}");
+    // both: A (topic, left) comes before B (master, right)
+    let tp = below.iter().position(|t| t.contains("TOPIC line")).expect("A in C");
+    let m = below.iter().position(|t| t.contains("MASTER line")).expect("B in C");
+    assert!(tp < m, "{below:?}");
 }
 
 /// A merge names its sides after the current and the merged branch.
