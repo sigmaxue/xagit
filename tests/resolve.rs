@@ -383,3 +383,106 @@ fn merge_side_names() {
     open(&mut app);
     assert_eq!(app.resolve_side_names_shown().unwrap(), ("master".to_string(), "feature".to_string()));
 }
+
+/// A rebase conflict whose block has two side-by-side rows on both sides.
+fn multiline_conflict_repo() -> (TempDir, Git) {
+    let (td, g) = scratch_repo();
+    git(&g, &["config", "user.name", "t"]);
+    git(&g, &["config", "user.email", "t@t"]);
+    git(&g, &["config", "merge.conflictStyle", "merge"]);
+    write(&g, "f.txt", "top\none\ntwo\nbottom\n");
+    git(&g, &["add", "."]);
+    git(&g, &["commit", "-q", "-m", "base"]);
+    git(&g, &["checkout", "-q", "-b", "topic"]);
+    write(&g, "f.txt", "top\nTOPIC-1\nTOPIC-2\nbottom\n");
+    git(&g, &["commit", "-q", "-am", "topic"]);
+    git(&g, &["checkout", "-q", "master"]);
+    write(&g, "f.txt", "top\nMASTER-1\nMASTER-2\nbottom\n");
+    git(&g, &["commit", "-q", "-am", "master"]);
+    git(&g, &["checkout", "-q", "topic"]);
+    let _ = g.git_string(&["rebase", "master"]);
+    (td, g)
+}
+
+#[test]
+fn refine_chooses_lines_individually() {
+    let (_td, g) = multiline_conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    assert_eq!(app.resolve_refine(), Some(false));
+    assert_eq!(app.resolve_line_count(), Some(2));
+
+    // * enters line-wise mode; a decides only the first row
+    press(&mut app, &["*"]);
+    assert_eq!(app.resolve_refine(), Some(true));
+    assert_eq!(app.resolve_row(), Some(0));
+    press(&mut app, &["a"]);
+    assert_eq!(app.resolve_line_choices().unwrap(), [Choice::A, Choice::Undecided]);
+    // a partly decided conflict keeps the markers (and both sides)
+    assert!(app.resolve_result().unwrap().contains("<<<<<<<"));
+    let view: Vec<String> = app.resolve_view(40, 80).into_iter().map(|(t, _)| t).collect();
+    assert!(view.iter().any(|t| t.contains("TOPIC-1") && t.contains(" A ")), "{view:?}");
+    assert!(view.iter().any(|t| t.contains("TOPIC-2") && t.contains(" ? ")), "{view:?}");
+
+    // n moves to the next LINE, not the next conflict
+    press(&mut app, &["n"]);
+    assert_eq!(app.resolve_cursor(), Some(0));
+    assert_eq!(app.resolve_row(), Some(1));
+    press(&mut app, &["b"]);
+    assert_eq!(app.resolve_line_choices().unwrap(), [Choice::A, Choice::B]);
+    let out = app.resolve_result().unwrap();
+    assert!(out.contains("TOPIC-1") && out.contains("MASTER-2"), "{out:?}");
+    assert!(!out.contains("MASTER-1") && !out.contains("TOPIC-2") && !out.contains("<<<<<<<"), "{out:?}");
+
+    // d combines both sides of the current line
+    press(&mut app, &["d"]);
+    assert_eq!(app.resolve_line_choices().unwrap(), [Choice::A, Choice::Both]);
+    let out = app.resolve_result().unwrap();
+    assert!(out.contains("TOPIC-2") && out.contains("MASTER-2"), "{out:?}");
+
+    // r restores the current line only
+    press(&mut app, &["r"]);
+    assert_eq!(app.resolve_line_choices().unwrap(), [Choice::A, Choice::Undecided]);
+    assert!(app.resolve_result().unwrap().contains("<<<<<<<"));
+
+    // * back to whole-conflict; a decides the whole block again
+    press(&mut app, &["*"]);
+    assert_eq!(app.resolve_refine(), Some(false));
+    press(&mut app, &["a"]);
+    assert_eq!(app.resolve_choices().unwrap(), [Choice::A]);
+    let out = app.resolve_result().unwrap();
+    assert!(out.contains("TOPIC-1") && out.contains("TOPIC-2") && !out.contains("<<<<<<<"), "{out:?}");
+}
+
+#[test]
+fn refine_moves_across_conflicts_and_saves() {
+    let (_td, g) = two_conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    assert_eq!(app.resolve_line_count(), Some(1));
+    press(&mut app, &["*", "a"]);
+    press(&mut app, &["n"]);
+    assert_eq!(app.resolve_cursor(), Some(1));
+    assert_eq!(app.resolve_row(), Some(0));
+    press(&mut app, &["b"]);
+    press(&mut app, &["C-c", "C-c"]);
+    let body = read(&g, "f.txt");
+    assert!(!body.contains("<<<<<<<"), "{body:?}");
+    assert!(body.contains("TOPIC-1") && body.contains("MASTER-9"), "{body:?}");
+    assert!(!body.contains("MASTER-1") && !body.contains("TOPIC-9"), "{body:?}");
+    assert!(g.unmerged_files().is_empty(), "{}", app.message());
+}
+
+#[test]
+fn partly_decided_conflict_keeps_markers() {
+    let (_td, g) = multiline_conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    press(&mut app, &["*", "a"]);
+    press(&mut app, &["C-c", "C-c"]);
+    let body = read(&g, "f.txt");
+    assert!(body.contains("<<<<<<<"), "{body:?}");
+    assert!(body.contains("TOPIC-1") && body.contains("MASTER-1"), "both sides survive: {body:?}");
+    assert!(app.message().contains("unresolved"), "{}", app.message());
+    assert!(!g.unmerged_files().is_empty());
+}

@@ -40,7 +40,11 @@ pub struct Region {
     pub upper: Vec<u8>,
     pub base: Option<Vec<u8>>,
     pub lower: Vec<u8>,
+    /// the decision for the whole conflict (block-level a/b/d)
     pub choice: Choice,
+    /// per-line decisions after refining the conflict (`*`). Empty until
+    /// the first line-level choice; then one entry per aligned row.
+    pub lines: Vec<Choice>,
     /// the labels after the <<<<<<< and >>>>>>> markers ("HEAD",
     /// "abc1234 (subject)", a branch name …)
     pub upper_label: String,
@@ -78,6 +82,75 @@ impl Aligned {
             rows.push((x.map(lossy), y.map(lossy), changed));
         }
         Aligned { rows }
+    }
+}
+
+/// The positional pairing of A and B as raw bytes (without the lossy
+/// conversion of `Aligned::of`), used when writing the merge result so
+/// non-UTF-8 content survives.
+type RawRow<'a> = (Option<&'a [u8]>, Option<&'a [u8]>);
+
+fn aligned_bytes<'a>(r: &'a Region) -> Vec<RawRow<'a>> {
+    let a = split_lines(&r.upper);
+    let b = split_lines(&r.lower);
+    let n = a.len().max(b.len());
+    (0..n).map(|i| (a.get(i).copied(), b.get(i).copied())).collect()
+}
+
+impl Region {
+    /// Number of aligned rows (the lines shown side by side).
+    pub fn line_count(&self) -> usize {
+        aligned_bytes(self).len()
+    }
+
+    /// True once at least one line has been decided individually.
+    pub fn refined(&self) -> bool {
+        !self.lines.is_empty()
+    }
+
+    /// One choice per aligned row, padded with `Undecided`.
+    pub fn line_choices(&self) -> Vec<Choice> {
+        let mut v = self.lines.clone();
+        v.resize(self.line_count(), Choice::Undecided);
+        v
+    }
+
+    /// Decide one line. False when ROW is out of range. A line-level
+    /// choice takes over from a whole-conflict decision.
+    pub fn set_line(&mut self, row: usize, choice: Choice) -> bool {
+        let n = self.line_count();
+        if row >= n {
+            return false;
+        }
+        self.lines.resize(n, Choice::Undecided);
+        self.lines[row] = choice;
+        self.choice = Choice::Undecided;
+        true
+    }
+
+    /// Number of lines still undecided (0 when not refined).
+    pub fn undecided_lines(&self) -> usize {
+        if !self.refined() {
+            return 0;
+        }
+        self.line_choices().iter().filter(|c| **c == Choice::Undecided).count()
+    }
+
+    /// True when every line has a decision.
+    pub fn lines_decided(&self) -> bool {
+        self.refined() && self.undecided_lines() == 0
+    }
+
+    /// How much is still unresolved: lines when refined, else the whole
+    /// conflict.
+    pub fn unresolved_units(&self) -> usize {
+        if self.refined() {
+            self.undecided_lines()
+        } else if self.choice == Choice::Undecided {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -209,6 +282,7 @@ impl ResolveFile {
                 base: base_bytes,
                 lower,
                 choice: Choice::Undecided,
+                lines: Vec::new(),
                 upper_label: label(i, BEGIN),
                 lower_label: label(end_line, END),
             });
@@ -253,6 +327,47 @@ impl ResolveFile {
         out
     }
 
+    /// The bytes one conflict contributes to the merge result. `None`
+    /// means it is still undecided and keeps its original markers. A
+    /// refined conflict whose every line is decided is written line by
+    /// line; a partly decided one keeps the markers, so no side is lost.
+    fn region_bytes(&self, r: &Region) -> Option<Vec<u8>> {
+        if r.lines_decided() {
+            let rows = aligned_bytes(r);
+            let choices = r.line_choices();
+            let crlf = r.upper.windows(2).any(|w| w == b"\r\n") || r.lower.windows(2).any(|w| w == b"\r\n");
+            let nl: &[u8] = if crlf { b"\r\n" } else { b"\n" };
+            let mut out = Vec::new();
+            for (i, (a, b)) in rows.iter().enumerate() {
+                let c = choices.get(i).copied().unwrap_or(Choice::Undecided);
+                if matches!(c, Choice::A | Choice::Both) {
+                    if let Some(s) = a {
+                        out.extend_from_slice(s);
+                        out.extend_from_slice(nl);
+                    }
+                }
+                if matches!(c, Choice::B | Choice::Both) {
+                    if let Some(s) = b {
+                        out.extend_from_slice(s);
+                        out.extend_from_slice(nl);
+                    }
+                }
+            }
+            return Some(out);
+        }
+        match r.choice {
+            Choice::A => Some(r.upper.clone()),
+            Choice::B => Some(r.lower.clone()),
+            Choice::Both => {
+                let mut v = r.upper.clone();
+                v.extend_from_slice(&r.lower);
+                Some(v)
+            }
+            Choice::Base => r.base.clone(),
+            Choice::Undecided => None,
+        }
+    }
+
     /// The lines of the merge result (Ediff's buffer C) with, for each, the
     /// conflict it comes from (None for the text around the conflicts).  A
     /// conflict whose result is empty still gets an (empty) entry so that
@@ -264,22 +379,8 @@ impl ResolveFile {
             for l in split_lines(&self.original[at..r.start]) {
                 out.push((lossy(l), None, false));
             }
-            let (bytes, empty_mark): (Vec<u8>, bool) = match r.choice {
-                Choice::A => (r.upper.clone(), r.upper.is_empty()),
-                Choice::B => (r.lower.clone(), r.lower.is_empty()),
-                Choice::Both => {
-                    let mut v = r.upper.clone();
-                    v.extend_from_slice(&r.lower);
-                    let e = v.is_empty();
-                    (v, e)
-                }
-                Choice::Base => {
-                    let v = r.base.clone().unwrap_or_default();
-                    let e = v.is_empty();
-                    (v, e)
-                }
-                Choice::Undecided => (self.original[r.start..r.end].to_vec(), false),
-            };
+            let bytes = self.region_bytes(r).unwrap_or_else(|| self.original[r.start..r.end].to_vec());
+            let empty_mark = bytes.is_empty();
             if empty_mark {
                 out.push((String::new(), Some(idx), true));
             } else {
@@ -296,7 +397,7 @@ impl ResolveFile {
     }
 
     pub fn decided(&self) -> usize {
-        self.regions.iter().filter(|r| r.choice != Choice::Undecided).count()
+        self.regions.iter().filter(|r| r.unresolved_units() == 0).count()
     }
 
     /// Swap the two sides of every conflict.  During a rebase the "onto"
@@ -308,11 +409,14 @@ impl ResolveFile {
             std::mem::swap(&mut r.upper, &mut r.lower);
             std::mem::swap(&mut r.upper_label, &mut r.lower_label);
             r.choice = Choice::Undecided;
+            // the sides (and their alignment) changed: old line choices
+            // would now refer to the opposite column
+            r.lines.clear();
         }
     }
 
     pub fn all_decided(&self) -> bool {
-        self.regions.iter().all(|r| r.choice != Choice::Undecided)
+        self.regions.iter().all(|r| r.unresolved_units() == 0)
     }
 
     /// The file bytes with every decided conflict replaced by its choice;
@@ -322,22 +426,7 @@ impl ResolveFile {
         let mut at = 0;
         for r in &self.regions {
             out.extend_from_slice(&self.original[at..r.start]);
-            match r.choice {
-                Choice::A => out.extend_from_slice(&r.upper),
-                Choice::B => out.extend_from_slice(&r.lower),
-                Choice::Both => {
-                    out.extend_from_slice(&r.upper);
-                    out.extend_from_slice(&r.lower);
-                }
-                Choice::Base => {
-                    if let Some(b) = &r.base {
-                        out.extend_from_slice(b);
-                    } else {
-                        out.extend_from_slice(&self.original[r.start..r.end]);
-                    }
-                }
-                Choice::Undecided => out.extend_from_slice(&self.original[r.start..r.end]),
-            }
+            out.extend_from_slice(&self.region_bytes(r).unwrap_or_else(|| self.original[r.start..r.end].to_vec()));
             at = r.end;
         }
         out.extend_from_slice(&self.original[at..]);
@@ -443,5 +532,36 @@ mod tests {
         let mut g = ResolveFile::parse("f.txt", THREE.as_bytes());
         g.regions[0].choice = Choice::Base;
         assert_eq!(String::from_utf8(g.resolved()).unwrap(), "top\norig\nbottom\n");
+    }
+
+    #[test]
+    fn line_choices_write_one_line_at_a_time() {
+        let mut f = ResolveFile::parse("f.txt", TWO.as_bytes());
+        assert_eq!(f.regions[0].line_count(), 2);
+        assert!(!f.all_decided());
+        // one decided line: keep the markers so neither side is lost
+        assert!(f.regions[0].set_line(0, Choice::A));
+        assert_eq!(String::from_utf8(f.resolved()).unwrap(), TWO);
+        assert!(!f.all_decided());
+        // every line decided: write them in order
+        assert!(f.regions[0].set_line(1, Choice::Both));
+        assert_eq!(String::from_utf8(f.resolved()).unwrap(), "top\nours1\nours2\nbottom\n");
+        assert!(f.all_decided());
+        // B for one line, A for the other
+        f.regions[0].set_line(0, Choice::B);
+        f.regions[0].set_line(1, Choice::A);
+        assert_eq!(String::from_utf8(f.resolved()).unwrap(), "top\ntheirs\nours2\nbottom\n");
+        assert!(!f.regions[0].set_line(9, Choice::A));
+    }
+
+    #[test]
+    fn block_choice_and_line_choices_reset_each_other() {
+        let mut f = ResolveFile::parse("f.txt", TWO.as_bytes());
+        f.regions[0].choice = Choice::A;
+        f.regions[0].set_line(0, Choice::B);
+        assert_eq!(f.regions[0].choice, Choice::Undecided);
+        f.regions[0].lines.clear();
+        f.regions[0].choice = Choice::B;
+        assert_eq!(String::from_utf8(f.resolved()).unwrap(), "top\ntheirs\nbottom\n");
     }
 }

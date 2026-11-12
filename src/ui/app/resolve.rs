@@ -2,8 +2,9 @@
 //! part of Emacs Ediff's three-way merge session.  `e` (ediff dwim) opens it
 //! when there are unmerged conflicts; the WHOLE file is shown — unchanged
 //! lines as context in both columns, each conflict with its A (ours) and B
-//! (theirs) versions side by side and a per-region decision.  a/b/d/u set
-//! the decision, n/p jump between conflicts, SPC/DEL and arrows scroll the
+//! (theirs) versions side by side.  a/b/d/u decide the whole conflict; `*`
+//! refines it so a/b/d decide ONE side-by-side line at a time (Ediff's
+//! refine), with n/p moving between lines.  SPC/DEL and arrows scroll the
 //! page, C-c C-c writes the file back and stages it, C-c C-k cancels
 //! without touching the file.
 
@@ -16,6 +17,10 @@ pub struct ResolveEdit {
     pub file: ResolveFile,
     /// index of the conflict the cursor is on
     pub cursor: usize,
+    /// `*` refine: a/b/d decide the current LINE instead of the conflict
+    pub refine: bool,
+    /// index of the current side-by-side row inside the current conflict
+    pub row: usize,
     /// first display row shown (free vertical scrolling)
     pub top: usize,
     /// C-c was typed
@@ -31,13 +36,17 @@ pub struct ResolveEdit {
 const HELP: &str = "\
 Resolve conflicts — Ediff merge-session keys (smerge-ediff / magit-ediff-resolve-rest)
 
-n / p    next / previous difference (scrolls it into view)
+*        refine: toggle LINE-wise decisions (one choice per side-by-side row)
+n / p    next / previous difference; with refine, next / previous LINE
 j        jump to difference N (with a numeric prefix, e.g. C-u 3 j); else the first
 a        copy A (upper, the HEAD side) into the merge result
 b        copy B (lower, the side merged / picked / rebased) into the result
 +        combine A and B (ediff-combine-diffs; d is an alias)
 r        restore the difference: leave its conflict markers (u is an alias)
-B        keep the base version (diff3 conflicts only; xagit extension)
+With refine, a/b/+/r decide the current line only and the gutter between
+the columns shows A / B / + / ? for each line. A partly decided conflict
+keeps its markers until every line has a decision.
+B        keep the base version (diff3 conflicts only; whole conflict)
 !        recompute the differences from the file on disk
 The bottom window (C) shows the merge result as it will be saved: the
 current difference is highlighted, undecided ones still show their markers.
@@ -90,9 +99,19 @@ impl App {
             parsed.swap_sides();
             std::mem::swap(&mut a_name, &mut b_name);
         }
-        self.resolve = Some(ResolveEdit { file: parsed, cursor: 0, top: 0, cc: false, modified: false, a_name, b_name });
+        self.resolve = Some(ResolveEdit {
+            file: parsed,
+            cursor: 0,
+            row: 0,
+            refine: false,
+            top: 0,
+            cc: false,
+            modified: false,
+            a_name,
+            b_name,
+        });
         self.setup_buffer(BufferMode::Resolve, Vec::new());
-        self.set_msg("Type ? for help (n/p move, a/b/+ choose, q to finish)");
+        self.set_msg("Type ? for help (n/p move, a/b/+ choose, * for line-wise, q to finish)");
         Ok(true)
     }
 
@@ -163,6 +182,26 @@ impl App {
         self.resolve.as_ref().map(|e| e.cursor)
     }
 
+    /// Whether line-wise decisions are active (tests).
+    pub fn resolve_refine(&self) -> Option<bool> {
+        self.resolve.as_ref().map(|e| e.refine)
+    }
+
+    /// The current side-by-side row inside the current conflict (tests).
+    pub fn resolve_row(&self) -> Option<usize> {
+        self.resolve.as_ref().map(|e| e.row)
+    }
+
+    /// The per-line choices of the current conflict (tests).
+    pub fn resolve_line_choices(&self) -> Option<Vec<Choice>> {
+        self.resolve.as_ref().map(|e| e.file.regions[e.cursor].line_choices())
+    }
+
+    /// The number of side-by-side rows of the current conflict (tests).
+    pub fn resolve_line_count(&self) -> Option<usize> {
+        self.resolve.as_ref().map(|e| e.file.regions[e.cursor].line_count())
+    }
+
     /// The resolved file bytes without writing (tests).
     pub fn resolve_result(&self) -> Option<String> {
         self.resolve.as_ref().map(|e| String::from_utf8_lossy(&e.file.resolved()).into_owned())
@@ -205,8 +244,8 @@ impl App {
         std::fs::write(&abs, &bytes).map_err(|e| anyhow::anyhow!("Cannot write {path}: {e}"))?;
         let markers = bytes.split(|&b| b == b'\n').any(|l| l.starts_with(b"<<<<<<< "));
         if markers {
-            let remaining = ed.file.regions.iter().filter(|r| r.choice == Choice::Undecided).count();
-            self.set_msg(&format!("Wrote {path}: {remaining} conflict(s) still unresolved"));
+            let remaining: usize = ed.file.regions.iter().map(|r| r.unresolved_units()).sum();
+            self.set_msg(&format!("Wrote {path}: {remaining} line(s)/conflict(s) still unresolved"));
         } else {
             self.git.stage(&path)?;
             self.set_msg(&format!("Resolved and staged {path} (r r to continue)"));
@@ -248,6 +287,7 @@ impl App {
         let ed = self.resolve.as_mut().unwrap();
         ed.file = parsed;
         ed.cursor = ed.cursor.min(n - 1);
+        ed.row = 0;
         ed.top = Self::resolve_conflict_row(ed, ed.cursor);
         ed.modified = false;
         self.set_msg(&format!("{n} difference(s) recomputed"));
@@ -311,12 +351,14 @@ impl App {
             (false, "down") => self.resolve_scroll(1, true),
             (false, "up") => self.resolve_scroll(1, false),
             (false, "j") => self.resolve_jump(),
-            // decisions (ediff-merge keys)
-            (false, "a") => self.resolve_set(Choice::A),
-            (false, "b") => self.resolve_set(Choice::B),
-            (false, "+" | "d") => self.resolve_set(Choice::Both),
+            // * (ediff-toggle-refine): decide one line at a time
+            (false, "*") => self.resolve_toggle_refine(),
+            // decisions (ediff-merge keys): the current line when refined
+            (false, "a") => self.resolve_choose(Choice::A),
+            (false, "b") => self.resolve_choose(Choice::B),
+            (false, "+" | "d") => self.resolve_choose(Choice::Both),
             (false, "B") => self.resolve_set(Choice::Base),
-            (false, "r" | "u") => self.resolve_set(Choice::Undecided),
+            (false, "r" | "u") => self.resolve_choose(Choice::Undecided),
             (false, "!") => self.resolve_reload()?,
             (false, "?") | (true, "h") => {
                 self.view_text = Some(("Resolve conflicts".into(), HELP.into()));
@@ -357,12 +399,118 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// The display-row index of line ROW of conflict IDX.
+    fn resolve_line_row(ed: &ResolveEdit, idx: usize, row: usize) -> usize {
+        use crate::ui::resolve::ViewLine;
+        let mut seen = 0usize;
+        for (i, vl) in ed.file.view().iter().enumerate() {
+            if let ViewLine::Pair(id, ..) = vl {
+                if *id == idx {
+                    if seen == row {
+                        return i;
+                    }
+                    seen += 1;
+                }
+            }
+        }
+        Self::resolve_conflict_row(ed, idx)
+    }
+
+    /// n/p: the next conflict, or the next line when refined.
     fn resolve_move(&mut self, d: isize) {
+        if self.resolve.as_ref().is_some_and(|e| e.refine) {
+            self.resolve_move_line(d);
+            return;
+        }
         let Some(ed) = self.resolve.as_mut() else { return };
         let n = ed.file.regions.len() as isize;
         ed.cursor = (ed.cursor as isize + d).clamp(0, n - 1).max(0) as usize;
         let row = Self::resolve_conflict_row(ed, ed.cursor);
         ed.top = row;
+    }
+
+    /// Move between side-by-side rows, crossing conflict boundaries.
+    fn resolve_move_line(&mut self, d: isize) {
+        let Some(ed) = self.resolve.as_mut() else { return };
+        let count = ed.file.regions.len();
+        let mut cur = ed.cursor as isize;
+        let mut row = ed.row as isize + d;
+        loop {
+            let n = ed.file.regions[cur as usize].line_count() as isize;
+            if row < 0 {
+                if cur > 0 {
+                    cur -= 1;
+                    row = ed.file.regions[cur as usize].line_count() as isize - 1;
+                    continue;
+                }
+                row = 0;
+            } else if row >= n {
+                if cur + 1 < count as isize {
+                    cur += 1;
+                    row = 0;
+                    continue;
+                }
+                row = (n - 1).max(0);
+            }
+            break;
+        }
+        ed.cursor = cur as usize;
+        ed.row = row.max(0) as usize;
+        let (cursor, line) = (ed.cursor, ed.row);
+        let top = Self::resolve_line_row(ed, cursor, line);
+        ed.top = top;
+    }
+
+    /// `*`: toggle Ediff's refine (one decision per side-by-side row).
+    fn resolve_toggle_refine(&mut self) {
+        let refine = {
+            let Some(ed) = self.resolve.as_mut() else { return };
+            ed.refine = !ed.refine;
+            ed.row = 0;
+            let (cursor, row) = (ed.cursor, ed.row);
+            let top = if ed.refine {
+                Self::resolve_line_row(ed, cursor, row)
+            } else {
+                Self::resolve_conflict_row(ed, cursor)
+            };
+            ed.top = top;
+            ed.refine
+        };
+        self.set_msg(if refine {
+            "Line-wise: a/b/d choose this line (n/p next line, * whole conflict)"
+        } else {
+            "Whole conflict: a/b/d choose the block (* for line-wise)"
+        });
+    }
+
+    /// a/b/d/r: the current line when refined, else the whole conflict.
+    fn resolve_choose(&mut self, choice: Choice) {
+        let refine = self.resolve.as_ref().is_some_and(|e| e.refine);
+        if refine {
+            self.resolve_set_line(choice);
+        } else {
+            self.resolve_set(choice);
+        }
+    }
+
+    /// Decide the current side-by-side row.
+    fn resolve_set_line(&mut self, choice: Choice) {
+        let msg = {
+            let Some(ed) = self.resolve.as_mut() else { return };
+            if choice == Choice::Base {
+                "Base is a whole-conflict choice".to_string()
+            } else {
+                let (idx, row) = (ed.cursor, ed.row);
+                if ed.file.regions[idx].set_line(row, choice) {
+                    ed.modified = true;
+                    let text = Self::choice_text(ed, choice);
+                    format!("Conflict {} line {}: {text}", idx + 1, row + 1)
+                } else {
+                    "No line at point".to_string()
+                }
+            }
+        };
+        self.set_msg(&msg);
     }
 
     fn resolve_set(&mut self, choice: Choice) {
@@ -373,6 +521,9 @@ impl App {
         }
         // like ediff-copy-A/B-to-C and ediff-combine-diffs, point stays on
         // the current difference (n moves on)
+        if choice == Choice::Undecided {
+            ed.file.regions[ed.cursor].lines.clear();
+        }
         ed.file.regions[ed.cursor].choice = choice;
         ed.modified = true;
         let n = ed.cursor + 1;
@@ -422,22 +573,31 @@ impl App {
                 format!("{cut}…{}", " ".repeat(col.saturating_sub(cw + 1)))
             }
         };
-        let columns = |a: &str, b: &str, a_face: Face, b_face: Face| -> Row {
-            let mut row = Row::new(Style::default());
-            row.push("  ", Style::default());
-            row.push(fit(a), t.style(a_face));
-            row.push(" │ ", t.style(Face::Gutter));
-            row.push(fit(b), t.style(b_face));
+        let columns = |a: &str, b: &str, a_style: Style, b_style: Style, sep: String, base: Style| -> Row {
+            let mut row = Row::new(base);
+            row.push("  ", base);
+            row.push(fit(a), a_style);
+            row.push(sep, t.style(Face::Gutter).over(base));
+            row.push(fit(b), b_style);
             row
         };
         let mut rows: Vec<Row> = Vec::new();
+        let mut pair_row = 0usize;
         for vl in ed.file.view() {
             match vl {
                 ViewLine::Context(s) => {
                     // the same text in both columns; no diff highlight
-                    rows.push(columns(&s, &s, Face::Context, Face::Context));
+                    rows.push(columns(
+                        &s,
+                        &s,
+                        t.style(Face::Context),
+                        t.style(Face::Context),
+                        " │ ".to_string(),
+                        Style::default(),
+                    ));
                 }
                 ViewLine::Header(i) => {
+                    pair_row = 0;
                     let current = i == ed.cursor;
                     let head_base = if current { t.style(Face::CursorLine) } else { Style::default() };
                     let on = |f: Face| {
@@ -448,11 +608,16 @@ impl App {
                     let mut head = Row::new(head_base);
                     head.push(format!("{gutter} "), on(Face::Gutter));
                     head.push(format!("Conflict {} ", i + 1), on(Face::Label));
-                    let choice = ed.file.regions[i].choice;
-                    head.push(
-                        format!("[{}]", Self::choice_text(ed, choice)),
-                        on(if choice != Choice::Undecided { Face::Keyword } else { Face::Dim }),
-                    );
+                    let r = &ed.file.regions[i];
+                    let resolved = r.unresolved_units() == 0;
+                    let label = if ed.refine {
+                        let n = r.line_count();
+                        let done = if r.refined() { n - r.undecided_lines() } else { 0 };
+                        format!("[line {}/{} · {}/{} decided]", ed.row + 1, n, done, n)
+                    } else {
+                        format!("[{}]", Self::choice_text(ed, r.choice))
+                    };
+                    head.push(label, on(if resolved { Face::Keyword } else { Face::Dim }));
                     rows.push(head);
                 }
                 ViewLine::Columns => {
@@ -462,12 +627,33 @@ impl App {
                     titles.push(fit(&format!("B: {}", ed.b_name)), t.style(Face::SectionHeading));
                     rows.push(titles);
                 }
-                ViewLine::Pair(_, a, b, changed) => {
+                ViewLine::Pair(idx, a, b, changed) => {
                     let a_text = a.as_deref().unwrap_or("");
                     let b_text = b.as_deref().unwrap_or("");
                     let a_face = if changed && a.is_some() { Face::Added } else if a.is_none() { Face::Dim } else { Face::Context };
                     let b_face = if changed && b.is_some() { Face::Removed } else if b.is_none() { Face::Dim } else { Face::Context };
-                    rows.push(columns(a_text, b_text, a_face, b_face));
+                    let current = ed.refine && idx == ed.cursor && pair_row == ed.row;
+                    let (sep, base, a_style, b_style) = if ed.refine {
+                        let c = ed.file.regions[idx].line_choices().get(pair_row).copied().unwrap_or(Choice::Undecided);
+                        let ch = match c {
+                            Choice::A => 'A',
+                            Choice::B => 'B',
+                            Choice::Both => '+',
+                            Choice::Base => 'b',
+                            Choice::Undecided => '?',
+                        };
+                        let base = if current { t.style(Face::CursorLine) } else { Style::default() };
+                        let (a_style, b_style) = if current {
+                            (t.style(a_face).over(base), t.style(b_face).over(base))
+                        } else {
+                            (t.style(a_face), t.style(b_face))
+                        };
+                        (format!(" {ch} "), base, a_style, b_style)
+                    } else {
+                        (" │ ".to_string(), Style::default(), t.style(a_face), t.style(b_face))
+                    };
+                    rows.push(columns(a_text, b_text, a_style, b_style, sep, base));
+                    pair_row += 1;
                 }
                 ViewLine::Blank => rows.push(Row::text(String::new(), Style::default())),
             }
