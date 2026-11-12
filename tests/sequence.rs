@@ -136,13 +136,20 @@ fn merge_and_non_merge_commits() {
 }
 
 #[test]
-fn commit_create_uses_the_editor() {
+fn commit_create_uses_the_builtin_buffer() {
     let (_td, g, _) = repo_with_commit();
+    // an external editor is configured, but xagit edits the message itself
     g.git_interactive(&["config", "core.editor", "f() { echo edited > \"$1\"; }; f"]).unwrap();
     write(&g, "file.txt", "new\n");
     g.git_interactive(&["add", "."]).unwrap();
     let mut app = App::new(g.clone());
     app.press("c").unwrap();
     app.press("c").unwrap();
+    assert_eq!(app.mode(), &xagit_lib::ui::app::BufferMode::Commit);
+    for ch in "edited".chars() {
+        app.press(&ch.to_string()).unwrap();
+    }
+    app.press("C-c").unwrap();
+    app.press("C-c").unwrap();
     assert_eq!(subjects(&g), ["edited", "initial"]);
 }

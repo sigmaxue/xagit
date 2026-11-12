@@ -1,4 +1,5 @@
 pub mod app;
+pub mod commit_msg;
 pub mod blame;
 pub mod diffbuf;
 pub mod help;

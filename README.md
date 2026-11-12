@@ -44,7 +44,7 @@ xagit 是用 Rust 实现的终端 Git 界面，参考 [Magit](https://github.com
 - Git 命令行程序需位于 `PATH`；提交前需配置 Git 用户身份，远端操作需自行配置认证。
 - 支持 Linux 与 macOS 的交互式终端（终端能力与配色见[界面与终端](#界面与终端)）；Windows 未验证。
 - `git2` 依赖涉及本地 C 代码构建，需要可用的 C 编译工具链；当前配置关闭默认特性，不要求系统安装 libgit2/OpenSSL。
-- 需要手动编辑 rebase todo 或提交消息时，配置可用的外部编辑器；Git 按 `GIT_SEQUENCE_EDITOR`、`GIT_EDITOR`、`core.editor` 等规则选择编辑器。
+- `c` 菜单的提交消息在 **内建的 COMMIT_EDITMSG 缓冲区**里编辑（`c c` 创建、`c a` amend、`c w` reword 等）：普通字符直接输入，`RET` 换行，`DEL` 退格，`C-a`/`C-e` 行首/行尾、`C-b`/`C-f`/方向键移动字符，`C-n`/`C-p`/上下方向键在行间移动，`C-d` 删除、`C-k` 删到行尾；`C-c C-c` 提交，`C-c C-k` 取消，`?` 帮助。amend/reword 会预填 HEAD 消息，创建提交预填 MERGE_MSG/模板；以注释字符开头的说明行由 git 在提交时去除。`-C`/`-c`/`--fixup`/`--no-edit` 等不需要消息的参数直接提交，不打开缓冲区。rebase todo 也在内建缓冲区编辑。仍会用到外部编辑器的场景：rebase 的 reword/squash 提交消息、`r w`、fixup `--edit`、notes/branch 描述等；Git 按 `GIT_SEQUENCE_EDITOR`、`GIT_EDITOR`、`core.editor` 等规则选择。
 - `r m`、`r k` 及部分 cherry 搬移操作使用 Perl 脚本改写 todo，需要 `perl`。
 
 ## 安装与构建
@@ -307,7 +307,7 @@ cargo test
 
 xagit 参考 Magit 的键位、transient 菜单与 Git 参数语义；apply、多键参数、Ctrl 按键、`k` 丢弃、section/hunk/region 操作以及 bisect/worktree/submodule/notes/patch 均有实现，不应视为未支持占位。兼容不意味着 Emacs 界面和全部边界行为完全相同：
 
-- 提交消息及 `m e` 的合并消息主要通过提示行输入；rebase todo 在内建的 `git-rebase-mode` 缓冲区里编辑；提交消息仍然使用外部编辑器，替代 Emacs 的 with-editor 会话。编辑器退出后返回 TUI。
+- `c` 菜单的提交消息用内建的 COMMIT_EDITMSG 缓冲区（C-n/C-p、C-c C-c）替代 Emacs 的 with-editor 会话；`m e` 的合并消息、rebase 的 reword/squash 消息等仍主要通过提示行或外部编辑器输入。rebase todo 在内建的 `git-rebase-mode` 缓冲区里编辑。编辑器退出后返回 TUI。
 - `e` 在有未解决冲突时提供内建的 A/B/both 冲突解决视图（见上），其余情况用文本 diff 替代 Ediff，支持文件、暂存/未暂存、revision、commit、stash 等比较；`E s` 用 `git add -p` 替代 Ediff 的选择性暂存，`E m`/`E M`/`E t` 用 `git mergetool` 替代 Ediff 的冲突解决会话，效果取决于本机配置的 merge 工具，不等同于 Emacs 的三方 Ediff（内建视图只覆盖"选边/两者都留"，不做逐行合并编辑）。
 - 部分命令用统一文本视图替代 Magit 专用 buffer，不能据此推断完全没有结构化视图：项目已有专门的 status、diff、log、refs、blame 等模块。`!` 的 shell 命令与 `E t` 的 `git mergetool --gui` 同步捕获输出显示在文本视图，而不是 Magit 的异步 process buffer；`E m`/`E M` 与 `E s` 会把终端交给 merge 工具或 `git add -p`，`gitk`、`git gui` 等图形程序只在后台启动，不会嵌入 TUI。
 - refs 候选、最近提交列表及提示行输入与 Magit 的历史/log 选择交互不同。例如部分 rebase 操作从最近 30 个提交中选择，cherry 搬移可输入 commit 或 `A..B` 区间。

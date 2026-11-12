@@ -142,6 +142,12 @@ impl BufferSpec {
             BufferMode::Stashes { refname } => build_stashes(git, refname, margin),
             BufferMode::Cherry { head, upstream } => build_cherry(git, head, upstream, margin),
             BufferMode::File { rev, file, blame } => build_file(git, rev, file, blame.as_ref()),
+            // the buffer is drawn from App::commit_edit
+            BufferMode::Commit => {
+                let mut buf = StatusBuffer::default();
+                buf.title = "COMMIT_EDITMSG".into();
+                buf
+            }
             // the list is drawn from App::resolve
             BufferMode::Resolve => {
                 let mut buf = StatusBuffer::default();

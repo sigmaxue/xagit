@@ -68,6 +68,7 @@ mod tag;
 mod worktree;
 mod rebase_todo;
 mod resolve;
+mod commit_msg;
 mod render;
 mod input;
 mod sections;
@@ -162,6 +163,8 @@ pub struct App {
     rebase_todo: Option<RebaseTodoEdit>,
     /// the conflict resolution view (BufferMode::Resolve)
     resolve: Option<resolve::ResolveEdit>,
+    /// the built-in commit message buffer (BufferMode::Commit)
+    commit_edit: Option<commit_msg::CommitEdit>,
     /// directory xagit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
     /// arguments of new diff / revision / stash buffers (the current value
@@ -268,6 +271,9 @@ pub enum BufferMode {
     /// the built-in conflict resolution view (`e` with conflicts): its
     /// state is App::resolve
     Resolve,
+    /// the built-in COMMIT_EDITMSG buffer (`c` menu): its state is
+    /// App::commit_edit
+    Commit,
 }
 
 /// An interactive rebase whose todo list is being edited in xagit.
@@ -751,6 +757,7 @@ impl App {
             view_scroll: 0,
             rebase_todo: None,
             resolve: None,
+            commit_edit: None,
             cwd,
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
@@ -1299,6 +1306,10 @@ impl App {
 
     /// A key outside transients.
     fn dispatch_buffer_key(&mut self, key: Key) -> Result<()> {
+        // the built-in COMMIT_EDITMSG buffer
+        if self.commit_msg_key(&key)? {
+            return Ok(());
+        }
         // git-rebase-mode-map
         if self.rebase_todo_key(&key)? {
             return Ok(());

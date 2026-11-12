@@ -423,9 +423,10 @@ fn commit_extend_and_reword_keep_date() {
     press(&mut app, &["c", "C-u", "e"]);
     assert_eq!(g.git_string(&["show", "HEAD:file.txt"]).unwrap(), "more");
     assert_eq!(date(&g), old, "{}", app.message());
-    press(&mut app, &["c", "C-u", "w"]);
+    // reword edits the message in the built-in buffer: confirm it
+    press(&mut app, &["c", "C-u", "w", "C-c", "C-c"]);
     assert_eq!(date(&g), old, "{}", app.message());
-    press(&mut app, &["c", "w"]);
+    press(&mut app, &["c", "w", "C-c", "C-c"]);
     assert_ne!(date(&g), old);
 }
 

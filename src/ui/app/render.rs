@@ -161,6 +161,13 @@ impl App {
             &[("C-x", "common commands"), ("?", "help on a key"), ("C-u", "prefix argument")]
         } else if self.view_text.is_some() {
             &[("SPC/DEL", "page"), ("n/p", "scroll"), ("q", "close")]
+        } else if self.mode == BufferMode::Commit {
+            &[
+                ("C-c C-c", "commit"),
+                ("C-c C-k", "cancel"),
+                ("C-n/C-p", "move"),
+                ("?", "help"),
+            ]
         } else if self.mode == BufferMode::Resolve {
             &[
                 ("a/b/d", "ours/theirs/both"),
@@ -228,7 +235,11 @@ impl App {
         let mut rows: Vec<Row> = vec![self.header_row(w, &branch)];
 
         let position;
-        if self.mode == BufferMode::Resolve && self.view_text.is_none() {
+        if self.mode == BufferMode::Commit && self.view_text.is_none() {
+            let (r, pos) = self.commit_msg_rows(body, w);
+            rows.extend(r);
+            position = pos;
+        } else if self.mode == BufferMode::Resolve && self.view_text.is_none() {
             let (r, pos) = self.resolve_rows(body, w);
             rows.extend(r);
             position = pos;

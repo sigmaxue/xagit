@@ -150,6 +150,45 @@ impl Git {
         self.git_with_editors_env(Editor::User, message, env, &full)
     }
 
+    /// `git commit ARGS` with the message the user wrote in xagit's
+    /// COMMIT_EDITMSG buffer: a temporary COMMIT_EDITMSG file is installed
+    /// by a non-interactive GIT_EDITOR, so hooks, the cleanup mode and all
+    /// other git behavior stay the same as with an external editor.
+    pub fn commit_with_message(&self, args: &[String], env: &[(&str, &str)], message: &str) -> Result<()> {
+        let file = write_temp(message)?;
+        let editor = format!("cp {}", sh_quote(&file.path().to_string_lossy()));
+        self.commit_with_editor_env(args, Editor::Command(&editor), env)
+    }
+
+    /// The text git would put in COMMIT_EDITMSG for ARGS (the merge message,
+    /// the HEAD message for --amend, or the commit template), used to
+    /// pre-fill the built-in message buffer.
+    pub fn commit_message_template(&self, args: &[String]) -> String {
+        if args.iter().any(|a| a == "--amend") {
+            if let Ok(m) = self.git_string(&["log", "-1", "--format=%B"]) {
+                return m.trim_end_matches('\n').to_string();
+            }
+        }
+        let merge_msg = self.gitdir.join("MERGE_MSG");
+        if !args.iter().any(|a| a == "--amend") {
+            if let Ok(m) = std::fs::read_to_string(merge_msg) {
+                if !m.trim().is_empty() {
+                    return m.trim_end_matches('\n').to_string();
+                }
+            }
+        }
+        // git's commit.template, if configured
+        if let Ok(t) = self.git_string(&["config", "commit.template"]) {
+            let p = t.trim();
+            if !p.is_empty() {
+                if let Ok(m) = std::fs::read_to_string(p) {
+                    return m.trim_end_matches('\n').to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
     /// magit-commit-extend ("c e"): `git commit --amend --no-edit <args>`
     pub fn commit_extend(&self, args: &[String]) -> Result<()> {
         self.commit_extend_env(args, &[])

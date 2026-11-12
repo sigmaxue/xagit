@@ -286,8 +286,7 @@ impl App {
                 let Some(args) = self.commit_assert(&args, false, false)? else {
                     return Ok(());
                 };
-                let res = self.with_terminal(|g| g.commit_with_editor(&args, Editor::User));
-                self.done("committed", res.map(|()| String::new()));
+                self.commit_msg_open(args, Vec::new(), "committed")?;
             }
             // magit-commit-extend (magit-commit-extend-override-date)
             "commit-extend" => {
@@ -309,8 +308,7 @@ impl App {
                 }
                 let mut a = vec!["--amend".to_string()];
                 a.extend(args.iter().cloned());
-                let res = self.with_terminal(|g| g.commit_with_editor(&a, Editor::User));
-                self.done("amended HEAD commit", res.map(|()| String::new()));
+                self.commit_msg_open(a, Vec::new(), "amended HEAD commit")?;
             }
             // magit-commit-reword: the message only, not the staged changes
             "commit-reword" => {
@@ -324,9 +322,8 @@ impl App {
                 }
                 // with a prefix argument keep the committer date
                 let date = self.keep_committer_date();
-                let env: Vec<(&str, &str)> = date.iter().map(|d| ("GIT_COMMITTER_DATE", d.as_str())).collect();
-                let res = self.with_terminal(|g| g.commit_with_editor_env(&a, Editor::User, &env));
-                self.done("reworded HEAD commit", res.map(|()| String::new()));
+                let env: Vec<(String, String)> = date.iter().map(|d| ("GIT_COMMITTER_DATE".to_string(), d.clone())).collect();
+                self.commit_msg_open(a, env, "reworded HEAD commit")?;
             }
             // magit-commit-squash-internal: with magit-commit-squash-confirm
             // the target is always selected from the log, starting at the
