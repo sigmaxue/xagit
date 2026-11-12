@@ -681,6 +681,7 @@ impl App {
             BufferMode::Refs { .. } => "magit-refs",
             BufferMode::RebaseTodo => return "git-rebase-todo".into(),
             BufferMode::Commit => "xagit-commit-msg",
+            BufferMode::TextEdit => "xagit-edit",
             BufferMode::Resolve => "magit-resolve",
             BufferMode::File { rev, file, .. } => return crate::ui::blame::buffer_name(rev, file),
         };

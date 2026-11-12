@@ -122,31 +122,12 @@ impl App {
         }
     }
 
-    /// find-file of FILE: the user's editor (`git var GIT_EDITOR`).
+    /// Visit FILE (a patch series' cover letter) in xagit's text buffer;
+    /// C-c C-c writes it back instead of starting `git var GIT_EDITOR`.
     fn edit_file(&mut self, file: &std::path::Path) {
-        // not git_string, which overrides core.editor
-        let editor = std::process::Command::new("git")
-            .args(["var", "GIT_EDITOR"])
-            .current_dir(&self.git.toplevel)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|e| !e.is_empty())
-            .unwrap_or_else(|| "vi".into());
-        let file = file.to_path_buf();
-        let res = self.with_terminal(|g| {
-            std::process::Command::new("sh")
-                .args(["-c", &format!("{editor} \"$@\""), &editor])
-                .arg(&file)
-                .current_dir(&g.toplevel)
-                .status()
-        });
-        match res {
-            Ok(st) if !st.success() => self.set_msg(&format!("{editor} failed ({st})")),
-            Err(e) => self.set_msg(&format!("Cannot run {editor}: {e}")),
-            _ => {}
-        }
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        let title = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.text_edit_open(&text, &title, text_edit::TextEditSave::File { path: file.to_path_buf() });
     }
 
     /// magit-am-in-progress-p

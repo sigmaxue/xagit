@@ -69,6 +69,7 @@ mod worktree;
 mod rebase_todo;
 mod resolve;
 mod commit_msg;
+mod text_edit;
 mod render;
 mod input;
 mod sections;
@@ -165,6 +166,8 @@ pub struct App {
     resolve: Option<resolve::ResolveEdit>,
     /// the built-in commit message buffer (BufferMode::Commit)
     commit_edit: Option<commit_msg::CommitEdit>,
+    /// the built-in text buffer (BufferMode::TextEdit)
+    text_edit: Option<text_edit::TextEdit>,
     /// directory xagit was started in (magit-git-command's default-directory)
     pub cwd: std::path::PathBuf,
     /// arguments of new diff / revision / stash buffers (the current value
@@ -274,6 +277,9 @@ pub enum BufferMode {
     /// the built-in COMMIT_EDITMSG buffer (`c` menu): its state is
     /// App::commit_edit
     Commit,
+    /// the built-in text buffer for notes / descriptions / cover letters:
+    /// its state is App::text_edit
+    TextEdit,
 }
 
 /// An interactive rebase whose todo list is being edited in xagit.
@@ -758,6 +764,7 @@ impl App {
             rebase_todo: None,
             resolve: None,
             commit_edit: None,
+            text_edit: None,
             cwd,
             diff_args: vec!["--stat".into(), "--no-ext-diff".into()],
             log_args: vec!["--graph".into(), "-n256".into(), "--decorate".into()],
@@ -1306,6 +1313,10 @@ impl App {
 
     /// A key outside transients.
     fn dispatch_buffer_key(&mut self, key: Key) -> Result<()> {
+        // the built-in text buffer (notes / descriptions / cover letters)
+        if self.text_edit_key(&key)? {
+            return Ok(());
+        }
         // the built-in COMMIT_EDITMSG buffer
         if self.commit_msg_key(&key)? {
             return Ok(());

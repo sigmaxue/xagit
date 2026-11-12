@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use xagit_lib::prelude::*;
-use xagit_lib::ui::app::App;
+use xagit_lib::ui::app::{App, BufferMode};
 use xagit_lib::ui::options::Options;
 
 /// Ignore the user's global and system git configuration (the values
@@ -341,4 +341,29 @@ fn remote_unshallow() {
     );
     assert_eq!(config_all(&c, "remote.origin.fetch"), ["+refs/heads/*:refs/remotes/origin/*"]);
     assert!(!c.gitdir.join("shallow").exists(), "{}", app.message());
+}
+
+/// magit-branch.<branch>.description is edited in xagit's built-in text
+/// buffer (C-c C-c writes it), not `git branch --edit-description`.
+#[test]
+fn branch_description_in_builtin_buffer() {
+    let (_td, g, _btd, _dir) = with_origin();
+    let mut app = App::new(g.clone());
+    press(&mut app, &["b", "d"]);
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert_eq!(app.text_edit_title().as_deref(), Some("EDIT_DESCRIPTION"));
+    assert_eq!(app.text_edit_text().as_deref(), Some("\n"));
+    // a multiline description is stored as one value with inner newlines
+    // (git config --get keeps them; the config() helper splits on lines)
+    let desc = |g: &Git| g.git_string(&["config", "--get", "branch.master.description"]).ok();
+    app.text_edit_set("first line\nsecond line\n");
+    press(&mut app, &["C-c", "C-c"]);
+    assert_eq!(desc(&g).as_deref(), Some("first line\nsecond line"));
+    // editing again pre-fills the current value; clearing it unsets the key
+    press(&mut app, &["b", "d"]);
+    assert_eq!(app.mode(), &BufferMode::TextEdit);
+    assert_eq!(app.text_edit_text().as_deref(), Some("first line\nsecond line\n"));
+    app.text_edit_set("");
+    press(&mut app, &["C-c", "C-c"]);
+    assert!(desc(&g).is_none());
 }

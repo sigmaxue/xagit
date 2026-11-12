@@ -390,14 +390,12 @@ impl App {
             Ok(())
         };
         match v.kind {
-            // magit-branch.<branch>.description
+            // magit-branch.<branch>.description: edited in xagit's text
+            // buffer instead of `git branch --edit-description`
             VarKind::Description => {
-                let res = self.with_terminal(|g| {
-                    g.git_with_editors(Editor::Accept, Editor::User, &["branch", "--edit-description", &scope])
-                });
-                if let Err(e) = res {
-                    self.set_msg(&format!("{e:#}"));
-                }
+                let text = self.config_value("--local", &var).unwrap_or_default();
+                self.text_edit_open(&text, "EDIT_DESCRIPTION", text_edit::TextEditSave::BranchDescription { branch: scope.clone() });
+                return Ok(());
             }
             VarKind::Upstream => {
                 let set = self.config_value("--local", &format!("branch.{scope}.remote")).is_some()

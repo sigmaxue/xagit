@@ -53,7 +53,8 @@ impl App {
     /// then move point through the matches of the current buffer.
     pub(super) fn isearch(&mut self, forward: bool) -> Result<()> {
         if self.view_text.is_some() || self.mode == BufferMode::RebaseTodo || self.mode == BufferMode::Resolve
-            || self.mode == BufferMode::Commit {
+            || self.mode == BufferMode::Commit
+            || self.mode == BufferMode::TextEdit {
             self.set_msg("Search is only available in Magit buffers");
             return Ok(());
         }

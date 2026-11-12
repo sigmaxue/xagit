@@ -105,14 +105,28 @@ impl App {
     /// The suffixes of the magit-notes transient.
     pub(super) fn notes_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
         match cmd {
-            "notes-edit" | "notes-remove" => {
-                let (prompt, sub) = if cmd == "notes-edit" { ("Edit notes", "edit") } else { ("Remove notes", "remove") };
-                let Some((commit, r)) = self.notes_read_args(prompt, args)? else {
+            "notes-edit" => {
+                let Some((commit, r)) = self.notes_read_args("Edit notes", args)? else {
+                    return Ok(());
+                };
+                // read the current note and edit it in xagit's text buffer;
+                // C-c C-c writes it back with `git notes add -f -F`
+                let mut show = vec!["notes".to_string()];
+                if let Some(r) = &r {
+                    show.push(format!("--ref={r}"));
+                }
+                show.extend(["show".to_string(), commit.clone()]);
+                let strs: Vec<&str> = show.iter().map(String::as_str).collect();
+                let text = self.git.git_string(&strs).unwrap_or_default();
+                self.text_edit_open(&text, "NOTES_EDITMSG", text_edit::TextEditSave::Notes { r, rev: commit });
+            }
+            "notes-remove" => {
+                let Some((commit, r)) = self.notes_read_args("Remove notes", args)? else {
                     return Ok(());
                 };
                 let r = r.map(|r| format!("--ref={r}"));
                 let mut a: Vec<&str> = r.iter().map(String::as_str).collect();
-                a.extend([sub, commit.as_str()]);
+                a.extend(["remove", commit.as_str()]);
                 self.run_notes(&a);
             }
             "notes-merge" => {

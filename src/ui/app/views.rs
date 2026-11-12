@@ -151,7 +151,11 @@ impl App {
                 Some(LineKind::Stash { name, .. }) => Dwim::Stash(name.clone()),
                 _ => Dwim::None,
             },
-            BufferMode::File { .. } | BufferMode::RebaseTodo | BufferMode::Resolve | BufferMode::Commit => Dwim::None,
+            BufferMode::File { .. }
+            | BufferMode::RebaseTodo
+            | BufferMode::Resolve
+            | BufferMode::Commit
+            | BufferMode::TextEdit => Dwim::None,
             BufferMode::Diff(spec) => match (spec.typ.as_str(), &spec.range) {
                 ("committed", Some(r)) => Dwim::Range(r.clone()),
                 (t, _) => Dwim::Type(t.to_string()),

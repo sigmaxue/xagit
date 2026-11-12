@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use xagit_lib::prelude::*;
-use xagit_lib::ui::app::App;
+use xagit_lib::ui::app::{App, BufferMode};
 
 /// Ignore the user's global configuration (C and D set it); the editor
 /// writes "my note".
@@ -47,6 +47,13 @@ fn menu() {
     assert!(p.contains("-r Manipulate ref") && p.contains("-s Merge strategy"), "{p}");
 }
 
+/// Type TEXT into the built-in text buffer and save it (C-c C-c).
+fn edit(app: &mut App, text: &str) {
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    app.text_edit_set(text);
+    press(app, &["C-c", "C-c"]);
+}
+
 #[test]
 fn edit_and_remove() {
     let (_td, g) = repo();
@@ -54,6 +61,8 @@ fn edit_and_remove() {
     app.script_answers(&["HEAD"]);
     press(&mut app, &["T", "T"]);
     assert_eq!(app.prompts(), ["Edit notes"]);
+    assert_eq!(app.text_edit_title().as_deref(), Some("NOTES_EDITMSG"));
+    edit(&mut app, "my note\n");
     assert_eq!(note(&g, "commits").as_deref(), Some("my note"), "{}", app.message());
     app.script_answers(&["HEAD"]);
     press(&mut app, &["T", "r"]);
@@ -73,6 +82,9 @@ fn manipulate_another_ref() {
     app.script_answers(&["review", "HEAD"]);
     press(&mut app, &["-", "r", "T"]);
     assert_eq!(app.prompts()[1], "--ref=");
+    // the current note is pre-filled, then written back to that same ref
+    assert_eq!(app.text_edit_text().as_deref(), Some("old\n"));
+    edit(&mut app, "my note\n");
     assert_eq!(note(&g, "refs/notes/review").as_deref(), Some("my note"), "{}", app.message());
     assert_eq!(note(&g, "commits"), None);
 }
@@ -141,4 +153,24 @@ fn merging() {
     app.press("a").unwrap();
     press(&mut app, &["T"]);
     assert_eq!(app.current_menu(), Some("notes-menu"));
+}
+
+/// An empty buffer removes the note; C-c C-k leaves the repository alone.
+#[test]
+fn clear_or_cancel_a_note() {
+    let (_td, g) = repo();
+    g.git_interactive(&["notes", "add", "-m", "keep me", "HEAD"]).unwrap();
+    let mut app = App::new(g.clone());
+    // cancel: nothing changes
+    app.script_answers(&["HEAD"]);
+    press(&mut app, &["T", "T"]);
+    assert_eq!(app.text_edit_text().as_deref(), Some("keep me\n"));
+    app.text_edit_set("changed\n");
+    press(&mut app, &["C-c", "C-k"]);
+    assert_eq!(note(&g, "commits").as_deref(), Some("keep me"));
+    // empty text on save removes the note
+    app.script_answers(&["HEAD"]);
+    press(&mut app, &["T", "T"]);
+    edit(&mut app, "");
+    assert_eq!(note(&g, "commits"), None, "{}", app.message());
 }

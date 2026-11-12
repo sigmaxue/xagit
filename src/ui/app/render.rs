@@ -118,6 +118,7 @@ impl App {
         left.push(" xagit ", t.style(Face::Badge)).push(" ", bar);
         let title = match &self.view_text {
             Some((title, _)) => title.clone(),
+            None if self.mode == BufferMode::TextEdit => self.text_edit_title().unwrap_or_else(|| "edit".into()),
             None if self.mode == BufferMode::Status || self.buf.title.is_empty() => "Status".into(),
             None => self.buf.title.clone(),
         };
@@ -161,6 +162,13 @@ impl App {
             &[("C-x", "common commands"), ("?", "help on a key"), ("C-u", "prefix argument")]
         } else if self.view_text.is_some() {
             &[("SPC/DEL", "page"), ("n/p", "scroll"), ("q", "close")]
+        } else if self.mode == BufferMode::TextEdit {
+            &[
+                ("C-c C-c", "save"),
+                ("C-c C-k", "cancel"),
+                ("C-n/C-p", "move"),
+                ("?", "help"),
+            ]
         } else if self.mode == BufferMode::Commit {
             &[
                 ("C-c C-c", "commit"),
@@ -235,7 +243,11 @@ impl App {
         let mut rows: Vec<Row> = vec![self.header_row(w, &branch)];
 
         let position;
-        if self.mode == BufferMode::Commit && self.view_text.is_none() {
+        if self.mode == BufferMode::TextEdit && self.view_text.is_none() {
+            let (r, pos) = self.text_edit_rows(body, w);
+            rows.extend(r);
+            position = pos;
+        } else if self.mode == BufferMode::Commit && self.view_text.is_none() {
             let (r, pos) = self.commit_msg_rows(body, w);
             rows.extend(r);
             position = pos;

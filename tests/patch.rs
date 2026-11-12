@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use xagit_lib::prelude::*;
-use xagit_lib::ui::app::App;
+use xagit_lib::ui::app::{App, BufferMode};
 use xagit_lib::ui::options::Options;
 
 /// Commits c1..c3 writing f; returns their hashes.
@@ -78,18 +78,20 @@ fn create_with_arguments() {
 #[test]
 fn create_with_cover_letter_visits_it() {
     let (_td, g, h) = repo();
-    let log = g.gitdir.join("edited");
-    // the editor records the file it is given
-    let script = g.gitdir.join("editor.sh");
-    std::fs::write(&script, format!("#!/bin/sh\necho \"$1\" > '{}'\n", log.display())).unwrap();
-    g.git_interactive(&["config", "core.editor", &format!("sh {}", script.display())]).unwrap();
     let mut app = App::new(g.clone());
     app.script_answers(&[&format!("{}..HEAD", h[1])]);
     press(&mut app, &["W", "c", "C-m", "l", "c"]);
     assert_eq!(patches(&g.toplevel), ["0000-cover-letter.patch", "0001-c3.patch"], "{}", app.message());
-    let edited = std::fs::read_to_string(&log).unwrap();
-    assert!(edited.trim().ends_with("/0000-cover-letter.patch"), "{edited}");
-    let _ = std::fs::remove_file(&log);
+    // the cover letter is visited in xagit's built-in text buffer
+    assert_eq!(app.mode(), &BufferMode::TextEdit);
+    assert_eq!(app.text_edit_title().as_deref(), Some("0000-cover-letter.patch"));
+    assert!(app.text_edit_text().unwrap().contains("*** SUBJECT HERE ***"), "{}", app.message());
+    // C-c C-c writes the edited text back to the file
+    app.text_edit_set("my cover letter\n");
+    press(&mut app, &["C-c", "C-c"]);
+    let edited = std::fs::read_to_string(g.toplevel.join("0000-cover-letter.patch")).unwrap();
+    assert_eq!(edited, "my cover letter\n");
+    assert_eq!(app.mode(), &BufferMode::Status);
 }
 
 #[test]
