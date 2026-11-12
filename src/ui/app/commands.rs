@@ -573,16 +573,12 @@ impl App {
                     self.set_msg("Cannot continue rebase with unstaged changes");
                     return Ok(());
                 }
-                match g!().rebase_continue() {
-                    Ok(()) => self.set_msg("rebase continued"),
-                    Err(e) => self.report_error(&e),
-                }
-                self.refresh();
+                let res = g!().rebase_continue();
+                self.rebase_result(res, "rebase continued");
             }
             "rebase-skip" => {
-                g!().rebase_skip()?;
-                self.set_msg("rebase skipped");
-                self.refresh();
+                let res = g!().rebase_skip();
+                self.rebase_result(res, "rebase skipped");
             }
             // magit-rebase-abort
             "rebase-abort" => {

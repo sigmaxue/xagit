@@ -8,6 +8,13 @@
 
 use super::*;
 
+/// Magit's `magit-run-git-sequencer` reports a rebase that stops at a
+/// commit as a sequence in progress, not as a failed command: the status
+/// buffer shows the sequence and the transient offers Continue/Skip/Edit/
+/// Abort. Git itself exits non-zero when it stops, so an `Err` that leaves
+/// a rebase in progress has to be reported the same way.
+const REBASE_STOPPED: &str = "rebase stopped (r r continue, r s skip, r a abort)";
+
 impl App {
     pub(super) fn done(&mut self, ok_msg: &str, res: Result<String>) {
         match res {
@@ -137,11 +144,23 @@ impl App {
 
     /// Report the outcome of a rebase that may stop half-way.
     pub(super) fn after_rebase(&mut self, res: Result<()>) {
+        self.rebase_result(res, "rebased");
+    }
+
+    /// Report a rebase command (start, continue, skip, ...). OK_MSG is what
+    /// a completed sequence reports. When git exits non-zero but leaves a
+    /// rebase in progress, that is a stopped sequence, not a failed command:
+    /// show the actions that resume it and leave the status buffer (with its
+    /// rebase sequence) in front. The command is still in the process log.
+    pub(super) fn rebase_result(&mut self, res: Result<()>, ok_msg: &str) {
+        let stopped = self.git.rebase_in_progress();
         match res {
-            Ok(()) if self.git.rebase_in_progress() => {
-                self.set_msg("rebase stopped (r r continue, r s skip, r a abort)")
-            }
-            Ok(()) => self.set_msg("rebased"),
+            Ok(()) if stopped => self.set_msg(REBASE_STOPPED),
+            Ok(()) => self.set_msg(ok_msg),
+            // Git exits non-zero when it stops at a commit. The command is
+            // already in the process log ($), so don't replace the status
+            // buffer with a "failed" details view as a real error would.
+            Err(_) if stopped => self.set_msg(REBASE_STOPPED),
             Err(e) => self.report_error(&e),
         }
         self.refresh();

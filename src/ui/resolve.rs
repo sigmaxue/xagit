@@ -415,8 +415,8 @@ mod tests {
         // "top" before the conflict, "bottom" after: both as context
         assert_eq!(v.first(), Some(&ViewLine::Context("top".into())));
         assert_eq!(v.last(), Some(&ViewLine::Context("bottom".into())));
-        assert!(v.iter().any(|l| *l == ViewLine::Header(0)));
-        assert!(v.iter().any(|l| *l == ViewLine::Columns));
+        assert!(v.contains(&ViewLine::Header(0)));
+        assert!(v.contains(&ViewLine::Columns));
         let pairs: Vec<_> = v.iter().filter(|l| matches!(l, ViewLine::Pair(..))).collect();
         assert_eq!(pairs.len(), 2);
         // context lines surround the conflict in the two_conflicts case

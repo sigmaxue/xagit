@@ -32,8 +32,8 @@ fn repo() -> (TempDir, Git) {
 }
 
 fn staged_change(g: &Git) {
-    write(&g, "f.txt", "two\n");
-    git(&g, &["add", "f.txt"]);
+    write(g, "f.txt", "two\n");
+    git(g, &["add", "f.txt"]);
 }
 
 /// Type a single-line message (letters, no spaces needed in the first test).
