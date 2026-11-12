@@ -272,10 +272,10 @@ fn staged_binary_files() {
     assert_eq!(status(&g), "MM bin.dat");
 }
 
-/// magit-confirm-files with several files: the file list is displayed in a
-/// panel ABOVE the minibuffer, so the prompt itself is a single clean line.
+/// magit-confirm-files with several files: only a single, counted
+/// question is shown in the minibuffer; the file list is not displayed.
 #[test]
-fn multi_file_confirm_prompt_is_not_squeezed() {
+fn multi_file_confirm_question_only() {
     let (_td, g, _) = repo_with_commit();
     for f in ["a.txt", "b.txt", "c.txt"] {
         write(&g, f, "changed\n");
@@ -295,7 +295,7 @@ fn multi_file_confirm_prompt_is_not_squeezed() {
     let p = app.prompts().last().cloned().unwrap_or_default();
     assert!(!p.contains('\n'), "multi-line prompt leaked into the minibuffer: {p:?}");
     assert!(!p.contains("a.txt") && !p.contains("b.txt") && !p.contains("c.txt"),
-        "file names leaked into the single-line prompt: {p:?}");
+        "file list leaked into the prompt: {p:?}");
     assert!(p.contains("3 files") && p.contains("(y or n)"), "wrong question: {p:?}");
     // all three files were discarded
     assert_eq!(read(&g, "a.txt"), "changed\n");

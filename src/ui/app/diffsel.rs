@@ -142,30 +142,16 @@ impl App {
         Ok(ok)
     }
 
-    /// magit-confirm with NOABORT: declining isn't an error.  A multi-line
-    /// prompt (a list of files followed by the question) is shown with the
-    /// list in a panel above the minibuffer, so the file names line up
-    /// instead of being squeezed into the single-line prompt.
+    /// magit-confirm with NOABORT: declining isn't an error.  Callers may
+    /// pass a multi-line prompt (an item list followed by the question);
+    /// only the last line — the question — is shown in the single-line
+    /// minibuffer.  The item list is not displayed.
     pub(super) fn confirm_noabort(&mut self, action: &str, prompt: &str) -> Result<bool> {
         if self.options.no_confirm(action) {
             return Ok(true);
         }
-        let (above, last) = match prompt.rsplit_once('\n') {
-            Some((head, tail)) => {
-                let lines: Vec<String> = head
-                    .lines()
-                    .map(|l| l.trim_end())
-                    .filter(|l| !l.is_empty())
-                    .map(|l| format!("  {l}"))
-                    .collect();
-                (lines, tail.trim().to_string())
-            }
-            None => (Vec::new(), prompt.to_string()),
-        };
-        *self.minibuffer_above.borrow_mut() = above;
-        let r = self.magit_y_or_n_p(&format!("{last}?"), Some(action));
-        self.minibuffer_above.borrow_mut().clear();
-        r
+        let question = prompt.rsplit('\n').next().unwrap_or(prompt).trim();
+        self.magit_y_or_n_p(&format!("{question}?"), Some(action))
     }
 
     /// magit-read-stash: one of the stashes ("stash@{N} subject",
@@ -239,16 +225,18 @@ impl App {
         match items {
             [] => Ok(true),
             [i] => self.confirm(action, &one.replacen("%s", i, 1)),
-            is => self.confirm(action, &format!("{}\n{}", is.join("\n"), many.replacen("%d", &is.len().to_string(), 1))),
+            // the item list is not displayed: just the counted question
+            is => self.confirm(action, &many.replacen("%d", &is.len().to_string(), 1)),
         }
     }
 
-    /// magit-confirm-files: `PROMPT "file"` or the file list and `PROMPT N files`.
+    /// magit-confirm-files: `PROMPT "file"` or `PROMPT N files` (the file
+    /// list itself is not displayed in the single-line minibuffer).
     pub(super) fn confirm_files(&mut self, action: &str, prompt: &str, files: &[String]) -> Result<bool> {
         match files {
             [] => Ok(true),
             [f] => self.confirm(action, &format!("{prompt} \"{f}\"")),
-            fs => self.confirm(action, &format!("{}\n{prompt} {} files", fs.join("\n"), fs.len())),
+            fs => self.confirm(action, &format!("{prompt} {} files", fs.len())),
         }
     }
 

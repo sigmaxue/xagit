@@ -85,7 +85,7 @@ cargo install --path .
 3. 依次按 `c c` 创建提交并在提示行输入消息；按 `g` 刷新。
 4. 按 `q` 返回上一视图，状态页中按 `q` 不会退出；按 `C-x C-c` 退出程序。
 
-注意：`k` 是丢弃变更，不是向上移动。涉及多个文件/条目的确认（如 `k` 选中多个文件、删除多个 stash/tag、purge wip refs）会把文件/条目列表整齐地列在 minibuffer **上方**的面板里，底部只保留一行问句（例如 `Discard unstaged changes in 3 files? (y or n)`），避免长列表挤在单行提示里。hard reset、强制推送、删除与历史改写等操作可能丢失数据，请检查目标、提示和参数，必要时先备份。
+注意：`k` 是丢弃变更，不是向上移动。涉及多个文件/条目的确认（如 `k` 选中多个文件、删除多个 stash/tag、purge wip refs）只在 minibuffer 显示一行带数量的问句（例如 `Discard unstaged changes in 3 files? (y or n)`），不逐个列出文件/条目。hard reset、强制推送、删除与历史改写等操作可能丢失数据，请检查目标、提示和参数，必要时先备份。
 
 ## 界面与终端
 
