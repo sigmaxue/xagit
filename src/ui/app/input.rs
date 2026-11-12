@@ -431,8 +431,16 @@ impl App {
     }
 
     /// Report a failed command with the whole error chain (anyhow's `{:#}`
-    /// includes the git stderr attached as context).
+    /// includes the git stderr attached as context). A command that stopped
+    /// with conflicts is a state of the operation, not a failure: name the
+    /// keys that resume it and keep the status buffer in front instead of
+    /// covering it with an "Operation details" view.
     pub(super) fn report_error(&mut self, e: &anyhow::Error) {
+        if let Some(hint) = self.conflict_stopped_hint() {
+            self.view_text = None;
+            self.message = hint.to_string();
+            return;
+        }
         self.set_msg(&format!("{e:#}"));
     }
 

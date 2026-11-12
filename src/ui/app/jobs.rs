@@ -352,10 +352,10 @@ impl App {
                         let strs: Vec<&str> = args.iter().map(String::as_str).collect();
                         match self.with_terminal(|g| g.git_interactive(&strs)) {
                             Ok(()) => self.set_msg(&ok),
-                            Err(e) => self.set_msg(&format!("{e:#}")),
+                            Err(e) => self.report_error(&e),
                         }
                     }
-                    Err((e, false)) => self.set_msg(&e),
+                    Err((e, false)) => self.report_error(&anyhow::anyhow!("{e}")),
                 }
                 self.refresh();
             }
@@ -370,7 +370,7 @@ impl App {
             let strs: Vec<&str> = a.iter().map(String::as_str).collect();
             match self.git.git_interactive(&strs) {
                 Ok(()) => self.set_msg(ok),
-                Err(e) => self.set_msg(&format!("{e:#}")),
+                Err(e) => self.report_error(&e),
             }
             self.refresh();
             return;

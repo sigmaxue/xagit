@@ -486,3 +486,33 @@ fn partly_decided_conflict_keeps_markers() {
     assert!(app.message().contains("unresolved"), "{}", app.message());
     assert!(!g.unmerged_files().is_empty());
 }
+
+#[test]
+fn finish_hints_the_operation_specific_continue_key() {
+    // a rebase conflict resumes with `r r`
+    let (_td1, g) = conflict_repo();
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    press(&mut app, &["a", "C-c", "C-c"]);
+    assert!(app.message().contains("r r to continue"), "{}", app.message());
+
+    // a merge conflict has no `r r`: commit or abort the merge
+    let (_td2, g) = scratch_repo();
+    git(&g, &["config", "user.name", "t"]);
+    git(&g, &["config", "user.email", "t@t"]);
+    write(&g, "f.txt", "x\n");
+    git(&g, &["add", "."]);
+    git(&g, &["commit", "-q", "-m", "base"]);
+    git(&g, &["checkout", "-q", "-b", "feature"]);
+    write(&g, "f.txt", "feature\n");
+    git(&g, &["commit", "-q", "-am", "feature"]);
+    git(&g, &["checkout", "-q", "master"]);
+    write(&g, "f.txt", "main\n");
+    git(&g, &["commit", "-q", "-am", "main"]);
+    let _ = g.git_string(&["merge", "feature"]);
+    let mut app = App::new(g.clone());
+    open(&mut app);
+    press(&mut app, &["a", "C-c", "C-c"]);
+    assert!(app.message().contains("m m to commit"), "{}", app.message());
+    assert!(!app.message().contains("r r"), "{}", app.message());
+}

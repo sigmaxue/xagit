@@ -97,7 +97,7 @@ impl App {
         a.extend(args);
         let res = self.with_terminal(|g| g.git_with_editors(Editor::Accept, Editor::User, &a));
         if let Err(e) = res {
-            self.set_msg(&format!("{e:#}"));
+            self.report_error(&e);
         }
         self.refresh();
     }

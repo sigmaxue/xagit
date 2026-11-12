@@ -484,7 +484,7 @@ impl App {
     pub(super) fn done_keep_msg(&mut self, res: Result<()>) {
         self.refresh();
         if let Err(e) = res {
-            self.set_msg(&format!("{e:#}"));
+            self.report_error(&e);
         }
     }
 

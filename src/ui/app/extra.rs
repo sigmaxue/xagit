@@ -8,14 +8,45 @@
 
 use super::*;
 
-/// Magit's `magit-run-git-sequencer` reports a rebase that stops at a
-/// commit as a sequence in progress, not as a failed command: the status
-/// buffer shows the sequence and the transient offers Continue/Skip/Edit/
-/// Abort. Git itself exits non-zero when it stops, so an `Err` that leaves
-/// a rebase in progress has to be reported the same way.
+/// Magit's `magit-run-git-sequencer` reports a sequence that stops at a
+/// conflict as a state, not as a failed command: the status buffer shows
+/// the sequence and the transient offers Continue/Skip/Abort. Git exits
+/// non-zero when it stops, so any command that leaves conflicts must be
+/// reported the same way. Each operation has its own suffix keys.
 const REBASE_STOPPED: &str = "rebase stopped (r r continue, r s skip, r a abort)";
+const CHERRY_STOPPED: &str = "cherry-pick stopped (resolve, then A A continue, A s skip, A a abort)";
+const REVERT_STOPPED: &str = "revert stopped (resolve, then V V continue, V s skip, V a abort)";
+const SEQUENCER_STOPPED: &str = "sequencer stopped (resolve, then A A / V V continue)";
+const AM_STOPPED: &str = "am stopped (resolve, then w w continue, w s skip, w a abort)";
+const MERGE_STOPPED: &str = "merge stopped (resolve, then m m commit, m a abort)";
+const CONFLICTS_STOPPED: &str = "conflicts left in the worktree (resolve with e, then stage)";
 
 impl App {
+    /// The message for a command that stopped with conflicts, if any.
+    /// Only unmerged index entries count — a non-zero exit for any other
+    /// reason is still a real error. Used by `report_error`, which is the
+    /// common sink for failed commands in every buffer.
+    pub(super) fn conflict_stopped_hint(&self) -> Option<&'static str> {
+        if self.git.unmerged_files().is_empty() {
+            return None;
+        }
+        Some(if self.git.rebase_in_progress() {
+            REBASE_STOPPED
+        } else if self.git.cherry_in_progress() {
+            CHERRY_STOPPED
+        } else if self.git.revert_in_progress() {
+            REVERT_STOPPED
+        } else if self.git.pick_or_revert_in_progress() {
+            SEQUENCER_STOPPED
+        } else if self.git.am_in_progress() {
+            AM_STOPPED
+        } else if self.git.merge_in_progress() {
+            MERGE_STOPPED
+        } else {
+            CONFLICTS_STOPPED
+        })
+    }
+
     pub(super) fn done(&mut self, ok_msg: &str, res: Result<String>) {
         match res {
             Ok(out) => {
@@ -332,7 +363,12 @@ impl App {
         };
         match res {
             Ok(()) => self.set_msg(&format!("{verb}: moved {cherries}")),
-            Err(e) => self.set_msg(&format!("{e} (resolve, then A A to continue)")),
+            Err(e) => {
+                // cherry-move's spinoff/spinout paths finish with an
+                // interactive rebase, whose continue key is `r r`.
+                let key = if self.git.rebase_in_progress() { "r r" } else { "A A" };
+                self.set_msg(&format!("{e} (resolve, then {key} to continue)"));
+            }
         }
         self.refresh();
         Ok(())

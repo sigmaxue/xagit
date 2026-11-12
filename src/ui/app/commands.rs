@@ -467,17 +467,17 @@ impl App {
                 let Some(rev) = self.pick_rev("Merge revision", &bs, None)?.cloned() else {
                     return Ok(());
                 };
-                match cmd {
-                    "merge-plain" => g!().merge(&rev, &args)?,
-                    "merge-nocommit" => g!().merge_nocommit(&rev, &args)?,
-                    "merge-squash" => g!().merge_squash(&rev)?,
+                let res = match cmd {
+                    "merge-plain" => g!().merge(&rev, &args),
+                    "merge-nocommit" => g!().merge_nocommit(&rev, &args),
+                    "merge-squash" => g!().merge_squash(&rev),
                     "merge-editmsg" => {
                         let into = g!().current_branch().unwrap_or_else(|| "HEAD".into());
                         let default = format!("Merge branch '{rev}' into {into}");
                         let Some(msg) = self.read_line_prompt("Merge message", Some(&default))? else {
                             return Ok(());
                         };
-                        g!().merge_with_message(&rev, &msg, &args)?;
+                        g!().merge_with_message(&rev, &msg, &args)
                     }
                     _ => {
                         match g!().merge_preview(&rev) {
@@ -487,8 +487,13 @@ impl App {
                         }
                         return Ok(());
                     }
+                };
+                // A merge that stops on conflicts is a state, not a failure;
+                // report_error() names the keys that commit or abort it.
+                match res {
+                    Ok(()) => self.set_msg("merged"),
+                    Err(e) => self.report_error(&e),
                 }
-                self.set_msg("merged");
                 self.refresh();
             }
             "merge-commit" => {
@@ -577,11 +582,19 @@ impl App {
                 self.rebase_result(res, "rebase continued");
             }
             "rebase-skip" => {
+                if !self.git.rebase_in_progress() {
+                    self.set_msg("No rebase in progress");
+                    return Ok(());
+                }
                 let res = g!().rebase_skip();
                 self.rebase_result(res, "rebase skipped");
             }
             // magit-rebase-abort
             "rebase-abort" => {
+                if !self.git.rebase_in_progress() {
+                    self.set_msg("No rebase in progress");
+                    return Ok(());
+                }
                 if !self.confirm("abort-rebase", "Abort this rebase")? {
                     return Ok(());
                 }
@@ -689,13 +702,17 @@ impl App {
                         return Ok(());
                     }
                 }
-                // magit-sequencer-continue
-                if action == "continue" {
-                    if !self.git.sequencer_in_progress() {
+                // magit-sequencer-continue / -skip: only cherry-pick or
+                // revert sequences have these suffixes. Merge and rebase
+                // have their own commands, so the broader
+                // sequencer_in_progress() would let them fall through to a
+                // "no cherry-pick or revert in progress" git failure.
+                if action == "continue" || action == "skip" {
+                    if !self.git.pick_or_revert_in_progress() {
                         self.set_msg("No cherry-pick or revert in progress");
                         return Ok(());
                     }
-                    if !self.git.unmerged_files().is_empty() {
+                    if action == "continue" && !self.git.unmerged_files().is_empty() {
                         self.set_msg("Cannot continue due to unresolved conflicts");
                         return Ok(());
                     }

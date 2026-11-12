@@ -1154,7 +1154,7 @@ impl App {
                         self.settle();
                     }
                     if let Err(e) = self.handle_key(key) {
-                        self.set_msg(&format!("{e:#}"));
+                        self.report_error(&e);
                     }
                     // other commands may have written to the terminal
                     // (the minibuffer, hooks of interactive git commands)

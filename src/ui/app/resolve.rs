@@ -58,8 +58,9 @@ q        quit: \"Conflict resolution finished; save FILE?\" (yes saves and,
 C-c C-c  save without asking; C-c C-k cancel without saving
 ?        show this help
 
-Not supported in this single view: * (refine), ## / #h / #f (skip regions),
-| (toggle split), $$ (show only conflicts), window and buffer commands.";
+Not supported in this single view: ## / #h / #f (skip regions),
+| (toggle split), $$ (show only conflicts), window and buffer commands.
+Files without text conflict markers need E t (git mergetool).";
 
 impl App {
     /// `e` (magit-ediff-dwim) with conflicts: pick the unmerged file at
@@ -248,10 +249,32 @@ impl App {
             self.set_msg(&format!("Wrote {path}: {remaining} line(s)/conflict(s) still unresolved"));
         } else {
             self.git.stage(&path)?;
-            self.set_msg(&format!("Resolved and staged {path} (r r to continue)"));
+            let hint = self.resolve_continue_hint();
+            self.set_msg(&format!("Resolved and staged {path} ({hint})"));
         }
         self.refresh();
         Ok(())
+    }
+
+    /// The keys that resume the operation whose conflicts were just
+    /// resolved. Every operation has its own sequencer suffixes, so the
+    /// hint must not be hard-coded to rebase's `r r`.
+    fn resolve_continue_hint(&self) -> &'static str {
+        if self.git.rebase_in_progress() {
+            "r r to continue"
+        } else if self.git.revert_in_progress() {
+            "V V to continue"
+        } else if self.git.cherry_in_progress() {
+            "A A to continue"
+        } else if self.git.pick_or_revert_in_progress() {
+            "A A / V V to continue"
+        } else if self.git.am_in_progress() {
+            "w w to continue"
+        } else if self.git.merge_in_progress() {
+            "m m to commit, m a to abort"
+        } else {
+            "stage or commit when ready"
+        }
     }
 
     /// q (ediff-quit in a merge job started by smerge-ediff /

@@ -350,6 +350,11 @@ impl App {
     /// `--reject`.
     fn stash_apply_1(&mut self, action: &str, stash: &str) -> Result<()> {
         if self.run_git_stash(&[action, "--index", stash]) || self.run_git_stash(&["apply", stash]) {
+            // Like Magit, a stash that applied with conflicts is a state,
+            // not a failed command: say what to do next.
+            if let Some(hint) = self.conflict_stopped_hint() {
+                self.set_msg(hint);
+            }
             return Ok(());
         }
         let range = format!("{stash}^..{stash}");
@@ -382,12 +387,12 @@ impl App {
                 let mut a = vec!["add", "--"];
                 a.extend(conflicts.iter().map(String::as_str));
                 if let Err(e) = self.git.git_interactive(&a) {
-                    self.set_msg(&format!("{e:#}"));
+                    self.report_error(&e);
                 }
             }
             let diff = self.git.git_output(&["diff", &range]).map(|o| o.stdout).unwrap_or_default();
             if let Err(e) = self.git.git_with_input(&["apply", arg, "-"], &diff) {
-                self.set_msg(&format!("{e:#}"));
+                self.report_error(&e);
             }
         }
         Ok(())
