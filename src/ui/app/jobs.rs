@@ -333,7 +333,8 @@ impl App {
                 }
                 self.jobs.refreshing = false;
                 self.jobs.mark_idle();
-                self.head_label = head;
+                // outside a repository there is no HEAD to describe
+                self.head_label = if self.started_outside_repo { "no repository".into() } else { head };
                 // the buffer shown is another one by now
                 if mode != self.mode || args != self.buf_args {
                     return;

@@ -236,6 +236,21 @@ impl App {
         }
     }
 
+    /// After `init` / `clone` created a repository, show it when xagit was
+    /// started outside any repository.  From inside a repository the
+    /// current buffer stays in front (init/clone are just commands there).
+    pub(super) fn open_created_repository(&mut self, dir: &std::path::Path) {
+        if !self.started_outside_repo {
+            return;
+        }
+        if let Ok(git) = Git::discover(dir) {
+            self.started_outside_repo = false;
+            self.switch_repository(git);
+            self.head_label.clear();
+            self.refresh();
+        }
+    }
+
     /// magit-branch-reset: reset BRANCH (read, the local branch at point
     /// or the current one the default) to a revision (the branch or
     /// commit at point, else its upstream, the default). The current

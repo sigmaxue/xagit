@@ -42,11 +42,28 @@ fn help_is_recognized_after_the_path() {
 
 #[test]
 fn a_path_is_not_mistaken_for_help() {
+    // A path alone starts the TUI (no Usage: output).  Here there is no
+    // terminal, so it exits, but not because the path is not a repository.
     let out = xagit().arg("/definitely/not/a/repository").output().unwrap();
     assert!(!out.status.success());
     assert!(!String::from_utf8_lossy(&out.stdout).contains("Usage:"));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.starts_with("xagit: "), "{err}");
+    assert!(!err.contains("rev-parse"), "{err}");
+    assert!(!err.to_ascii_lowercase().contains("not a git repository"), "{err}");
+}
+
+#[test]
+fn starting_outside_a_repository_shows_the_hint() {
+    let td = tempfile::tempdir().unwrap();
+    let out = xagit().current_dir(td.path()).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("rev-parse"), "{err}");
+    assert!(!err.to_ascii_lowercase().contains("not a git repository"), "{err}");
+    // the TUI draws its first frame before a terminal-less input loop fails
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Outside a Git repository"), "{text}");
+    assert!(!text.contains("Usage:"), "{text}");
 }
 
 #[test]

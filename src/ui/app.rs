@@ -158,6 +158,9 @@ pub struct App {
     /// magit-refs-show-commit-count of the refs buffer
     refs_counts: CommitCount,
     message: String,
+    /// xagit was started outside any repository: init/clone may switch to
+    /// the repository they create (see `open_created_repository`)
+    started_outside_repo: bool,
     quit: bool,
     /// pending text-mode buffer shown instead of status (diff/log/show output)
     view_text: Option<(String, String)>, // (title, content)
@@ -762,6 +765,7 @@ impl App {
             margins: HashMap::new(),
             refs_counts: CommitCount::Nothing,
             message: String::new(),
+            started_outside_repo: false,
             quit: false,
             view_text: None,
             view_scroll: 0,
@@ -1585,14 +1589,44 @@ impl Git {
     }
 }
 
+/// The repository shown at startup.  A directory outside any repository
+/// still starts xagit: a placeholder Git pointing at DIR keeps `I` (init)
+/// and `C` (clone) usable there, and the notice explains the empty status
+/// buffer.  `Git::discover` itself stays strict.
+pub fn startup_git(dir: &std::path::Path) -> (Git, Option<String>) {
+    match Git::discover(dir) {
+        Ok(git) => (git, None),
+        Err(_) => {
+            let notice = format!(
+                "No Git repository at {}\n\n\
+                 I   initialize a repository (magit-init)\n\
+                 C   clone a repository (magit-clone)\n\
+                 q   close this help\n\n\
+                 xagit opens the repository created by I or C; press g at\n\
+                 any time to refresh the status buffer.",
+                crate::git::exec::sanitize(&dir.display().to_string())
+            );
+            (Git { toplevel: dir.to_path_buf(), gitdir: dir.join(".git") }, Some(notice))
+        }
+    }
+}
+
 /// Program entry helper: launch the TUI for cwd (or first arg path).
 pub fn main_run(path: Option<&str>) -> Result<()> {
     let dir = std::path::PathBuf::from(path.unwrap_or("."));
     let abs = dir.canonicalize().unwrap_or(dir);
-    let git = Git::discover(&abs)?;
+    let (git, notice) = startup_git(&abs);
+    let outside = notice.is_some();
     let mut app = App::unbuilt(git);
     if abs.is_dir() {
         app.cwd = abs;
+    }
+    if let Some(notice) = notice {
+        // no repository to query: keep the empty status page and say why
+        app.message = "Not in a Git repository (details: n/p scroll, q close)".into();
+        app.view_text = Some(("Outside a Git repository".into(), notice));
+        app.head_label = "no repository".into();
+        app.started_outside_repo = true;
     }
     // reading the options and the saved arguments asks for refreshes: the
     // status buffer is built once, after them, on a worker started by `run`
@@ -1607,7 +1641,8 @@ pub fn main_run(path: Option<&str>) -> Result<()> {
         app.load_history(f);
     }
     app.jobs.depth -= 1;
-    app.jobs.wanted = true;
+    // an empty page needs no git subprocesses; `g`, `I` and `C` refresh it
+    app.jobs.wanted = !outside;
     app.run()
 }
 
@@ -1722,5 +1757,70 @@ mod error_display_tests {
         assert!(!app.text_view().unwrap().1.contains("fakepass"));
         app.set_msg("short notification");
         assert_eq!(app.message(), "short notification");
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_finds_a_repository() {
+        let td = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(td.path()).status().unwrap().success());
+        let (git, notice) = startup_git(td.path());
+        assert!(notice.is_none());
+        assert_eq!(git.toplevel.canonicalize().unwrap(), td.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn startup_outside_a_repository_uses_a_placeholder() {
+        let td = tempfile::tempdir().unwrap();
+        let (git, notice) = startup_git(td.path());
+        assert_eq!(git.toplevel, td.path());
+        assert_eq!(git.gitdir, td.path().join(".git"));
+        let notice = notice.unwrap();
+        assert!(notice.contains("No Git repository"), "{notice}");
+        assert!(notice.contains("initialize"), "{notice}");
+    }
+
+    #[test]
+    fn startup_with_a_missing_path_uses_a_placeholder() {
+        let td = tempfile::tempdir().unwrap();
+        let missing = td.path().join("no-such-dir");
+        let (git, notice) = startup_git(&missing);
+        assert_eq!(git.toplevel, missing);
+        assert!(notice.is_some());
+    }
+
+    #[test]
+    fn init_from_outside_a_repository_opens_it() {
+        let td = tempfile::tempdir().unwrap();
+        let (git, notice) = startup_git(td.path());
+        assert!(notice.is_some());
+        let mut app = App::unbuilt(git);
+        app.started_outside_repo = true;
+        app.view_text = Some(("Outside a Git repository".into(), "hint".into()));
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(td.path()).status().unwrap().success());
+        app.open_created_repository(td.path());
+        assert!(app.view_text.is_none(), "the hint is dismissed");
+        assert!(!app.started_outside_repo);
+        assert!(Git::discover(&app.git.toplevel).is_ok());
+        assert!(!app.lines.is_empty(), "the new status buffer was built");
+    }
+
+    #[test]
+    fn init_inside_a_repository_keeps_the_current_buffer() {
+        let td = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(td.path()).status().unwrap().success());
+        let (git, notice) = startup_git(td.path());
+        assert!(notice.is_none());
+        let mut app = App::new(git);
+        let toplevel = app.git.toplevel.clone();
+        let sub = td.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&sub).status().unwrap().success());
+        app.open_created_repository(&sub);
+        assert_eq!(app.git.toplevel, toplevel, "no switch when started in a repository");
     }
 }

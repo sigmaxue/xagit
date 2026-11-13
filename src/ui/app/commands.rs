@@ -949,6 +949,7 @@ impl App {
                     .canonicalize()
                     .unwrap_or_else(|_| std::path::PathBuf::from(&path));
                 g!().git_interactive_at(&abs, &["init"])?;
+                self.open_created_repository(&abs);
                 self.set_msg(&format!("initialized {path}"));
             }
             "clone" => {
@@ -957,7 +958,11 @@ impl App {
                 };
                 let target = self.read_line_prompt("Target directory", Some("."))?;
                 let t = target.unwrap_or_else(|| ".".into());
-                g!().git_interactive_at(&std::env::current_dir()?, &["clone", &url, &t])?;
+                let cwd = std::env::current_dir()?;
+                g!().git_interactive_at(&cwd, &["clone", &url, &t])?;
+                let t = std::path::Path::new(&t);
+                let dir = if t.is_absolute() { t.to_path_buf() } else { cwd.join(t) };
+                self.open_created_repository(&dir);
                 self.set_msg("cloned");
             }
 

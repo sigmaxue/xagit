@@ -11,7 +11,8 @@ Usage: xagit [PATH]
        xagit --help
        xagit --version
 
-  PATH   repository directory to open (default: current directory)
+  PATH   directory to open (default: current directory)
+         outside a repository, the TUI starts with an init/clone hint
 
 Status buffer keys:
   h / ?      dispatch (all commands)
