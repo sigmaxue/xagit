@@ -124,6 +124,24 @@ fn apply_plain_patch_to_the_index() {
     assert_eq!(g.git_string(&["diff", "--cached", "--name-only"]).unwrap(), "f", "{}", app.message());
 }
 
+/// `w w` offers the patch files as completions: TAB completes a partial
+/// name (and `?` lists them), so a patch can be searched for instead of
+/// typed in full.
+#[test]
+fn am_patches_can_be_searched_with_tab() {
+    let (_td, g, h) = repo();
+    g.git_interactive(&["format-patch", "-q", "-o", "pp", &format!("{}..HEAD", h[0])]).unwrap();
+    g.git_interactive(&["reset", "-q", "--hard", &h[0]]).unwrap();
+    let mut app = App::new(g.clone());
+    // the minibuffer already starts with the abbreviated directory;
+    // type "pp/0001" and let TAB complete it to the .patch file, then RET
+    let keys = ["p", "p", "/", "0", "0", "0", "1", "TAB", "RET"];
+    app.script_keys(&keys);
+    press(&mut app, &["w", "w"]);
+    assert_eq!(app.prompts(), ["Apply patch: "]);
+    assert_eq!(g.git_string(&["log", "-1", "--format=%s"]).unwrap(), "c2", "{}", app.message());
+}
+
 #[test]
 fn am_patches_and_progress() {
     let (_td, g, h) = repo();

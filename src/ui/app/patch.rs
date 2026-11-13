@@ -27,6 +27,47 @@ fn cover_letter(args: &[String], topdir: &std::path::Path) -> std::path::PathBuf
     }
 }
 
+/// Filesystem completion for `read-file-name`: the files and directories
+/// under DIR (a few levels deep, skipping .git) as candidate strings that
+/// start with SHOWN — the abbreviated directory prefix already inserted
+/// into the minibuffer.  This is what lets `w w` / `W a` search patch
+/// files with TAB and list them with `?` instead of typing a full path.
+fn file_completion_candidates(dir: &std::path::Path, shown: &str) -> Vec<String> {
+    const MAX_DEPTH: usize = 3;
+    const MAX_ENTRIES: usize = 400;
+    fn walk(out: &mut Vec<String>, root: &std::path::Path, rel: &std::path::Path, shown: &str, depth: usize) {
+        if out.len() >= MAX_ENTRIES || depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(root.join(rel)) else { return };
+        let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            if out.len() >= MAX_ENTRIES {
+                break;
+            }
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            let child = rel.join(name.as_ref());
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            let mut cand = format!("{shown}{}", child.to_string_lossy());
+            if is_dir {
+                cand.push('/');
+            }
+            out.push(cand);
+            if is_dir {
+                walk(out, root, &child, shown, depth + 1);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&mut out, dir, std::path::Path::new(""), shown, 0);
+    out
+}
+
 /// The arguments of ARGS other than "-- FILES", and the FILES.
 fn split_files(args: &[String]) -> (Vec<String>, Vec<String>) {
     let mut rest = Vec::new();
@@ -43,11 +84,20 @@ fn split_files(args: &[String]) -> (Vec<String>, Vec<String>) {
 impl App {
     /// read-file-name in default-directory: the minibuffer starts with
     /// the directory and INITIAL; DEFAULT when that is left unchanged.
+    /// Files and directories below it are offered as completions (TAB /
+    /// `?`), like Emacs' read-file-name, so a patch can be searched for
+    /// instead of typed in full.  require-match stays off: a new file name
+    /// (Write patch file) or any path is still accepted.
     fn read_file_name_in(&mut self, prompt: &str, default: Option<&str>, initial: Option<&str>) -> Result<Option<std::path::PathBuf>> {
         let dir = self.cwd.clone();
         let shown = format!("{}/", abbreviate(dir.to_string_lossy().trim_end_matches('/')));
         *self.initial_input.borrow_mut() = Some(format!("{shown}{}", initial.unwrap_or("")));
-        let Some(input) = self.read_line_hist(prompt, None, Hist::Minibuffer, None)? else {
+        let table = Completion {
+            candidates: file_completion_candidates(&dir, &shown),
+            require_match: false,
+            multiple: false,
+        };
+        let Some(input) = self.read_line_hist(prompt, None, Hist::Minibuffer, Some(table))? else {
             return Ok(None);
         };
         let input = input.trim();
@@ -310,5 +360,42 @@ mod tests {
     fn files() {
         let args = ["-U3".to_string(), "-- a b".to_string()];
         assert_eq!(split_files(&args), (vec!["-U3".to_string()], vec!["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn file_candidates_are_searchable_with_tab_and_help() {
+        use crate::ui::keys::key_from_label;
+        use crate::ui::minibuf::{Completion, LineEditor, Step};
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(td.path().join("pp")).unwrap();
+        std::fs::write(td.path().join("pp/0001-c2.patch"), "x").unwrap();
+        std::fs::write(td.path().join("pp/0002-c3.patch"), "x").unwrap();
+        std::fs::create_dir_all(td.path().join(".git")).unwrap();
+        std::fs::write(td.path().join(".git/config"), "hidden").unwrap();
+        let shown = format!("{}/", td.path().display());
+        let cands = file_completion_candidates(td.path(), &shown);
+        assert!(cands.contains(&format!("{shown}pp/")), "directory candidate: {cands:?}");
+        assert!(cands.contains(&format!("{shown}pp/0001-c2.patch")), "patch candidate: {cands:?}");
+        assert!(!cands.iter().any(|c| c.contains(".git")), "hidden dirs skipped: {cands:?}");
+
+        // `?` lists the candidates; typing a partial name + TAB completes it
+        let mut ed = LineEditor::new(Vec::new(), None)
+            .with_completion(Completion { candidates: cands.clone(), require_match: false, multiple: false })
+            .with_initial_input(&shown);
+        assert_eq!(ed.key(&key_from_label("?")), Step::Continue);
+        assert!(ed.completions().unwrap().len() >= 3, "the help lists the files");
+        for c in "pp/0001".chars() {
+            ed.key(&key_from_label(&c.to_string()));
+        }
+        ed.key(&key_from_label("TAB"));
+        assert_eq!(ed.text(), format!("{shown}pp/0001-c2.patch"), "TAB completes the patch name");
+
+        // a fresh editor: TAB on the bare prefix completes the common part
+        let mut ed2 = LineEditor::new(Vec::new(), None)
+            .with_completion(Completion { candidates: cands, require_match: false, multiple: false })
+            .with_initial_input(&shown);
+        ed2.key(&key_from_label("TAB"));
+        assert!(ed2.text().starts_with(&shown));
+        assert_ne!(ed2.text(), shown, "TAB made progress from the directory prefix");
     }
 }
