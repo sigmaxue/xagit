@@ -14,7 +14,12 @@
 //! start another editor.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+/// Guarantees a distinct directory even when several servers start in the
+/// same nanosecond (parallel tests / a fast sequence of rebases).
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A file git asked xagit to edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,9 +41,10 @@ pub struct EditorServer {
 impl EditorServer {
     pub fn new() -> std::io::Result<EditorServer> {
         let base = std::env::temp_dir().join(format!(
-            "xagit-editor-{}-{}",
+            "xagit-editor-{}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&base)?;
         let script = base.join("editor.sh");

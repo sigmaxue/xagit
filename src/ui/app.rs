@@ -1575,15 +1575,43 @@ impl DiffSel {
     }
 }
 
-/// extra helper on Git for running outside repo (init/clone)
+/// extra helper on Git for running outside repo (init/clone).
+/// Captures git's output so a failure can be reported with its stderr and
+/// a hint; when git wanted to ask for a credential / host key, the caller
+/// runs it once more in the terminal.  Like `git_detached`, the result is
+/// `Err((detail, wants_terminal))`.
 impl Git {
-    fn git_interactive_at(&self, dir: &std::path::Path, args: &[&str]) -> Result<()> {
+    fn git_output_at(&self, dir: &std::path::Path, args: &[&str]) -> Result<(), (String, bool)> {
+        use std::process::Stdio;
+        let out = std::process::Command::new("git")
+            .args(["-c", "core.editor=true", "-c", "color.ui=false"])
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_MESSAGES", "C")
+            .env("LANGUAGE", "")
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| (format!("{:#}", crate::git::exec::spawn_failure(dir, args, e)), false))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        crate::git::exec::record(dir, args, out.status.success(), out.status.code(), &stderr);
+        if out.status.success() {
+            return Ok(());
+        }
+        Err((crate::git::exec::failure(dir, args, &out), crate::git::exec::wants_terminal(&stderr)))
+    }
+
+    /// Re-run in the terminal, for the credential / host-key prompt the
+    /// captured run could not show (magit's with-editor style hand-off).
+    fn git_tty_at(&self, dir: &std::path::Path, args: &[&str]) -> Result<()> {
         let st = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
             .status().map_err(|e| crate::git::exec::spawn_failure(dir, args, e))?;
         if !st.success() {
-            anyhow::bail!("{} failed ({st})\nin {}\nOutput was shown in the terminal (interactive command).", crate::git::exec::command_label(args), crate::git::exec::sanitize(&dir.display().to_string()));
+            anyhow::bail!("{} failed ({st})\nin {}", crate::git::exec::command_label(args), crate::git::exec::sanitize(&dir.display().to_string()));
         }
         Ok(())
     }
@@ -1872,5 +1900,26 @@ mod startup_tests {
         app.script_answers(&["sub/new"]);
         app.press("I").unwrap();
         assert!(base.join("sub/new/.git").exists(), "init landed outside ../test1: {}", app.message());
+    }
+
+    #[test]
+    fn failed_clone_reports_git_stderr_not_just_an_exit_code() {
+        let td = tempfile::tempdir().unwrap();
+        let base = td.path().join("test1");
+        std::fs::create_dir(&base).unwrap();
+        let (git, notice) = startup_git(&base);
+        assert!(notice.is_some());
+        let mut app = App::unbuilt(git);
+        app.started_outside_repo = true;
+        app.cwd = base.clone();
+        let missing = td.path().join("no-such-repo");
+        app.script_answers(&[&missing.to_string_lossy(), "clone-target"]);
+        let err = app.press("C").unwrap_err();
+        let detail = format!("{err:#}");
+        // git's own diagnostic and a hint are attached, not only "failed (exit status: 128)"
+        assert!(detail.contains("stderr:"), "{detail}");
+        assert!(!detail.contains("(empty)"), "{detail}");
+        assert!(!detail.contains("Output was shown in the terminal"), "{detail}");
+        assert!(detail.contains("does not appear to be a git repository") || detail.contains("repository"), "{detail}");
     }
 }

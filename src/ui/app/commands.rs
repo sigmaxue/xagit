@@ -23,6 +23,23 @@ pub(super) fn absolute_in(base: &std::path::Path, input: &str) -> std::path::Pat
 }
 
 impl App {
+    /// Run a repository-level git command (init / clone) in DIR.  Its
+    /// output is captured so a failure is reported with git's stderr and a
+    /// hint; when git wanted a credential / host-key prompt, run it once
+    /// more in the terminal so the user can answer.
+    fn run_repo_git(&mut self, dir: &std::path::Path, args: &[&str]) -> Result<()> {
+        match self.git.git_output_at(dir, args) {
+            Ok(()) => Ok(()),
+            Err((detail, true)) => {
+                let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+                let strs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                let d = dir.to_path_buf();
+                self.with_terminal(|g| g.git_tty_at(&d, &strs))
+                    .map_err(|_| anyhow::anyhow!("{detail}"))
+            }
+            Err((detail, false)) => Err(anyhow::anyhow!("{detail}")),
+        }
+    }
 
     /// Read the value of the option ARG (transient-infix-read). None: the
     /// user quit (nothing changes); Some(None): unset; Some(Some(v)): set
@@ -970,7 +987,7 @@ impl App {
                 let abs = absolute_in(&base, &path);
                 // `git init <dir>` creates the directory if needed, so it
                 // also works when the target does not exist yet.
-                g!().git_interactive_at(&base, &["init", &abs.to_string_lossy()])?;
+                self.run_repo_git(&base, &["init", &abs.to_string_lossy()])?;
                 self.open_created_repository(&abs);
                 self.set_msg(&format!("initialized {path}"));
             }
@@ -982,7 +999,7 @@ impl App {
                 let target = self.read_line_prompt("Target directory", Some("."))?;
                 let t = target.unwrap_or_else(|| ".".into());
                 let dir = absolute_in(&base, &t);
-                g!().git_interactive_at(&base, &["clone", &url, &dir.to_string_lossy()])?;
+                self.run_repo_git(&base, &["clone", &url, &dir.to_string_lossy()])?;
                 self.open_created_repository(&dir);
                 self.set_msg("cloned");
             }
