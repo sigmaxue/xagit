@@ -4,6 +4,28 @@
 //! gives each of them the parent's private fields and helpers.
 
 use super::*;
+use crate::ui::commit_msg::Message;
+
+/// The visible line split around the character at point: (before, at,
+/// after).  AT is a space when the point is at the end of the line.
+/// None when the point is past the part that fits in ROOM columns.
+fn point_parts(line: &str, col: usize, room: usize) -> Option<(String, String, String)> {
+    let shown = crate::ui::width::truncate(line, room);
+    if col > shown.chars().count() {
+        return None;
+    }
+    let mut chars = shown.chars();
+    let before: String = chars.by_ref().take(col).collect();
+    let at: String = chars.next().map(String::from).unwrap_or_else(|| " ".into());
+    let after: String = chars.collect();
+    Some((before, at, after))
+}
+
+/// Whether line I is shaded: every line of the block at point, plus the
+/// point's own line (which may be outside a block, e.g. a comment line).
+fn shaded(i: usize, point: usize, block: Option<(usize, usize)>) -> bool {
+    i == point || block.is_some_and(|(a, b)| i >= a && i <= b)
+}
 
 impl App {
 
@@ -135,6 +157,34 @@ impl App {
         Row::split(left, right, w)
     }
 
+    /// One line of a built-in message buffer: the whole non-comment block
+    /// at point is shaded (not just the point's line), comment lines are
+    /// dim, and the point's line carries the cursor gutter with the
+    /// character at point highlighted (a block at the end of the line).
+    pub(super) fn message_row(&self, m: &Message, i: usize, w: usize, dim_comments: bool, block: Option<(usize, usize)>) -> Row {
+        let t = &self.theme;
+        let line = &m.lines[i];
+        let on_point = i == m.row;
+        let base = if shaded(i, m.row, block) { t.style(Face::CursorLine) } else { Style::default() };
+        let face = if dim_comments && line.starts_with(m.comment_char) { Face::Dim } else { Face::Default };
+        let text = t.style(face).over(base);
+        let mut r = Row::new(base);
+        let gutter = if on_point { t.glyphs.cursor } else { ' ' };
+        r.push(format!("{gutter} "), t.style(Face::Gutter).over(base));
+        // one column is left for the point's block at the end of a line
+        let room = w.saturating_sub(3);
+        let parts = if on_point { point_parts(line, m.col, room) } else { None };
+        match parts {
+            Some((before, at, after)) => {
+                r.push(before, text).push(at, t.style(Face::Point).over(base)).push(after, text);
+            }
+            None => {
+                r.push(crate::ui::width::truncate(line, room).to_string(), text);
+            }
+        }
+        r
+    }
+
     /// The mode line: the mode, the echo area message, the position.
     pub(super) fn mode_line(&self, w: usize, position: String) -> Row {
         let t = &self.theme;
@@ -166,14 +216,16 @@ impl App {
             &[
                 ("C-c C-c", "save"),
                 ("C-c C-k", "cancel"),
-                ("C-n/C-p", "move"),
+                ("C-n/C-p", "line"),
+                ("M-p/M-n", "block"),
                 ("?", "help"),
             ]
         } else if self.mode == BufferMode::Commit {
             &[
                 ("C-c C-c", "commit"),
                 ("C-c C-k", "cancel"),
-                ("C-n/C-p", "move"),
+                ("C-n/C-p", "line"),
+                ("M-p/M-n", "block"),
                 ("?", "help"),
             ]
         } else if self.mode == BufferMode::Resolve {
@@ -402,4 +454,31 @@ impl App {
         let _ = out.flush();
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{point_parts, shaded};
+
+    #[test]
+    fn point_is_highlighted_at_the_input_position() {
+        let p = |s: &str, col| point_parts(s, col, 78);
+        assert_eq!(p("abc", 0), Some((String::new(), "a".into(), "bc".into())));
+        assert_eq!(p("abc", 1), Some(("a".into(), "b".into(), "c".into())));
+        assert_eq!(p("abc", 3), Some(("abc".into(), " ".into(), String::new())), "a block at EOL");
+        assert_eq!(p("abc", 4), None, "past the visible line");
+        // CJK characters take two columns: the point's column stays aligned
+        assert_eq!(point_parts("中文abc", 2, 5), Some(("中文".into(), "a".into(), String::new())));
+    }
+
+    #[test]
+    fn the_whole_block_is_shaded() {
+        let block = Some((0, 2)); // subject, blank line, body (point on the last)
+        assert!(shaded(0, 2, block), "the first line of the block");
+        assert!(shaded(1, 2, block), "the blank line inside the block");
+        assert!(shaded(2, 2, block), "the point's line");
+        assert!(!shaded(3, 2, block), "a comment line outside the block");
+        assert!(shaded(5, 5, None), "the point's line outside any block");
+        assert!(!shaded(4, 5, None), "an unrelated line");
+    }
 }

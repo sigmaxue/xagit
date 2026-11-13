@@ -153,3 +153,78 @@ fn reword_keeps_the_tree() {
     assert_eq!(g.git_string(&["rev-parse", "HEAD^{tree}"]).unwrap(), tree_before);
     assert_eq!(read(&g, "f.txt"), "one\n");
 }
+
+#[test]
+fn block_movement_and_the_point_position() {
+    let (_td, g) = repo();
+    staged_change(&g);
+    let mut app = App::new(g.clone());
+    press(&mut app, &["c", "c"]);
+    assert_eq!(app.mode(), &BufferMode::Commit, "{}", app.message());
+    // line:column/total lines, starting on the empty message line
+    assert!(app.commit_msg_position().unwrap().starts_with("1:1/"), "{}", app.commit_msg_position().unwrap());
+    type_line(&mut app, "subject");
+    assert!(app.commit_msg_position().unwrap().starts_with("1:8/"), "{}", app.commit_msg_position().unwrap());
+    // the instructions are not a non-comment block: M-n stays in the message
+    app.press("M-n").unwrap();
+    assert_eq!(app.commit_msg_point().unwrap().0, 0);
+    // walk into the comment lines, then M-p returns to the message block
+    press(&mut app, &["C-n", "C-n"]);
+    assert_eq!(app.commit_msg_point().unwrap().0, 2);
+    app.press("M-p").unwrap();
+    assert_eq!(app.commit_msg_point(), Some((0, 7)));
+    assert!(app.commit_msg_position().unwrap().starts_with("1:8/"), "{}", app.commit_msg_position().unwrap());
+    press(&mut app, &["C-c", "C-c"]);
+    assert_eq!(subjects(&g)[0], "subject");
+}
+
+#[test]
+fn c_k_kills_the_line_and_m_k_the_block() {
+    let (_td, g) = repo();
+    staged_change(&g);
+    let mut app = App::new(g.clone());
+    press(&mut app, &["c", "c"]);
+    type_line(&mut app, "subject");
+    press(&mut app, &["enter", "enter"]);
+    type_line(&mut app, "body");
+    // point in the middle of the subject: C-k still kills the whole line
+    press(&mut app, &["C-p", "C-p", "C-a", "C-f", "C-f"]);
+    assert_eq!(app.commit_msg_point(), Some((0, 2)));
+    app.press("C-k").unwrap();
+    let text = app.commit_msg_text().unwrap();
+    assert!(!text.contains("subject") && text.contains("body"), "{text}");
+    assert_eq!(app.commit_msg_point(), Some((0, 0)));
+    // M-k kills the rest of the message block; git's comments stay
+    app.press("M-k").unwrap();
+    let text = app.commit_msg_text().unwrap();
+    assert!(!text.contains("body") && text.contains("Please enter"), "{text}");
+    assert_eq!(app.commit_msg_point(), Some((0, 0)));
+}
+
+#[test]
+fn undo_restores_typing_and_kills() {
+    let (_td, g) = repo();
+    staged_change(&g);
+    let mut app = App::new(g.clone());
+    press(&mut app, &["c", "c"]);
+    type_line(&mut app, "subject");
+    app.press("C-k").unwrap();
+    assert!(!app.commit_msg_text().unwrap().contains("subject"));
+    // C-_ puts the line back, with point where it was
+    app.press("C-_").unwrap();
+    assert_eq!(app.message(), "Undo");
+    assert!(app.commit_msg_text().unwrap().contains("subject"));
+    assert_eq!(app.commit_msg_point(), Some((0, 7)));
+    // C-/ undoes the whole run of typed characters in one step
+    app.press("C-/").unwrap();
+    assert!(!app.commit_msg_text().unwrap().contains("subject"));
+    assert_eq!(app.commit_msg_point(), Some((0, 0)));
+    app.press("C-/").unwrap();
+    assert_eq!(app.message(), "No further undo information");
+    // a killed block is undoable too
+    type_line(&mut app, "again");
+    app.press("M-k").unwrap();
+    assert!(!app.commit_msg_text().unwrap().contains("again"), "{}", app.commit_msg_text().unwrap());
+    app.press("C-/").unwrap();
+    assert!(app.commit_msg_text().unwrap().contains("again"), "{}", app.commit_msg_text().unwrap());
+}

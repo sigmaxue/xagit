@@ -125,6 +125,8 @@ pub enum Face {
     CursorLine,
     SectionHighlight,
     Region,
+    /// the character at point in a built-in text buffer
+    Point,
     /// matches of the current buffer search (C-s)
     SearchMatch,
     Gutter,
@@ -563,7 +565,7 @@ impl Theme {
                     Style { bg: Some(p.region_bg), ..Style::default() }
                 }
             }
-            Face::SearchMatch => {
+            Face::SearchMatch | Face::Point => {
                 if basic {
                     Style { reverse: true, bold: true, ..Style::default() }
                 } else {
@@ -605,7 +607,7 @@ fn mono(face: Face) -> Style {
         Face::Error => Style { bold: true, ..reverse },
         Face::BranchCurrent | Face::Head | Face::HintKey | Face::PopupKey | Face::PopupTitle | Face::Prompt => bold,
         Face::PopupGroup | Face::HunkRange | Face::Conflict | Face::FileUnmerged | Face::CursorLine | Face::Gutter => bold,
-        Face::SearchMatch => reverse,
+        Face::SearchMatch | Face::Point => reverse,
         Face::PopupValue => Style { underline: true, ..Style::default() },
         Face::Meta | Face::PopupInapt => Style { italic: true, ..Style::default() },
         // keep diff additions / removals distinguishable on a monochrome

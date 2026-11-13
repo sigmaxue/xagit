@@ -41,16 +41,31 @@ Edit the text, then C-c C-c
 C-c C-c  save (write the file / set the note or description)
 C-c C-k  cancel without changing anything
 C-n/C-p  next / previous line (also up / down)
+M-p/M-n  previous / next block of non-comment lines (also M-up / M-down)
 C-a/C-e  beginning / end of line; C-b/C-f one character
-RET      new line; DEL deletes backwards; C-d deletes forward; C-k kills to EOL
-?        show this help";
+RET      new line; DEL deletes backwards; C-d deletes forward
+C-k      kill the whole line at point (ignores the column)
+M-k      kill the whole non-comment block at point (a plain-text file is one block)
+C-/ C-_  undo last change (a run of typing is one step)
+?        show this help
+
+The mode line shows line:column/total lines; the character at point is
+highlighted and its whole non-comment block is shaded.  On a sequencer's
+message (COMMIT_EDITMSG, SQUASH_MSG, ...) the point starts in the message
+itself, not in git's comment instructions.";
 
 impl App {
     /// Open the built-in text buffer with TEXT; C-c C-c saves it via SAVE.
     pub(super) fn text_edit_open(&mut self, text: &str, title: &str, save: TextEditSave) {
-        // '#' has no special meaning here (unlike a commit message): it is
-        // a marker no line of these files is stripped for
-        let cc = '\0';
+        // A sequencer's message (COMMIT_EDITMSG, SQUASH_MSG, ...) comes
+        // with git's instruction lines: the point starts in the message
+        // and M-p/M-n skip those comment blocks.  Notes, descriptions and
+        // cover letters have no comment lines at all: '\0' is a marker no
+        // line of these files is stripped for.
+        let cc = match &save {
+            TextEditSave::Reply { .. } => self.message_comment_char(),
+            _ => '\0',
+        };
         self.text_edit = Some(TextEdit { message: Message::new(text, cc), title: title.to_string(), save, cc: false });
         self.setup_buffer(BufferMode::TextEdit, Vec::new());
         self.set_msg("Type C-c C-c to save, C-c C-k to cancel, ? for help");
@@ -64,6 +79,16 @@ impl App {
     /// The title of the text buffer (tests).
     pub fn text_edit_title(&self) -> Option<String> {
         self.text_edit.as_ref().map(|e| e.title.clone())
+    }
+
+    /// The point (row, col) in the text buffer (tests).
+    pub fn text_edit_point(&self) -> Option<(usize, usize)> {
+        self.text_edit.as_ref().map(|e| (e.message.row, e.message.col))
+    }
+
+    /// The point's position shown in the mode line (tests).
+    pub fn text_edit_position(&self) -> Option<String> {
+        self.text_edit.as_ref().map(|e| e.message.position())
     }
 
     /// Replace the whole text buffer (tests: what an editor would write).
@@ -184,6 +209,7 @@ impl App {
             }
             return Ok(true);
         }
+        let n = self.prefix_numeric() as isize;
         let m = &mut self.text_edit.as_mut().unwrap().message;
         match (key.ctrl, key.code.as_str()) {
             (true, "c") => {
@@ -192,12 +218,23 @@ impl App {
             }
             (true, "n" | "down") | (false, "down") => m.move_line(1),
             (true, "p" | "up") | (false, "up") => m.move_line(-1),
+            (false, "M-n" | "M-down") => m.move_block(n),
+            (false, "M-p" | "M-up") => m.move_block(-n),
             (true, "a") => m.home(),
             (true, "e") => m.end(),
             (true, "b" | "left") | (false, "left") => m.move_col(-1),
             (true, "f" | "right") | (false, "right") => m.move_col(1),
             (true, "d") => m.delete_forward(),
             (true, "k") => m.kill_line(),
+            (true, "/" | "_") => {
+                let undone = m.undo();
+                self.set_msg(if undone { "Undo" } else { "No further undo information" });
+            }
+            (false, "M-k") => {
+                if !m.kill_block() {
+                    self.set_msg("No message block to kill");
+                }
+            }
             (false, "enter") => m.newline(),
             (false, "backspace" | "DEL") => {
                 m.delete_backward();
@@ -217,22 +254,16 @@ impl App {
         Ok(true)
     }
 
-    /// The rows of the text buffer: the point's line highlighted.
+    /// The rows of the text buffer: the whole block at point is shaded,
+    /// comment lines (of a sequencer message) are dim; the mode line
+    /// shows line:column/total lines.
     pub(super) fn text_edit_rows(&self, body: usize, w: usize) -> (Vec<Row>, String) {
-        let t = &self.theme;
         let Some(ed) = &self.text_edit else { return (Vec::new(), String::new()) };
         let m = &ed.message;
         let scroll = if m.row >= body { m.row + 1 - body } else { 0 };
-        let mut rows = Vec::new();
-        for (i, line) in m.lines.iter().enumerate().skip(scroll).take(body) {
-            let base = if i == m.row { t.style(Face::CursorLine) } else { Style::default() };
-            let mut r = Row::new(base);
-            let gutter = if i == m.row { t.glyphs.cursor } else { ' ' };
-            r.push(format!("{gutter} "), t.style(Face::Gutter).over(base));
-            let shown: String = line.chars().take(w.saturating_sub(2)).collect();
-            r.push(shown, t.style(Face::Default).over(base));
-            rows.push(r);
-        }
-        (rows, format!("{}/{}", m.row + 1, m.lines.len()))
+        let dim_comments = m.comment_char != '\0';
+        let block = m.current_block();
+        let rows = (scroll..m.lines.len().min(scroll + body)).map(|i| self.message_row(m, i, w, dim_comments, block)).collect();
+        (rows, m.position())
     }
 }

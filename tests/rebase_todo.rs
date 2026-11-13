@@ -288,3 +288,42 @@ fn two_reword_messages_use_the_builtin_buffer() {
     assert!(!g.rebase_in_progress(), "{}", app.message());
     assert_eq!(subjects(&g), ["c4", "c3 new", "c2 new", "c1"], "{}", app.message());
 }
+
+/// The commit message git prepares after the todo starts with a reword:
+/// xagit puts the point in the message (not in git's comment instructions),
+/// shows where it is, M-p/M-n move over the non-comment blocks and
+/// M-k / C-k kill a whole block / line regardless of the column.
+#[test]
+fn reword_message_starts_in_the_message_block() {
+    let (_td, g) = repo();
+    let mut app = open_todo(&g);
+    press(&mut app, &["r", "C-c", "C-c"]);
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    let text = app.text_edit_text().unwrap();
+    let subject = text.lines().next().unwrap();
+    let n = text.lines().count();
+    assert_eq!(app.text_edit_point(), Some((0, subject.chars().count())), "{text}");
+    assert_eq!(app.text_edit_position(), Some(format!("1:{}/{n}", subject.chars().count() + 1)));
+    // a second non-comment block, separated by git-style instruction lines
+    app.text_edit_set("subject\n\nbody\n# instruction\n# another\nsecond block\n");
+    app.press("M-n").unwrap();
+    assert_eq!(app.text_edit_point(), Some((5, 12)), "{}", app.text_edit_text().unwrap());
+    app.press("M-p").unwrap();
+    assert_eq!(app.text_edit_point(), Some((2, 4)));
+    // M-k kills the whole block at point, comments and the next block stay
+    app.press("M-k").unwrap();
+    let text = app.text_edit_text().unwrap();
+    assert!(!text.contains("subject") && !text.contains("body"), "{text}");
+    assert!(text.contains("# instruction") && text.contains("second block"), "{text}");
+    // C-k kills the whole line even when point is in its middle
+    app.press("M-n").unwrap();
+    app.press("C-b").unwrap();
+    app.press("C-k").unwrap();
+    assert!(!app.text_edit_text().unwrap().contains("second block"), "{}", app.text_edit_text().unwrap());
+    // C-/ restores the killed line in the sequencer's message buffer too
+    app.press("C-/").unwrap();
+    assert!(app.text_edit_text().unwrap().contains("second block"), "{}", app.text_edit_text().unwrap());
+    app.text_edit_set("reworded\n");
+    press(&mut app, &["C-c", "C-c"]);
+    assert!(!g.rebase_in_progress(), "{}", app.message());
+}

@@ -26,14 +26,33 @@ COMMIT_EDITMSG — write the commit message, then C-c C-c
 C-c C-c  commit (git commit with this message)
 C-c C-k  cancel without committing
 C-n/C-p  next / previous line (also up / down)
+M-p/M-n  previous / next block of non-comment lines (also M-up / M-down)
 C-a/C-e  beginning / end of line; C-b/C-f one character
-RET      new line; DEL deletes backwards; C-d deletes forward; C-k kills to EOL
+RET      new line; DEL deletes backwards; C-d deletes forward
+C-k      kill the whole line at point (ignores the column)
+M-k      kill the whole non-comment block at point (ignores the column)
+C-/ C-_  undo last change (a run of typing is one step)
 ?        show this help
 
-Comment lines (starting with the comment char) and the scissors trailer
-are removed by git before committing.";
+The mode line shows line:column/total lines; the character at point is
+highlighted and its whole non-comment block is shaded.  Comment lines
+(starting with the comment char) and the scissors trailer are removed by
+git before committing.";
 
 impl App {
+    /// core.commentChar (or '#'): the marker of the instruction lines in
+    /// a COMMIT_EDITMSG file.  'auto' cannot be resolved without reading
+    /// the file git prepared, so it falls back to '#' like git does for
+    /// the common case.
+    pub(super) fn message_comment_char(&self) -> char {
+        self.git
+            .git_string(&["config", "core.commentChar"])
+            .ok()
+            .map(|s| s.trim().chars().next().unwrap_or('#'))
+            .filter(|c| *c != '\0' && *c != 'a')
+            .unwrap_or('#')
+    }
+
     /// Open the built-in message buffer for `git commit ARGS`.  Returns true
     /// when the buffer was opened (the caller must not run git itself).
     pub(super) fn commit_msg_open(&mut self, args: Vec<String>, env: Vec<(String, String)>, done_msg: &str) -> Result<bool> {
@@ -53,13 +72,7 @@ impl App {
             return Ok(false);
         }
         let template = self.git.commit_message_template(&args);
-        let cc = self
-            .git
-            .git_string(&["config", "core.commentChar"])
-            .ok()
-            .map(|s| s.trim().chars().next().unwrap_or('#'))
-            .filter(|c| *c != '\0' && *c != 'a')
-            .unwrap_or('#');
+        let cc = self.message_comment_char();
         // message body, a blank separator, then the comment instructions
         let mut text = template;
         text.push_str("\n\n");
@@ -84,6 +97,11 @@ impl App {
     /// The point (row, col) in the message buffer (tests).
     pub fn commit_msg_point(&self) -> Option<(usize, usize)> {
         self.commit_edit.as_ref().map(|e| (e.message.row, e.message.col))
+    }
+
+    /// The point's position shown in the mode line (tests).
+    pub fn commit_msg_position(&self) -> Option<String> {
+        self.commit_edit.as_ref().map(|e| e.message.position())
     }
 
     fn commit_msg_close(&mut self) -> Option<CommitEdit> {
@@ -131,6 +149,7 @@ impl App {
             }
             return Ok(true);
         }
+        let n = self.prefix_numeric() as isize;
         let m = &mut self.commit_edit.as_mut().unwrap().message;
         match (key.ctrl, key.code.as_str()) {
             (true, "c") => {
@@ -139,12 +158,23 @@ impl App {
             }
             (true, "n" | "down") | (false, "down") => m.move_line(1),
             (true, "p" | "up") | (false, "up") => m.move_line(-1),
+            (false, "M-n" | "M-down") => m.move_block(n),
+            (false, "M-p" | "M-up") => m.move_block(-n),
             (true, "a") => m.home(),
             (true, "e") => m.end(),
             (true, "b" | "left") | (false, "left") => m.move_col(-1),
             (true, "f" | "right") | (false, "right") => m.move_col(1),
             (true, "d") => m.delete_forward(),
             (true, "k") => m.kill_line(),
+            (true, "/" | "_") => {
+                let undone = m.undo();
+                self.set_msg(if undone { "Undo" } else { "No further undo information" });
+            }
+            (false, "M-k") => {
+                if !m.kill_block() {
+                    self.set_msg("No message block to kill");
+                }
+            }
             (false, "enter") => m.newline(),
             (false, "backspace" | "DEL") => {
                 m.delete_backward();
@@ -164,10 +194,9 @@ impl App {
         Ok(true)
     }
 
-    /// The rows of the COMMIT_EDITMSG buffer.  The point's line carries the
-    /// cursor-line face; comment lines are dim.
+    /// The rows of the COMMIT_EDITMSG buffer: the whole block at point is
+    /// shaded, comment lines are dim; the mode line shows the point.
     pub(super) fn commit_msg_rows(&self, body: usize, w: usize) -> (Vec<Row>, String) {
-        let t = &self.theme;
         let Some(ed) = &self.commit_edit else { return (Vec::new(), String::new()) };
         let m = &ed.message;
         let mut scroll = self.scroll;
@@ -176,17 +205,8 @@ impl App {
         } else if m.row >= scroll + body {
             scroll = m.row + 1 - body;
         }
-        let mut rows = Vec::new();
-        for (i, line) in m.lines.iter().enumerate().skip(scroll).take(body) {
-            let base = if i == m.row { t.style(Face::CursorLine) } else { Style::default() };
-            let face = if line.starts_with(m.comment_char) { Face::Dim } else { Face::Default };
-            let mut r = Row::new(base);
-            let gutter = if i == m.row { t.glyphs.cursor } else { ' ' };
-            r.push(format!("{gutter} "), t.style(Face::Gutter).over(base));
-            let shown: String = line.chars().take(w.saturating_sub(2)).collect();
-            r.push(shown, t.style(face).over(base));
-            rows.push(r);
-        }
-        (rows, format!("{}/{}", m.row + 1, m.lines.len()))
+        let block = m.current_block();
+        let rows = (scroll..m.lines.len().min(scroll + body)).map(|i| self.message_row(m, i, w, true, block)).collect();
+        (rows, m.position())
     }
 }
