@@ -5,6 +5,23 @@
 
 use super::*;
 
+/// Resolve INPUT to an absolute path relative to BASE (the directory xagit
+/// was started in).  Unlike `canonicalize` this also works for a path that
+/// does not exist yet (a new repository): it only normalizes `.`/`..`.
+pub(super) fn absolute_in(base: &std::path::Path, input: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(input);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+    let mut out = std::path::PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 impl App {
 
     /// Read the value of the option ARG (transient-infix-read). None: the
@@ -942,13 +959,18 @@ impl App {
 
             // -------- repo-level
             "init" => {
-                let Some(path) = self.read_line_prompt("Initialize repository at", Some("."))? else {
+                // PATH is relative to the directory xagit was started in
+                // (`xagit ../test1` → ../test1), NOT the process cwd; the
+                // default initializes exactly that directory.
+                let base = self.cwd.clone();
+                let default = base.to_string_lossy().into_owned();
+                let Some(path) = self.read_line_prompt("Initialize repository at", Some(&default))? else {
                     return Ok(());
                 };
-                let abs = std::path::Path::new(&path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| std::path::PathBuf::from(&path));
-                g!().git_interactive_at(&abs, &["init"])?;
+                let abs = absolute_in(&base, &path);
+                // `git init <dir>` creates the directory if needed, so it
+                // also works when the target does not exist yet.
+                g!().git_interactive_at(&base, &["init", &abs.to_string_lossy()])?;
                 self.open_created_repository(&abs);
                 self.set_msg(&format!("initialized {path}"));
             }
@@ -956,12 +978,11 @@ impl App {
                 let Some(url) = self.read_line_prompt("Repository url", None)? else {
                     return Ok(());
                 };
+                let base = self.cwd.clone();
                 let target = self.read_line_prompt("Target directory", Some("."))?;
                 let t = target.unwrap_or_else(|| ".".into());
-                let cwd = std::env::current_dir()?;
-                g!().git_interactive_at(&cwd, &["clone", &url, &t])?;
-                let t = std::path::Path::new(&t);
-                let dir = if t.is_absolute() { t.to_path_buf() } else { cwd.join(t) };
+                let dir = absolute_in(&base, &t);
+                g!().git_interactive_at(&base, &["clone", &url, &dir.to_string_lossy()])?;
                 self.open_created_repository(&dir);
                 self.set_msg("cloned");
             }

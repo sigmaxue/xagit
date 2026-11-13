@@ -138,11 +138,16 @@ impl App {
     /// True when a buffer was opened or the session finished (so a
     /// synchronous pump can stop waiting for the first edit).
     fn text_edit_open_request(&mut self) -> Result<bool> {
-        // git finished?
-        let finished = self
-            .edit_session
-            .as_ref()
-            .and_then(|s| s.result.try_recv().ok());
+        // git finished?  A disconnected channel means the worker is gone:
+        // treat it as a failure instead of silently polling until timeout.
+        let outcome = self.edit_session.as_ref().map(|s| s.result.try_recv());
+        let finished = match outcome {
+            Some(Ok(res)) => Some(res),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Some(Err("the git editor process ended unexpectedly".to_string()))
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => None,
+        };
         if let Some(res) = finished {
             let s = self.edit_session.take().unwrap();
             s.server.stop();

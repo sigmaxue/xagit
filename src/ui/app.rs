@@ -1823,4 +1823,54 @@ mod startup_tests {
         app.open_created_repository(&sub);
         assert_eq!(app.git.toplevel, toplevel, "no switch when started in a repository");
     }
+
+    #[test]
+    fn absolute_in_resolves_relative_to_the_startup_directory() {
+        // `xagit ../test1` sets cwd to that directory: relative inputs
+        // must be based on it, not the process's current directory.
+        let base = std::path::Path::new("/tmp/xagit/started/here");
+        assert_eq!(commands::absolute_in(base, "."), base);
+        assert_eq!(commands::absolute_in(base, "sub"), base.join("sub"));
+        assert_eq!(commands::absolute_in(base, "../test1"), std::path::Path::new("/tmp/xagit/started/test1"));
+        assert_eq!(commands::absolute_in(base, "/elsewhere"), std::path::Path::new("/elsewhere"));
+        // a directory that does not exist yet is still resolved
+        assert_eq!(commands::absolute_in(base, "new/repo"), base.join("new/repo"));
+    }
+
+    #[test]
+    fn init_default_is_the_startup_directory_not_the_process_cwd() {
+        let td = tempfile::tempdir().unwrap();
+        let target = td.path().join("test1");
+        std::fs::create_dir(&target).unwrap();
+        // xagit ../test1: a placeholder Git points at the target dir
+        let (git, notice) = startup_git(&target);
+        assert!(notice.is_some());
+        let mut app = App::unbuilt(git);
+        app.started_outside_repo = true;
+        app.cwd = target.clone();
+        // the default (empty scripted answer falls back to the prompt's
+        // default) initializes exactly the startup directory
+        app.script_answers(&[&target.to_string_lossy()]);
+        app.press("I").unwrap();
+        assert!(target.join(".git").exists(), "init did not happen in ../test1: {}", app.message());
+        assert_eq!(app.prompts().last().unwrap(), "Initialize repository at");
+        // the created repository is the one now shown
+        assert_eq!(app.git.toplevel.canonicalize().unwrap(), target.canonicalize().unwrap(), "{}", app.message());
+    }
+
+    #[test]
+    fn init_relative_path_is_relative_to_the_startup_directory() {
+        let td = tempfile::tempdir().unwrap();
+        let base = td.path().join("test1");
+        std::fs::create_dir(&base).unwrap();
+        let (git, notice) = startup_git(&base);
+        assert!(notice.is_some());
+        let mut app = App::unbuilt(git);
+        app.started_outside_repo = true;
+        app.cwd = base.clone();
+        // a relative answer must be resolved against cwd, not process cwd
+        app.script_answers(&["sub/new"]);
+        app.press("I").unwrap();
+        assert!(base.join("sub/new/.git").exists(), "init landed outside ../test1: {}", app.message());
+    }
 }
