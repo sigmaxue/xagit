@@ -158,6 +158,9 @@ pub struct App {
     /// magit-refs-show-commit-count of the refs buffer
     refs_counts: CommitCount,
     message: String,
+    /// short label of the git command triggered by the last key, echoed
+    /// in the mode line (like Emacs' echo area)
+    echo: Option<String>,
     /// xagit was started outside any repository: init/clone may switch to
     /// the repository they create (see `open_created_repository`)
     started_outside_repo: bool,
@@ -765,6 +768,7 @@ impl App {
             margins: HashMap::new(),
             refs_counts: CommitCount::Nothing,
             message: String::new(),
+            echo: None,
             started_outside_repo: false,
             quit: false,
             view_text: None,
@@ -1198,10 +1202,16 @@ impl App {
         if self.universal_argument(&key) {
             return Ok(());
         }
+        // echo the git command this key triggered (like Emacs' echo area):
+        // a side-effecting command bumps the per-repository sequence
+        let before = crate::git::exec::command_seq(&self.git.toplevel);
         // the refreshes the command asks for are done once, after it
         self.jobs.depth += 1;
         let r = self.dispatch_key(key);
         self.jobs.depth -= 1;
+        if crate::git::exec::command_seq(&self.git.toplevel) > before {
+            self.echo = crate::git::exec::last_command_label(&self.git.toplevel);
+        }
         if self.jobs.depth == 0 {
             self.flush_refresh();
         }

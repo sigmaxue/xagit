@@ -363,6 +363,16 @@ impl App {
         &self.message
     }
 
+    /// The short label of the git command the last key ran (echo area).
+    pub fn echo(&self) -> Option<&str> {
+        self.echo.as_deref()
+    }
+
+    /// The mode line as plain text (tests): mode, message, echoed command.
+    pub fn mode_line_text(&self, w: usize) -> String {
+        self.mode_line(w, String::new()).plain()
+    }
+
     /// The visible lines of the status buffer.
     pub fn visible_lines(&self) -> &[BufferLine] {
         &self.lines

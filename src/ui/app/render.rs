@@ -200,6 +200,14 @@ impl App {
             .any(|p| lower.starts_with(p))
             || lower.contains(" failed");
         left.push(self.message.clone(), t.style(if error { Face::Error } else { Face::Message }));
+        // echo the git command the last key ran (like Emacs' echo area);
+        // dim so it does not compete with the message, truncated by split
+        if let Some(cmd) = &self.echo {
+            if !self.message.is_empty() {
+                left.push("  ", bar);
+            }
+            left.push(format!("$ {cmd}"), t.style(Face::ModeLineDim).over(bar));
+        }
         let mut right = Row::new(bar);
         right.push(position, t.style(Face::ModeLineDim)).push(" ", bar);
         Row::split(left, right, w)

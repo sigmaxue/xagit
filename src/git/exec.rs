@@ -1,7 +1,7 @@
 //! git/exec.rs — running git commands (mirrors magit-git.el behavior)
 
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -38,7 +38,46 @@ fn captured_command(dir: &Path, args: &[&str]) -> Command {
 static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 const PROCESS_LOG_MAX: usize = 200;
 
+/// Per-repository echo of the most recent side-effecting git command: a
+/// monotonic sequence and a short label ("git add -- f").  The status
+/// buffer echoes the command triggered by a key (like Emacs' echo area),
+/// without disturbing its message.  Keyed by worktree so parallel
+/// repositories (and tests) never see each other's commands.
+static CMD_SEQ: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static CMD_LABEL: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The number of side-effecting git commands recorded in DIR so far.
+pub fn command_seq(dir: &Path) -> u64 {
+    CMD_SEQ.lock().ok().and_then(|m| m.get(dir).copied()).unwrap_or(0)
+}
+
+/// The short label of the most recent side-effecting git command in DIR.
+pub fn last_command_label(dir: &Path) -> Option<String> {
+    CMD_LABEL.lock().ok().and_then(|m| m.get(dir).cloned())
+}
+
+/// A short single-line rendering of ARGS for the echo area.
+fn echo_label(args: &[&str]) -> String {
+    let mut parts = vec!["git".to_string()];
+    let mut hide_next = false;
+    for arg in args {
+        let hidden = hide_next || arg.starts_with("--message=") || arg.starts_with("--config-env=");
+        hide_next = matches!(*arg, "-c" | "-m" | "--message" | "--config-env");
+        parts.push(if hidden { "…".into() } else { sanitize(arg) });
+    }
+    parts.join(" ")
+}
+
 pub(crate) fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
+    let key = dir.to_path_buf();
+    if let Ok(mut m) = CMD_SEQ.lock() {
+        *m.entry(key.clone()).or_insert(0) += 1;
+    }
+    if let Ok(mut m) = CMD_LABEL.lock() {
+        m.insert(key, echo_label(args));
+    }
     record_process(dir, &command_label(args), ok, code, stderr);
 }
 
