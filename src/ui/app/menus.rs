@@ -373,6 +373,15 @@ impl App {
         self.mode_line(w, String::new()).plain()
     }
 
+    /// Whether the echoed command is drawn bright (bold, not dim), so it
+    /// cannot invisibly blend into the mode line (tests).
+    pub fn echo_is_bright(&self) -> bool {
+        self.mode_line(200, String::new())
+            .spans
+            .iter()
+            .any(|s| s.text.starts_with("$ git") && s.style.bold && !s.style.dim)
+    }
+
     /// The visible lines of the status buffer.
     pub fn visible_lines(&self) -> &[BufferLine] {
         &self.lines

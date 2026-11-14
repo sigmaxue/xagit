@@ -44,9 +44,10 @@ fn staging_echoes_the_git_command() {
     assert!(echo.contains("new.txt"), "{echo:?}");
     // the echo lives in its own field: the command's message is untouched
     assert!(!app.message().contains("git add"), "echo must not be folded into message: {}", app.message());
-    // and it is actually drawn in the mode line
+    // and it is actually drawn in the mode line, bright enough to see
     let line = app.mode_line_text(200);
     assert!(line.contains("$ git add") && line.contains("new.txt"), "{line:?}");
+    assert!(app.echo_is_bright(), "the command echo must not be dim");
     // a plain movement produces no NEW echo (the last one stays)
     app.press("C-n").unwrap();
     assert_eq!(app.echo(), Some(echo.as_str()));
