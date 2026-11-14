@@ -81,18 +81,23 @@ fn echo_label(args: &[&str]) -> String {
 }
 
 /// Queue a short echo of a git command that was run directly (without
-/// going through `record`), e.g. an autosquash or a temp-index reset.
+/// going through `record`), e.g. an autosquash or a temp-index reset,
+/// or a read-only view command such as `git log` / `git diff`.
 pub fn push_echo(dir: &Path, args: &[&str]) {
+    push_echo_label(dir, &echo_label(args));
+}
+
+/// Queue an already-rendered command label for the echo area.
+pub fn push_echo_label(dir: &Path, label: &str) {
     let key = dir.to_path_buf();
-    let label = echo_label(args);
     if let Ok(mut m) = CMD_SEQ.lock() {
         *m.entry(key.clone()).or_insert(0) += 1;
     }
     if let Ok(mut m) = CMD_LABEL.lock() {
-        m.insert(key.clone(), label.clone());
+        m.insert(key.clone(), label.to_string());
     }
     if let Ok(mut m) = ECHO_PENDING.lock() {
-        m.insert(key, label);
+        m.insert(key, label.to_string());
     }
 }
 

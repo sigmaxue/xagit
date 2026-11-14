@@ -71,6 +71,23 @@ fn echo_is_per_repository() {
     assert!(app2.echo().unwrap().contains("b.txt"), "{}", app2.echo().unwrap());
 }
 
+/// Read-only data views echo the git command they are built from:
+/// `l l` shows `git log ...`, a diff view shows `git diff ...`.
+#[test]
+fn log_and_diff_views_echo_their_git_command() {
+    let (_td, g, _h) = repo_with_commit();
+    write(&g, "file.txt", "changed\n");
+    let mut app = App::new(g.clone());
+    press(&mut app, &["l", "l"]); // log current
+    let echo = app.echo().unwrap_or("").to_string();
+    assert!(echo.starts_with("git log"), "log view not echoed: {echo:?}");
+    // a diff view
+    press(&mut app, &["q"]);
+    press(&mut app, &["d", "u"]); // diff unstaged
+    let echo = app.echo().unwrap_or("").to_string();
+    assert!(echo.starts_with("git diff"), "diff view not echoed: {echo:?}");
+}
+
 /// Commands that spawn git directly (a temp-index reset) bypass
 /// `record`, but still queue an echo via push_echo.
 #[test]

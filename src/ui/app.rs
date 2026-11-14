@@ -333,6 +333,59 @@ pub enum SelectAction {
 }
 
 impl BufferMode {
+    /// The git command a data view is built from, for the echo area.
+    /// `git log`, `git diff`, `git show` … with the buffer's ARGS appended.
+    /// The internal editor / status buffers return None.
+    fn view_command(&self, args: &[String]) -> Option<String> {
+        let (cmd, extra): (&str, Vec<&str>) = match self {
+            BufferMode::Log { revs, files } => {
+                let mut e: Vec<&str> = args.iter().map(String::as_str).collect();
+                e.extend(revs.iter().map(String::as_str));
+                if !files.is_empty() {
+                    e.push("--");
+                    e.extend(files.iter().map(String::as_str));
+                }
+                ("log", e)
+            }
+            BufferMode::LogSelect { rev, .. } => {
+                let mut e: Vec<&str> = args.iter().map(String::as_str).collect();
+                e.push(rev);
+                ("log", e)
+            }
+            BufferMode::Diff(_) => ("diff", args.iter().map(String::as_str).collect()),
+            BufferMode::Revision { rev, files } => {
+                let mut e: Vec<&str> = args.iter().map(String::as_str).collect();
+                e.push(rev);
+                if !files.is_empty() { e.push("--"); e.extend(files.iter().map(String::as_str)); }
+                ("show", e)
+            }
+            BufferMode::Stash { stash } => {
+                let mut e: Vec<&str> = args.iter().map(String::as_str).collect();
+                e.push(stash);
+                ("stash show", e)
+            }
+            BufferMode::Reflog { refname } => {
+                let mut e: Vec<&str> = args.iter().map(String::as_str).collect();
+                e.push(refname);
+                ("reflog", e)
+            }
+            BufferMode::Stashes { .. } => ("stash list", vec![]),
+            BufferMode::Cherry { head, upstream } => ("cherry", vec![upstream, head]),
+            BufferMode::Refs { .. } => ("for-each-ref", vec![]),
+            _ => return None,
+        };
+        let mut label = format!("git {cmd}");
+        for x in extra {
+            label.push(' ');
+            label.push_str(x);
+        }
+        // keep the echo short: the transient args can be long
+        if label.chars().count() > 90 {
+            label = label.chars().take(89).collect::<String>() + "…";
+        }
+        Some(label)
+    }
+
     /// Magit has one buffer per mode and repository (and one per visited
     /// file or blob).
     fn same_kind(&self, other: &BufferMode) -> bool {
@@ -903,6 +956,11 @@ impl App {
     /// magit-setup-buffer: show a buffer in MODE with ARGS, reusing the
     /// buffer of that mode (or burying the buffer shown).
     fn setup_buffer(&mut self, mode: BufferMode, args: Vec<String>) {
+        // echo the read-only git command a data view is built from
+        // (`git log`, `git diff`, `git show`, …), like any other command
+        if let Some(label) = mode.view_command(&args) {
+            crate::git::exec::push_echo_label(&self.git.toplevel, &label);
+        }
         self.view_text = None;
         self.clear_search_state();
         let mut same = self.mode == mode;
