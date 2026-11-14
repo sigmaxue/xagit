@@ -89,7 +89,7 @@ cargo install --path .
 
 ## 界面与终端
 
-界面自上而下分为：标题栏（`xagit` 标记、当前视图，右侧为仓库名与 HEAD）、正文、transient 弹窗（以分隔线与正文隔开）、状态栏（视图模式、消息、光标位置）和按键提示栏（按宽度显示能放下的提示）。按键触发 git 命令时，状态栏左侧（消息之前）以亮色加粗简述回显该命令（如 $ git add -- new.txt，形如 Emacs 的 echo area），醒目且不会被长消息挤到行尾被截断：覆盖写入进程日志的改动类操作——同步命令、后台 fetch/pull/push（完成时回显）、直接启动 git 的 autosquash / temp-index reset、以及 ! 运行的 shell 命令、mergetool 等；打开数据视图时也回显其只读查询命令（l l 显示 git log ...、diff 显示 git diff ...、show 提交显示 git show ...、reflog/refs/stash 等），但状态页刷新的内部查询与纯移动不回显；消息文本与凭据被隐藏，回显按仓库隔离且过长时自动截断；完整命令与 stderr 仍在进程日志视图。
+界面自上而下分为：标题栏（`xagit` 标记、当前视图，右侧为仓库名与 HEAD）、正文、transient 弹窗（以分隔线与正文隔开）、状态栏（视图模式、消息、光标位置）和按键提示栏（按宽度显示能放下的提示）。按键触发 git 命令时，状态栏左侧（消息之前）以暗色简述回显该命令（如 $ git add -- new.txt，形如 Emacs 的 echo area），不抢消息的视觉、也不会被长消息挤到行尾被截断：覆盖写入进程日志的改动类操作——同步命令、后台 fetch/pull/push（完成时回显）、直接启动 git 的 autosquash / temp-index reset、以及 ! 运行的 shell 命令、mergetool 等；打开数据视图时也回显其只读查询命令（l l 显示 git log ...、diff 显示 git diff ...、show 提交显示 git show ...、reflog/refs/stash 等），但状态页刷新的内部查询与纯移动不回显；消息文本与凭据被隐藏，回显按仓库隔离且过长时自动截断；完整命令与 stderr 仍在进程日志视图。
 
 - 正文沿用 Magit 的语义配色：区块标题、hash、当前/本地/远程分支、标签、文件状态（modified/new file/deleted…）、hunk 头和增删行各有颜色；日志图按列着色。
 - 光标所在行有背景和左侧光标条，光标所在 section 整体浅色高亮（magit-section-highlight），region 另有选区底色。

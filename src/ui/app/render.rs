@@ -196,10 +196,9 @@ impl App {
         }
         // echo the git command the last key ran (like Emacs' echo area):
         // put it before the message so a long message cannot push it off
-        // the left part, and use a bright face so it is clearly visible.
+        // the left part, in a dim face that does not compete with it.
         if let Some(cmd) = &self.echo {
-            let echo_style = Style { bold: true, ..t.style(Face::Keyword).over(bar) };
-            left.push(format!("$ {cmd}"), echo_style).push("  ", bar);
+            left.push(format!("$ {cmd}"), t.style(Face::ModeLineDim).over(bar)).push("  ", bar);
         }
         let lower = self.message.to_lowercase();
         let error = ["error", "fatal", "cannot", "could not", "unable", "failed", "[no match]"]

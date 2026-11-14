@@ -47,7 +47,7 @@ fn staging_echoes_the_git_command() {
     // and it is actually drawn in the mode line, bright enough to see
     let line = app.mode_line_text(200);
     assert!(line.contains("$ git add") && line.contains("new.txt"), "{line:?}");
-    assert!(app.echo_is_bright(), "the command echo must not be dim");
+    assert!(app.echo_is_dim(), "the command echo is back to the dim face");
     // a plain movement produces no NEW echo (the last one stays)
     app.press("C-n").unwrap();
     assert_eq!(app.echo(), Some(echo.as_str()));
