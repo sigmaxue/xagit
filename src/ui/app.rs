@@ -732,7 +732,10 @@ impl App {
     /// the background, so the terminal shows something right away.
     fn unbuilt(git: Git) -> App {
         let cwd = git.toplevel.clone();
-        App {
+        // discard any command echoed while setting up the repository: the
+        // status buffer starts with a clean echo area
+        let _ = crate::git::exec::take_echo(&cwd);
+        let app = App {
             git,
             menus: registry(),
             stack: Vec::new(),
@@ -809,7 +812,8 @@ impl App {
             menu_history: (Vec::new(), 0),
             jobs: jobs::Jobs::default(),
             head_label: String::new(),
-        }
+        };
+        app
     }
 
     /// magit-status-initial-section '(1): the first section after the headers
@@ -1202,16 +1206,13 @@ impl App {
         if self.universal_argument(&key) {
             return Ok(());
         }
-        // echo the git command this key triggered (like Emacs' echo area):
-        // a side-effecting command bumps the per-repository sequence
-        let before = crate::git::exec::command_seq(&self.git.toplevel);
         // the refreshes the command asks for are done once, after it
         self.jobs.depth += 1;
         let r = self.dispatch_key(key);
         self.jobs.depth -= 1;
-        if crate::git::exec::command_seq(&self.git.toplevel) > before {
-            self.echo = crate::git::exec::last_command_label(&self.git.toplevel);
-        }
+        // echo any git command this key ran (like Emacs' echo area);
+        // poll_jobs does the same for background commands
+        self.take_command_echo();
         if self.jobs.depth == 0 {
             self.flush_refresh();
         }

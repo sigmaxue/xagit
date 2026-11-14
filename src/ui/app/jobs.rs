@@ -293,6 +293,16 @@ impl App {
         }
     }
 
+    /// Take the short label of a git command recorded since the last
+    /// check and show it in the mode line (echo area).  Called after a key
+    /// and from poll_jobs, so synchronous and background commands both
+    /// show up.  Only the newest command of a multi-command key is kept.
+    pub(super) fn take_command_echo(&mut self) {
+        if let Some(label) = crate::git::exec::take_echo(&self.git.toplevel) {
+            self.echo = Some(label);
+        }
+    }
+
     /// Show the work done in the background so far. True if anything
     /// was done.
     pub(super) fn poll_jobs(&mut self) -> bool {
@@ -302,6 +312,7 @@ impl App {
             any = true;
         }
         self.poll_edit();
+        self.take_command_echo();
         any
     }
 
@@ -352,6 +363,8 @@ impl App {
             Done::Git { id, args, ok, result } => {
                 self.jobs.running.retain(|r| r.id != id);
                 self.jobs.mark_idle();
+                // the worker recorded the command: echo it in the mode line
+                self.take_command_echo();
                 match result {
                     Ok(()) => self.set_msg(&ok),
                     // it wanted to ask something: again, in the terminal

@@ -254,14 +254,16 @@ impl Git {
 
     fn rebase_autosquash(&self, base: &str) -> Result<()> {
         use std::process::Command;
+        let a = ["rebase", "-i", "--autosquash", base];
         let st = Command::new("git")
             // sequence editor: accept the generated todo list
             .env("GIT_SEQUENCE_EDITOR", "true")
             // commit-message editor for squash merges: keep combined message
             .env("GIT_EDITOR", "true")
-            .args(["rebase", "-i", "--autosquash", base])
+            .args(a)
             .current_dir(&self.toplevel)
             .status()?;
+        super::exec::push_echo(&self.toplevel, &a);
         if !st.success() {
             bail!("rebase --autosquash failed: {st}");
         }
@@ -559,6 +561,7 @@ impl Git {
             .args(["read-tree", commit])
             .current_dir(&self.toplevel)
             .status()?;
+        super::exec::push_echo(&self.toplevel, &["read-tree", commit]);
         if !read_tree.success() {
             bail!("read-tree failed");
         }
@@ -567,6 +570,7 @@ impl Git {
             .args(["checkout-index", "--all", "--force"])
             .current_dir(&self.toplevel)
             .status()?;
+        super::exec::push_echo(&self.toplevel, &["checkout-index", "--all", "--force"]);
         let _ = fs::remove_file(&index_file);
         if !co.success() {
             bail!("checkout-index failed");

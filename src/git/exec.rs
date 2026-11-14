@@ -39,11 +39,15 @@ static PROCESS_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 const PROCESS_LOG_MAX: usize = 200;
 
 /// Per-repository echo of the most recent side-effecting git command: a
-/// monotonic sequence and a short label ("git add -- f").  The status
-/// buffer echoes the command triggered by a key (like Emacs' echo area),
-/// without disturbing its message.  Keyed by worktree so parallel
-/// repositories (and tests) never see each other's commands.
+/// short label ("git add -- f") pending for the status buffer, plus a
+/// monotonic sequence.  The status buffer consumes the pending label in
+/// poll_jobs (every event-loop turn, and after a background command
+/// finishes), so both synchronous commands and background fetch/pull/push
+/// are echoed.  Keyed by worktree so parallel repositories (and tests)
+/// never see each other's commands.
 static CMD_SEQ: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static ECHO_PENDING: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static CMD_LABEL: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -58,6 +62,12 @@ pub fn last_command_label(dir: &Path) -> Option<String> {
     CMD_LABEL.lock().ok().and_then(|m| m.get(dir).cloned())
 }
 
+/// Take the pending echo label for DIR (the newest command since the last
+/// take), if any.  Called by the status buffer's poll_jobs.
+pub fn take_echo(dir: &Path) -> Option<String> {
+    ECHO_PENDING.lock().ok().and_then(|mut m| m.remove(dir))
+}
+
 /// A short single-line rendering of ARGS for the echo area.
 fn echo_label(args: &[&str]) -> String {
     let mut parts = vec!["git".to_string()];
@@ -70,20 +80,49 @@ fn echo_label(args: &[&str]) -> String {
     parts.join(" ")
 }
 
-pub(crate) fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
+/// Queue a short echo of a git command that was run directly (without
+/// going through `record`), e.g. an autosquash or a temp-index reset.
+pub fn push_echo(dir: &Path, args: &[&str]) {
     let key = dir.to_path_buf();
+    let label = echo_label(args);
     if let Ok(mut m) = CMD_SEQ.lock() {
         *m.entry(key.clone()).or_insert(0) += 1;
     }
     if let Ok(mut m) = CMD_LABEL.lock() {
-        m.insert(key, echo_label(args));
+        m.insert(key.clone(), label.clone());
+    }
+    if let Ok(mut m) = ECHO_PENDING.lock() {
+        m.insert(key, label);
+    }
+}
+
+pub(crate) fn record(dir: &Path, args: &[&str], ok: bool, code: Option<i32>, stderr: &str) {
+    let key = dir.to_path_buf();
+    let label = echo_label(args);
+    if let Ok(mut m) = CMD_SEQ.lock() {
+        *m.entry(key.clone()).or_insert(0) += 1;
+    }
+    if let Ok(mut m) = CMD_LABEL.lock() {
+        m.insert(key.clone(), label.clone());
     }
     record_process(dir, &command_label(args), ok, code, stderr);
+    // record_process also queues an echo (its full label); prefer the short
+    // single-line rendering for git commands
+    if let Ok(mut m) = ECHO_PENDING.lock() {
+        m.insert(key, label);
+    }
 }
 
 /// Like `record`, for a program that is not git (magit--shell-command).
 /// LABEL is the command line as it was typed.
 pub fn record_process(dir: &Path, label: &str, ok: bool, code: Option<i32>, stderr: &str) {
+    // anything recorded in the process log is also echoed in the mode
+    // line: this covers git commands as well as shell / mergetool commands
+    // that do not go through `record`.  `record` overwrites this with its
+    // shorter git label afterwards.
+    if let Ok(mut m) = ECHO_PENDING.lock() {
+        m.insert(dir.to_path_buf(), sanitize(label).lines().next().unwrap_or("").to_string());
+    }
     let mut entry = format!(
         "{} {}  [{}]",
         if ok { " " } else { "!" },

@@ -70,6 +70,42 @@ fn echo_is_per_repository() {
     assert!(app2.echo().unwrap().contains("b.txt"), "{}", app2.echo().unwrap());
 }
 
+/// Commands that spawn git directly (a temp-index reset) bypass
+/// `record`, but still queue an echo via push_echo.
+#[test]
+fn direct_git_commands_are_echoed() {
+    let (_td, g, _h) = repo_with_commit();
+    g.reset_worktree("HEAD").unwrap();
+    let echo = xagit_lib::git::exec::take_echo(&g.toplevel).unwrap_or_default();
+    assert!(echo.starts_with("git checkout-index"), "reset not echoed: {echo:?}");
+}
+
+/// A shell command (`! S`) is recorded in the process log with
+/// record_process, not `record`; it is echoed too, so every entry of the
+/// process log is reflected in the mode line.
+#[test]
+fn shell_command_is_echoed() {
+    let (_td, g, _h) = repo_with_commit();
+    let mut app = App::new(g);
+    app.script_answers(&["echo xagit-run"]);
+    press(&mut app, &["!", "S"]);
+    let echo = app.echo().unwrap_or("").to_string();
+    assert!(echo.contains("echo xagit-run"), "shell command not echoed: {echo:?}");
+}
+
+/// A background command (fetch/pull/push) records in a worker thread,
+/// after the key returned: its echo is picked up when the job finishes.
+#[test]
+fn background_command_is_echoed_when_it_finishes() {
+    let (_td, g, _h) = repo_with_commit();
+    let mut app = App::new(g.clone());
+    app.set_background(true);
+    press(&mut app, &["f", "a"]); // fetch --all, run as a background job
+    app.wait_background();
+    let echo = app.echo().unwrap_or("").to_string();
+    assert!(echo.starts_with("git fetch"), "background command not echoed: {echo:?} / {}", app.message());
+}
+
 #[test]
 fn commit_echoes_git_commit_without_the_message() {
     let (_td, g, _h) = repo_with_commit();
