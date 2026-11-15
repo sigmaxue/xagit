@@ -67,7 +67,7 @@ cargo install --path .
 
 确保 Cargo 的可执行文件目录在 `PATH` 中后，可直接运行 `xagit`。
 
-## Vim / Neovim 插件（浮动窗口）
+## 编辑器插件（浮动窗口）：Vim / Neovim / Emacs
 
 仓库自带编辑器插件 `vim/`，在 **Vim 8.2+/9.x**（`+terminal +popupwin`）和 **Neovim 0.5+** 里都能用 `:Xagit` 或 `<leader>g` 于**浮动窗口**中打开 xagit，退出（`C-x C-c`）后自动关闭并回到编辑器。同一份 Vimscript 自动选择后端：Vim 用 `popup` + 隐藏终端，Neovim 用 `nvim_open_win()` 浮动窗口 + `termopen()`，命令与配置项一致。
 
@@ -87,6 +87,17 @@ end }
 ```
 
 xagit 不在 `PATH` 时设置 `g:xagit_cmd`；仓库目录默认取当前文件所在目录（xagit 会自行向上找到 git 根）。配置项、`<Plug>Xagit` 映射与排错见 [vim/README.md](vim/README.md) 及 `:help xagit`。
+
+**Emacs**：`emacs/xagit.el`（零外部依赖，只需自带 `term.el`）用 `M-x xagit` 在浮动/独占窗口打开 xagit——GUI 下装了 `posframe` 用浮动 child frame，终端 Emacs（`-nw`）用近全屏独占窗口，退出（`C-x C-c`）后自动恢复窗口布局。term 的 escape 键从 `C-c` 挪到 `C-^`，从而把 xagit 的 `C-c C-c`/`C-c C-k`/`C-x C-c`/`C-g` 原样透传。
+
+```elisp
+(add-to-list 'load-path "/path/to/xagit/emacs")
+(require 'xagit)
+(global-set-key (kbd "C-c x g") #'xagit)
+(setq xagit-executable "/path/to/xagit/target/release/xagit") ; 不在 PATH 时
+```
+
+配置项（`xagit-directory`/`xagit-width`/`xagit-height`/`xagit-posframe` 等）与排错见 [emacs/README.md](emacs/README.md)。
 
 ## 快速开始
 
