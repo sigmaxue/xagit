@@ -67,18 +67,26 @@ cargo install --path .
 
 确保 Cargo 的可执行文件目录在 `PATH` 中后，可直接运行 `xagit`。
 
-## Vim 插件（浮动窗口）
+## Vim / Neovim 插件（浮动窗口）
 
-仓库自带 Vim 插件 `vim/`，在 Vim 8.2+/9.x（`+terminal +popupwin`）里用 `:Xagit` 或 `<leader>g` 于**浮动窗口**中打开 xagit，退出（`C-x C-c`）后自动关闭并回到编辑器：
+仓库自带编辑器插件 `vim/`，在 **Vim 8.2+/9.x**（`+terminal +popupwin`）和 **Neovim 0.5+** 里都能用 `:Xagit` 或 `<leader>g` 于**浮动窗口**中打开 xagit，退出（`C-x C-c`）后自动关闭并回到编辑器。同一份 Vimscript 自动选择后端：Vim 用 `popup` + 隐藏终端，Neovim 用 `nvim_open_win()` 浮动窗口 + `termopen()`，命令与配置项一致。
 
 ```vim
-" vim-plug
+" Vim (vim-plug)
 Plug 'sigmaxue/xagit', { 'rtp': 'vim' }
-" 或 Vim 8 packages / 直接加入 runtimepath
+" 或加入 runtimepath（Vim / Vim8 / Nvim packages 均可）
 set runtimepath+=/path/to/xagit/vim
 ```
 
-xagit 不在 `PATH` 时设置 `let g:xagit_cmd = '/path/to/xagit/target/release/xagit'`；仓库目录默认取当前文件所在目录（xagit 会自行向上找到 git 根）。配置项、`<Plug>Xagit` 映射与排错见 [vim/README.md](vim/README.md) 及 `:help xagit`。
+```lua
+-- Neovim (lazy.nvim)：插件位于仓库的 vim/ 子目录
+return { 'sigmaxue/xagit', init = function()
+  vim.opt.rtp:append(vim.fn.stdpath('data') .. '/lazy/xagit/vim')
+  vim.cmd('runtime! plugin/xagit.vim')
+end }
+```
+
+xagit 不在 `PATH` 时设置 `g:xagit_cmd`；仓库目录默认取当前文件所在目录（xagit 会自行向上找到 git 根）。配置项、`<Plug>Xagit` 映射与排错见 [vim/README.md](vim/README.md) 及 `:help xagit`。
 
 ## 快速开始
 

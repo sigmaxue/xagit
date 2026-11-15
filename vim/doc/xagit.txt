@@ -1,4 +1,4 @@
-*xagit.txt*	Open xagit from Vim		Last change: 2026 Nov 15
+*xagit.txt*	Open xagit from Vim / Neovim		Last change: 2026 Nov 15
 
 ==============================================================================
 CONTENTS					*xagit-contents*
@@ -16,18 +16,23 @@ CONTENTS					*xagit-contents*
 xagit is a Magit-style git TUI written in Rust:
     https://github.com/sigmaxue/xagit
 
-This plugin opens xagit in a floating window (a |popup| running a
-|terminal|), so you can stage, commit, rebase, ... without leaving Vim.
-When xagit exits (C-x C-c) the popup closes and you are back in your
-buffer. xagit always occupies the whole popup and keeps keyboard focus
-until it exits.
+This plugin opens xagit in a floating window, so you can stage, commit,
+rebase, ... without leaving the editor. It supports both editors with the
+same command and the same |xagit-config| options:
+
+  Vim 8.2+/9.x   a |popup| running a hidden |terminal| (popup-terminal)
+  Neovim 0.5+    a |nvim_open_win()| float running via |termopen()|
+
+When xagit exits (C-x C-c) the floating window closes and you are back in
+your buffer. xagit always occupies the whole float and keeps keyboard focus
+until it exits. A second :Xagit reuses the running float instead of erroring.
 
 ==============================================================================
 2. REQUIREMENTS					*xagit-requirements*
 
-- Vim 8.2+ / 9.x with +terminal and +popupwin. Check with:
-    :echo has('terminal') && has('popupwin')
-  (Neovim is not supported; use |:terminal| / a floating window plugin.)
+- Vim 8.2+ / 9.x with +terminal and +popupwin, OR Neovim 0.5+ (with
+  nvim_open_win() and termopen()). Check with:
+    :echo has('nvim') || (has('terminal') && has('popupwin'))
 - A terminal that understands cursor movement / colors. Set 'term' to a
   sensible value (e.g. xterm-256color).
 - The xagit executable. Install it into $PATH, or point |g:xagit_cmd| at
@@ -36,18 +41,40 @@ until it exits.
   The plugin also auto-detects a build at ../target/{release,debug}/xagit
   relative to the plugin directory.
 
+Both editors load the same vim/plugin/xagit.vim (Vimscript); the correct
+backend is chosen automatically via has('nvim'). No Lua file is needed.
+
 ==============================================================================
 3. INSTALL						*xagit-install*
 
 With a plugin manager, add the xagit repository and point it at the "vim"
 subdirectory, e.g.:
 
-  vim-plug:      Plug 'sigmaxue/xagit', { 'rtp': 'vim' }
-  Vundle:        Plugin 'sigmaxue/xagit', { 'rtp': 'vim' }
-  dein.vim:      call dein#add('sigmaxue/xagit', {'rtp': 'vim'})
-  pathogen:      git clone https://github.com/sigmaxue/xagit \
-                     ~/.vim/bundle/xagit
-                 (pathogen picks up bundle/xagit/vim automatically)
+  Vim (vim-plug / Vundle / dein / pathogen):
+      Plug 'sigmaxue/xagit', { 'rtp': 'vim' }
+      Plugin 'sigmaxue/xagit', { 'rtp': 'vim' }
+      call dein#add('sigmaxue/xagit', {'rtp': 'vim'})
+      git clone https://github.com/sigmaxue/xagit ~/.vim/bundle/xagit
+        (pathogen picks up bundle/xagit/vim automatically)
+
+  Neovim (lazy.nvim, in lua/plugins/xagit.lua):
+      return {
+        'sigmaxue/xagit',
+        init = function()
+          -- the plugin lives in the repo's vim/ dir, not the repo root
+          vim.opt.rtp:append(vim.fn.stdpath('data') .. '/lazy/xagit/vim')
+          vim.g.xagit_cmd = '/path/to/xagit/target/release/xagit' -- optional
+          vim.cmd('runtime! plugin/xagit.vim')
+        end,
+      }
+    Or set runtimepath directly (no manager):
+      vim.opt.rtp:append('/path/to/xagit/vim')
+
+  NOTE: the plugin file lives in the repository's vim/ subdirectory, not at
+  the repository root. Plugin managers that only add the repo root need the
+  rtp pointed at vim/ (vim-plug's 'rtp' option, or a manual rtp:append plus
+  `runtime! plugin/xagit.vim`). Once vim/ is on 'runtimepath', both Vim and
+  Neovim auto-load vim/plugin/xagit.vim on startup.
 
 Or use Vim 8 packages (no manager). Vim adds each directory under
 pack/*/start to 'runtimepath', so make the "vim" directory itself the
@@ -79,7 +106,9 @@ in a subdirectory works. Inside xagit:
     q          back                          C-x C-c quit (closes the popup)
 
 A second :Xagit while the popup is visible just re-focuses it (Vim allows
-only one terminal popup at a time).
+only one terminal popup at a time; the Neovim backend likewise reuses its
+float). The command, <Plug>Xagit mapping and all |xagit-config| options are
+identical on Vim and Neovim.
 
 You can also remap via <Plug>: >
     nmap <leader>m <Plug>Xagit
@@ -122,9 +151,15 @@ before starting Vim, or via |term_start()|):
 "xagit executable not found" ~
     Set |g:xagit_cmd| to the absolute path, or install xagit into $PATH.
 
-"needs +terminal and +popupwin" ~
-    Your Vim lacks these features. Use a full Vim build; alternatively run
-    :!xagit (suspends Vim) instead of the floating window.
+"needs Vim (+terminal +popupwin) or Neovim 0.5+" ~
+    Your editor lacks these features. Vim needs a full build with +terminal
+    and +popupwin; Neovim needs nvim_open_win()/termopen() (>= 0.5).
+    Alternatively run :!xagit (suspends the editor) without a float.
+
+Neovim: :Xagit does nothing / "not an editor command" ~
+    The plugin is in the repo's vim/ dir. Make sure that dir is on
+    'runtimepath' and the file was sourced (`runtime! plugin/xagit.vim`),
+    e.g. via the lazy.nvim init() example in |xagit-install|.
 
 Blank / garbled screen ~
     Ensure 'term' is correct and the terminal supports the color depth.
@@ -135,7 +170,8 @@ C-s (search inside xagit) does nothing ~
     shell before starting Vim, or disable flow control in the terminal.
 
 Only one popup allowed (E861) ~
-    Close the existing xagit popup (quit xagit with C-x C-c) before
-    opening another; calling :Xagit again re-focuses it.
+    Vim only allows one terminal popup at a time; close the existing xagit
+    popup (quit xagit with C-x C-c) before opening another. :Xagit always
+    re-focuses the running float on both editors, so you should not hit this.
 
  vim:tw=78:ts=8:noet:ft=help:norl:
