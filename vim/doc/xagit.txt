@@ -1,0 +1,141 @@
+*xagit.txt*	Open xagit from Vim		Last change: 2026 Nov 15
+
+==============================================================================
+CONTENTS					*xagit-contents*
+
+1. Intro ................................. |xagit-intro|
+2. Requirements .......................... |xagit-requirements|
+3. Install ............................... |xagit-install|
+4. Usage ................................. |xagit-usage|
+5. Configuration ......................... |xagit-config|
+6. Troubleshooting ....................... |xagit-troubleshooting|
+
+==============================================================================
+1. INTRO						*xagit-intro*
+
+xagit is a Magit-style git TUI written in Rust:
+    https://github.com/sigmaxue/xagit
+
+This plugin opens xagit in a floating window (a |popup| running a
+|terminal|), so you can stage, commit, rebase, ... without leaving Vim.
+When xagit exits (C-x C-c) the popup closes and you are back in your
+buffer. xagit always occupies the whole popup and keeps keyboard focus
+until it exits.
+
+==============================================================================
+2. REQUIREMENTS					*xagit-requirements*
+
+- Vim 8.2+ / 9.x with +terminal and +popupwin. Check with:
+    :echo has('terminal') && has('popupwin')
+  (Neovim is not supported; use |:terminal| / a floating window plugin.)
+- A terminal that understands cursor movement / colors. Set 'term' to a
+  sensible value (e.g. xterm-256color).
+- The xagit executable. Install it into $PATH, or point |g:xagit_cmd| at
+  the built binary:
+    let g:xagit_cmd = '/path/to/xagit/target/release/xagit'
+  The plugin also auto-detects a build at ../target/{release,debug}/xagit
+  relative to the plugin directory.
+
+==============================================================================
+3. INSTALL						*xagit-install*
+
+With a plugin manager, add the xagit repository and point it at the "vim"
+subdirectory, e.g.:
+
+  vim-plug:      Plug 'sigmaxue/xagit', { 'rtp': 'vim' }
+  Vundle:        Plugin 'sigmaxue/xagit', { 'rtp': 'vim' }
+  dein.vim:      call dein#add('sigmaxue/xagit', {'rtp': 'vim'})
+  pathogen:      git clone https://github.com/sigmaxue/xagit \
+                     ~/.vim/bundle/xagit
+                 (pathogen picks up bundle/xagit/vim automatically)
+
+Or use Vim 8 packages (no manager). Vim adds each directory under
+pack/*/start to 'runtimepath', so make the "vim" directory itself the
+package by symlinking it: >
+    mkdir -p ~/.vim/pack/xagit/start
+    git clone https://github.com/sigmaxue/xagit ~/.vim/xagit-src
+    ln -s ~/.vim/xagit-src/vim ~/.vim/pack/xagit/start/xagit
+<
+  Simplest: copy the contents of vim/ into ~/.vim/ (so that
+  ~/.vim/plugin/xagit.vim and ~/.vim/doc/xagit.txt exist), or add: >
+    set runtimepath+=/path/to/xagit/vim
+<
+Then generate the help tags once: >
+    :helptags /path/to/xagit/vim/doc
+<
+
+==============================================================================
+4. USAGE						*xagit-usage*
+
+    :Xagit                 open xagit in a floating window
+    <leader>g              same (default mapping, if free)
+
+The repository is taken from the current file's directory; xagit walks up
+to the git toplevel via `git rev-parse --show-toplevel`, so opening a file
+in a subdirectory works. Inside xagit:
+
+    h / ?      dispatch (all commands)      s / u   stage / unstage
+    c c        commit                        g       refresh
+    q          back                          C-x C-c quit (closes the popup)
+
+A second :Xagit while the popup is visible just re-focuses it (Vim allows
+only one terminal popup at a time).
+
+You can also remap via <Plug>: >
+    nmap <leader>m <Plug>Xagit
+<
+
+==============================================================================
+5. CONFIGURATION					*xagit-config*
+
+All options are set before the plugin loads (in vimrc):
+
+    *g:xagit_cmd*          string, default ''
+        Full path to the xagit executable. Empty = search $PATH, then
+        ../target/{release,debug}/xagit.
+
+    *g:xagit_width*        float, default 0.9
+    *g:xagit_height*       float, default 0.85
+        Fraction of &columns / &lines used by the floating window.
+
+    *g:xagit_min_width*    number, default 60
+    *g:xagit_min_height*   number, default 18
+        Lower bounds for small terminals.
+
+    *g:xagit_dir*          string | Funcref, default ''
+        Repository directory. '' = current file's directory. A Funcref is
+        called with no arguments and returns a path, e.g.: >
+            let g:xagit_dir = {-> FugitiveGitDir() =~ ''
+                \ ? getcwd() : fnamemodify(FugitiveWorkTree(), ':p')}
+<
+
+Environment variables understood by xagit itself (set them in the shell
+before starting Vim, or via |term_start()|):
+    XAGIT_COLOR=truecolor|256|16|never
+    XAGIT_THEME=dark|light
+    XAGIT_ASCII=1
+    NO_COLOR, TERM, COLORTERM
+
+==============================================================================
+6. TROUBLESHOOTING					*xagit-troubleshooting*
+
+"xagit executable not found" ~
+    Set |g:xagit_cmd| to the absolute path, or install xagit into $PATH.
+
+"needs +terminal and +popupwin" ~
+    Your Vim lacks these features. Use a full Vim build; alternatively run
+    :!xagit (suspends Vim) instead of the floating window.
+
+Blank / garbled screen ~
+    Ensure 'term' is correct and the terminal supports the color depth.
+    Try XAGIT_COLOR=256 or XAGIT_ASCII=1.
+
+C-s (search inside xagit) does nothing ~
+    Some terminals use C-s for XOFF flow control. Run `stty -ixon` in the
+    shell before starting Vim, or disable flow control in the terminal.
+
+Only one popup allowed (E861) ~
+    Close the existing xagit popup (quit xagit with C-x C-c) before
+    opening another; calling :Xagit again re-focuses it.
+
+ vim:tw=78:ts=8:noet:ft=help:norl:

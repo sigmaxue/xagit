@@ -1,0 +1,14 @@
+g:xagit_cmd	xagit.txt	/*g:xagit_cmd*
+g:xagit_dir	xagit.txt	/*g:xagit_dir*
+g:xagit_height	xagit.txt	/*g:xagit_height*
+g:xagit_min_height	xagit.txt	/*g:xagit_min_height*
+g:xagit_min_width	xagit.txt	/*g:xagit_min_width*
+g:xagit_width	xagit.txt	/*g:xagit_width*
+xagit-config	xagit.txt	/*xagit-config*
+xagit-contents	xagit.txt	/*xagit-contents*
+xagit-install	xagit.txt	/*xagit-install*
+xagit-intro	xagit.txt	/*xagit-intro*
+xagit-requirements	xagit.txt	/*xagit-requirements*
+xagit-troubleshooting	xagit.txt	/*xagit-troubleshooting*
+xagit-usage	xagit.txt	/*xagit-usage*
+xagit.txt	xagit.txt	/*xagit.txt*
