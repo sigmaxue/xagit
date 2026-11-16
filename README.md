@@ -313,7 +313,7 @@ src/
 `git/exec.rs` 会检查 git 的 stderr 来给出针对性提示（`failure`），并判断后台命令是否因为无法向用户询问凭据 / 口令 / host key 而失败、需要重新在终端运行（`wants_terminal`）。这些判断针对英文文本，因此凡是会捕获 stderr 的 git 命令都固定诊断语言为 `LC_MESSAGES=C` 并清空 `LANGUAGE`（GNU gettext 里 `LANGUAGE` 优先级更高）。
 
 - 不用 `LC_ALL=C`：它同时改变 `LC_CTYPE`/`LC_COLLATE`，会改变非 ASCII 路径的 quoting 和 ref 排序，而这些输出会被解析。这里只改消息语言，字符与排序行为保持用户设置。
-- 把终端交给编辑器 / hook 的交互式命令（`git_interactive`、`git_with_editors`）保持用户 locale 不变，编辑器界面语言不受影响。
+- 把终端交给编辑器 / hook 的交互式命令（`git_interactive`、`git_with_editors`）保持用户 locale 不变，编辑器界面语言不受影响；这些命令失败时同样会捕获 git 的 stderr（经由 pty，git 仍认为 stderr 是终端、hook/编辑器照常工作）并在错误详情里显示 git 的原始诊断与针对性提示，而不是只有退出码（`revert --no-commit`、merge、checkout 等）。此时诊断按用户 locale 显示（可能为中文），不做英文固定，以免改变编辑器 / hook 的语言环境。
 - 若用户显式设置了非 `C` 的 `LC_ALL`，按 POSIX 规则它会覆盖 `LC_MESSAGES`；这种情况下上述提示可能不显示，但命令行为不变。`wants_terminal` 匹配的都是 git credential 与 OpenSSH 的固定字符串（不经过 gettext 翻译），普通失败（push 被拒、主机不存在、仓库不存在）不会被误判为需要终端交互。
 
 ### 测试

@@ -1483,6 +1483,21 @@ fn repo_with_conflicting_history() -> (TempDir, Git, String) {
     (td, g, second)
 }
 
+/// `git revert --no-commit` (the `v` command on a commit) reports git's
+/// own diagnostic when it fails, not just "failed (exit status: 1)".
+#[test]
+fn revert_no_commit_failure_includes_git_stderr() {
+    let (_td, g, second) = repo_with_conflicting_history();
+    let err = g.revert(std::slice::from_ref(&second), &[], true).unwrap_err();
+    let detail = format!("{err:#}");
+    // the command label, git's own stderr (whatever its locale) and the
+    // diagnostic hints are present — not just "failed (exit status: 1)"
+    assert!(detail.contains("revert") && detail.contains("--no-commit"), "{detail}");
+    let stderr = detail.split("stderr:").nth(1).unwrap_or("");
+    assert!(stderr.trim().len() > 20, "no git diagnostic in error: {detail}");
+    assert!(!detail.contains("Output was shown in the terminal"), "{detail}");
+}
+
 /// A / V while a cherry-pick or revert is stopped: continue, skip, abort.
 #[test]
 fn sequencer_continue_skip_abort() {

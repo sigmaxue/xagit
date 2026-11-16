@@ -547,20 +547,15 @@ impl Git {
     }
 
     /// git_interactive with the environment variables ENV set
-    /// (with-environment-variables).
+    /// (with-environment-variables).  stderr is captured (through a pty,
+    /// so git still treats it as a terminal and hooks/editors keep working),
+    /// and a failure is reported with git's own diagnostic plus a hint —
+    /// not just an exit code.  This covers every interactive command
+    /// (revert, merge, rebase, config, ...), as it did for checkout.
     pub fn git_interactive_env(&self, env: &[(&str, &str)], args: &[&str]) -> Result<()> {
         let mut cmd = command(&self.toplevel, args);
         cmd.envs(env.iter().copied());
-        if args.first() == Some(&"checkout") {
-            return self.checkout_with_diagnostics(&mut cmd, args);
-        }
-        let st = cmd.status()
-            .map_err(|e| spawn_failure(&self.toplevel, args, e))?;
-        record(&self.toplevel, args, st.success(), st.code(), "");
-        if !st.success() {
-            bail!("{} failed ({st})\nin {}\nOutput was shown in the terminal (interactive editor/hooks).", command_label(args), sanitize(&self.toplevel.display().to_string()));
-        }
-        Ok(())
+        self.git_interactive_with_diagnostics(&mut cmd, args)
     }
 
     /// Run a long git command (fetch, pull, push …) in the background:
@@ -601,9 +596,9 @@ impl Git {
     }
 
     #[cfg(unix)]
-    fn checkout_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
+    fn git_interactive_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
         use std::fs::File;
-        use std::io::{Read, Write};
+        use std::io::Read;
         use std::os::fd::FromRawFd;
         use std::process::Stdio;
 
@@ -633,7 +628,6 @@ impl Git {
                     Ok(0) => break,
                     Ok(n) => {
                         bytes.extend_from_slice(&buf[..n]);
-                        let _ = std::io::stderr().write_all(&buf[..n]);
                     }
                     Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -654,7 +648,7 @@ impl Git {
     }
 
     #[cfg(not(unix))]
-    fn checkout_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
+    fn git_interactive_with_diagnostics(&self, cmd: &mut Command, args: &[&str]) -> Result<()> {
         cmd.stdin(std::process::Stdio::inherit()).stdout(std::process::Stdio::inherit());
         let out = cmd.output().map_err(|e| spawn_failure(&self.toplevel, args, e))?;
         record(&self.toplevel, args, out.status.success(), out.status.code(), &String::from_utf8_lossy(&out.stderr));
@@ -693,16 +687,8 @@ impl Git {
             Editor::User => {}
         }
         cmd.args(args);
-        if args.first() == Some(&"checkout") {
-            return self.checkout_with_diagnostics(&mut cmd, args);
-        }
-        let st = cmd.status()
-            .map_err(|e| spawn_failure(&self.toplevel, args, e))?;
-        record(&self.toplevel, args, st.success(), st.code(), "");
-        if !st.success() {
-            bail!("{} failed ({st})\nin {}\nOutput was shown in the terminal (interactive editor/hooks).", command_label(args), sanitize(&self.toplevel.display().to_string()));
-        }
-        Ok(())
+        // capture stderr for a detailed failure (also when an editor ran)
+        self.git_interactive_with_diagnostics(&mut cmd, args)
     }
 
     /// Like `git_with_editors_env` but with stdin/stdout/stderr captured
