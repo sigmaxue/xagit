@@ -99,10 +99,12 @@ fn one_module_or_all_with_a_prefix_argument() {
     assert!(exists(&g, "lib/a"), "{}", app.message());
     press(&mut app, &["o", "C-u", "p"]);
     assert_eq!(app.message(), "No modules satisfying magit-module-no-worktree-p available");
-    // update all (confirmed, also when there is just one)
+    // update all (confirmed, also when there is just one): the prompt
+    // names the module it is about to update
     app.script_keys(&["y"]);
     press(&mut app, &["o", "C-u", "u"]);
-    assert_eq!(app.prompts().last().unwrap(), "T? (y or n) ");
+    assert_eq!(app.prompts().last().unwrap(), "Update module lib? (y or n) ");
+    assert!(app.message().contains("lib") || app.echo().unwrap_or("").contains("lib"), "{}", app.message());
     // a module that isn't one
     app.script_answers(&["nope"]);
     press(&mut app, &["o", "s"]);
@@ -143,4 +145,36 @@ fn list_modules() {
     assert!(lines[0].starts_with("Path") && lines[0].contains("Version") && lines[0].ends_with("S   B"), "{text}");
     assert!(lines[1].starts_with("lib "), "{text}");
     assert!(lines[1].contains("#") && lines[1].ends_with("0   1"), "{text}");
+}
+
+/// `o u` names the submodule it updated, in the confirmation and in the
+/// resulting message (git's stdout is often empty on a no-op update).
+#[test]
+fn update_echoes_the_module_name() {
+    let (_td, g, _src, url) = setup();
+    let mut app = App::new(g.clone());
+    add(&mut app, &g, &url);
+    app.script_answers(&["lib"]);
+    press(&mut app, &["o", "u"]);
+    let msg = app.message();
+    let echo = app.echo().unwrap_or("");
+    assert!(msg.contains("lib") || echo.contains("lib"), "msg={msg:?} echo={echo:?}");
+}
+
+/// With several modules the confirmation lists their names.
+#[test]
+fn update_all_confirmation_names_every_module() {
+    let (_td, g, _src, url) = setup();
+    let mut app = App::new(g.clone());
+    add(&mut app, &g, &url);
+    // add a second submodule directly, at a different path/name
+    g.git_interactive(&["-c", "protocol.file.allow=always", "submodule", "add", "--name", "lib2", &url, "lib2"]).unwrap();
+    g.commit(Some("add lib2"), &[]).unwrap();
+    let mut app = App::new(g.clone());
+    app.script_keys(&["y"]);
+    press(&mut app, &["o", "C-u", "u"]);
+    let prompts = app.prompts();
+    let p = prompts.last().unwrap();
+    assert!(p.contains("2 modules"), "{p}");
+    assert!(p.contains("lib") && p.contains("lib2"), "{p}");
 }

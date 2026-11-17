@@ -118,8 +118,22 @@ impl App {
         Ok(Some(v))
     }
 
+    /// The module names shown in a prompt / message, joined and shortened
+    /// so a long list still fits the single-line minibuffer.
+    fn module_names(modules: &[String]) -> String {
+        let joined = modules.join(", ");
+        if joined.chars().count() > 70 {
+            let head: String = joined.chars().take(69).collect();
+            format!("{head}…")
+        } else {
+            joined
+        }
+    }
+
     /// magit-module-confirm: with a prefix argument all modules
     /// satisfying PRED (confirmed), else one read with "VERB module".
+    /// The confirmation names the module(s) it is about to act on (Magit
+    /// lists them too), instead of a bare "T? (y or n)".
     fn module_confirm(&mut self, verb: &str, pred: Option<ModulePred>) -> Result<Option<Vec<String>>> {
         if self.prefix_arg.is_none() {
             return Ok(self.read_module_path(&format!("{verb} module"), pred)?.map(|m| vec![m]));
@@ -134,20 +148,32 @@ impl App {
             return Ok(None);
         }
         // (magit-confirm t nil "VERB %d modules" nil modules): always
-        // asked, the prompt of a single module made from the action t
-        let ok = self.confirm_items("t", "T", &format!("{verb} %d modules"), &modules)?;
+        // asked.  Name the module(s) so it is clear what will be updated.
+        let prompt = if modules.len() == 1 {
+            format!("{verb} module {}", modules[0])
+        } else {
+            format!("{verb} {} modules ({})", modules.len(), Self::module_names(&modules))
+        };
+        let ok = self.confirm("t", &prompt)?;
         Ok(ok.then_some(modules))
     }
 
     /// Run `git ARGS -- MODULES` in the toplevel (local URLs allowed).
-    fn run_submodule(&mut self, sub: &[&str], args: &[String], modules: &[String]) {
+    /// The echo/fallback message names the module(s); `done` prefers git's
+    /// own stdout when it is non-empty (which also mentions the module).
+    fn run_submodule(&mut self, verb: &str, sub: &[&str], args: &[String], modules: &[String]) {
         let mut a: Vec<String> = vec!["-c".into(), "protocol.file.allow=always".into(), "submodule".into()];
         a.extend(sub.iter().map(|s| s.to_string()));
         a.extend(args.iter().cloned());
         a.push("--".into());
         a.extend(modules.iter().cloned());
         let res = self.git.git_fmt(&a);
-        self.done("", res);
+        let ok_msg = if modules.len() == 1 {
+            format!("{verb} module {}", modules[0])
+        } else {
+            format!("{verb} {} modules ({})", modules.len(), Self::module_names(modules))
+        };
+        self.done(&ok_msg, res);
     }
 
     /// The suffixes of the magit-submodule transient.
@@ -158,28 +184,28 @@ impl App {
             "submodule-add" => self.submodule_add(&filter(&["--force"]))?,
             "submodule-register" => {
                 if let Some(m) = self.module_confirm("Register", Some(ModulePred::NoWorktree))? {
-                    self.run_submodule(&["init"], &[], &m);
+                    self.run_submodule("Register", &["init"], &[], &m);
                 }
             }
             "submodule-populate" => {
                 if let Some(m) = self.module_confirm("Populate", Some(ModulePred::NoWorktree))? {
-                    self.run_submodule(&["update", "--init"], &filter(&["--recursive"]), &m);
+                    self.run_submodule("Populate", &["update", "--init"], &filter(&["--recursive"]), &m);
                 }
             }
             "submodule-update" => {
                 if let Some(m) = self.module_confirm("Update", Some(ModulePred::Worktree))? {
                     let keep = ["--force", "--remote", "--recursive", "--checkout", "--rebase", "--merge", "--no-fetch"];
-                    self.run_submodule(&["update"], &filter(&keep), &m);
+                    self.run_submodule("Update", &["update"], &filter(&keep), &m);
                 }
             }
             "submodule-sync" => {
                 if let Some(m) = self.module_confirm("Synchronize", Some(ModulePred::Worktree))? {
-                    self.run_submodule(&["sync"], &filter(&["--recursive"]), &m);
+                    self.run_submodule("Synchronize", &["sync"], &filter(&["--recursive"]), &m);
                 }
             }
             "submodule-unpopulate" => {
                 if let Some(m) = self.module_confirm("Unpopulate", None)? {
-                    self.run_submodule(&["deinit"], &filter(&["--force"]), &m);
+                    self.run_submodule("Unpopulate", &["deinit"], &filter(&["--force"]), &m);
                 }
             }
             "submodule-remove" => self.submodule_remove(&filter(&["--force"]))?,
