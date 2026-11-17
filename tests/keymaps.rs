@@ -1,6 +1,10 @@
 //! tests/keymaps.rs — verify every menu matches Magit's key bindings extracted
 //! from the lisp sources (magit.el, magit-branch.el, magit-commit.el, ...).
 
+mod common;
+
+use common::{press, repo_with_commit};
+use xagit_lib::ui::app::App;
 use xagit_lib::ui::transient::{registry, resolve_menu, Action, Reader, RepoState};
 
 fn menu(name: &str) -> xagit_lib::ui::transient::Menu {
@@ -1139,4 +1143,51 @@ fn app_opens_in_progress_menu_variants() {
     app.press("r").unwrap();
     assert_eq!(app.current_menu(), Some("rebase-menu@progress"));
     app.press("q").unwrap();
+}
+
+/// Magit's dispatch lays its three bands of suffixes out horizontally:
+/// one row of headings, then the columns. Other menus stay plain columns.
+#[test]
+fn dispatch_is_grouped_like_magit() {
+    let d = menu("dispatch");
+    let text = d.render(&Default::default());
+    let lines: Vec<&str> = text.lines().collect();
+    let heading = lines[0];
+    let transient = heading.find("Transient commands").unwrap_or_else(|| panic!("{text}"));
+    let applying = heading.find("Applying changes").unwrap_or_else(|| panic!("{text}"));
+    let essential = heading.find("Essential commands").unwrap_or_else(|| panic!("{text}"));
+    assert!(transient < applying && applying < essential, "{text}");
+    for h in ["Transient commands", "Applying changes", "Essential commands"] {
+        assert_eq!(lines.iter().filter(|l| l.contains(h)).count(), 1, "{h}: {text}");
+    }
+    // no section takes rows of its own: the suffixes start right below
+    let body = &lines[1..];
+    assert!(body[0].starts_with("A Apply"), "{text}");
+    assert!(body.iter().any(|l| l.contains("s Stage")), "{text}");
+    assert!(body.iter().any(|l| l.contains("g Refresh")), "{text}");
+    assert_eq!(lines.len(), 14, "{text}");
+    let other = menu("commit-menu").render(&Default::default());
+    assert!(!other.contains("Transient commands"), "other menus stay plain columns");
+    assert!(!other.contains("Applying changes"));
+}
+
+/// The `h h` Key bindings view uses the same Magit categories.
+#[test]
+fn key_bindings_help_is_grouped() {
+    let (_td, g, _) = repo_with_commit();
+    let mut app = App::new(g);
+    press(&mut app, &["h"]);
+    let popup = app.transient_popup().join("\n");
+    let heading = popup.lines().find(|l| l.contains("Transient commands")).unwrap_or_else(|| panic!("{popup}"));
+    let a = heading.find("Applying changes").unwrap_or_else(|| panic!("{popup}"));
+    let e = heading.find("Essential commands").unwrap_or_else(|| panic!("{popup}"));
+    assert!(a < e, "{popup}");
+    app.press("h").unwrap();
+    let (title, text) = app.text_view().expect("help view");
+    assert_eq!(title, "Key bindings");
+    let pos = |h: &str| text.lines().position(|l| l == h).unwrap_or_else(|| panic!("{h}: {text}"));
+    assert!(pos("Transient commands") < pos("Applying changes"));
+    assert!(pos("Applying changes") < pos("Essential commands"));
+    assert!(pos("Essential commands") < pos("Navigation and sections"));
+    assert!(text.contains("s stage") && text.contains("S stage all"), "{text}");
 }

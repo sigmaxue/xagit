@@ -276,16 +276,31 @@ impl App {
             "help" => {
                 self.view_text = Some((
                     "Key bindings".into(),
-                    "h/? dispatch popup — all commands live there.\n\
-                     n/p move, j jump to section, ^ section up\n\
-                     s stage, u unstage, S stage all, U unstage all\n\
-                     k discard, K untrack, x reset quickly, a apply, v reverse\n\
-                     c commit, b branch, z stash, P push, F pull, f fetch\n\
-                     m merge, r rebase, X reset, t tag, M remote\n\
-                     l log, d diff, L/D change log/diff arguments, A cherry-pick, V revert\n\
-                     w apply patches, W patch, o submodule, $ git process log\n\
-                     g refresh, TAB toggle section, RET visit, q quit"
-                        .into(),
+                    concat!(
+                        "Magit dispatch (h / ?) — commands grouped like Magit\n",
+                        "\n",
+                        "Transient commands\n",
+                        "  A cherry-pick  b branch  B bisect  c commit  C clone  d diff\n",
+                        "  D diff args  e/E ediff  f fetch  F pull  H section info\n",
+                        "  i ignore  I init  l log  L log args  m merge  M remote\n",
+                        "  o submodule  O subtree  P push  Q git command  r rebase\n",
+                        "  t tag  T note  V revert  w apply patches  W format patches\n",
+                        "  X reset  y show refs  Y cherries  z stash  Z worktree  ! run\n",
+                        "\n",
+                        "Applying changes\n",
+                        "  a apply  v reverse  k discard  s stage  u unstage\n",
+                        "  S stage all  U unstage all  K untrack  x reset quickly\n",
+                        "\n",
+                        "Essential commands\n",
+                        "  g refresh  q quit  TAB toggle section  RET visit\n",
+                        "\n",
+                        "Navigation and sections\n",
+                        "  n/p next/previous section  C-n/C-p next/previous line\n",
+                        "  j jump to section  ^ section up  C-s/C-r search  C-g clear search\n",
+                        "  $ git process log  h/? dispatch  C-x C-c quit\n",
+                        "  In a transient, ? shows the manual and a key shows its suffix help."
+                    )
+                    .into(),
                 ));
             }
 

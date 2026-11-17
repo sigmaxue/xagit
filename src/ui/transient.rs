@@ -226,9 +226,11 @@ impl Menu {
         es.clone().next().is_some() && es.all(|e| e.hidden)
     }
 
-    /// Render like Magit's transient popup, in columns (the groups
-    /// without a suffix at the prefix's level omitted); an infix that is
-    /// set is followed by its value, as in "-n Limit number of commits (-n256)".
+    /// Render like Magit's transient popup: the dispatch labels its
+    /// bands of columns with headings on one row, other menus are plain
+    /// columns (groups without a suffix at the prefix's level omitted);
+    /// an infix that is set is followed by its value, as in "-n Limit
+    /// number of commits (-n256)".
     pub fn render(&self, active: &BTreeMap<String, bool>) -> String {
         let mut out = String::new();
         for row in self.render_cells(active) {
@@ -240,42 +242,71 @@ impl Menu {
         out
     }
 
-    /// The rows of `render`, as pieces of text and what they are (for
-    /// the faces of the popup). Columns are aligned by display width, so
-    /// that descriptions in CJK scripts line up too.
-    pub fn render_cells(&self, active: &BTreeMap<String, bool>) -> Vec<Vec<(String, Cell)>> {
-        let cols: Vec<Vec<Vec<(String, Cell)>>> = self
-            .groups
-            .iter()
-            .map(|g| g.iter().filter(|e| !e.hidden).flat_map(|e| display_cells(e, active)).collect::<Vec<_>>())
-            .filter(|g| !g.is_empty())
-            .collect();
-        let line_width = |l: &[(String, Cell)]| l.iter().map(|(t, _)| str_width(t)).sum::<usize>();
-        let widths: Vec<usize> = cols.iter().map(|g| g.iter().map(|l| line_width(l)).max().unwrap_or(0)).collect();
-        let nrows = cols.iter().map(Vec::len).max().unwrap_or(0);
-        let mut rows = Vec::with_capacity(nrows);
-        for row in 0..nrows {
-            let mut line: Vec<(String, Cell)> = Vec::new();
-            for (c, w) in widths.iter().enumerate() {
-                let cell = cols[c].get(row).map_or(&[][..], Vec::as_slice);
-                line.extend(cell.iter().cloned());
-                let pad = w + 3 - line_width(cell);
-                line.push((" ".repeat(pad), Cell::Pad));
-            }
-            // the line without trailing whitespace
-            while let Some((t, _)) = line.last_mut() {
-                let trimmed = t.trim_end().len();
-                if trimmed == 0 {
-                    line.pop();
-                } else {
-                    t.truncate(trimmed);
-                    break;
-                }
-            }
-            rows.push(line);
+    /// The dispatch's heading above the first group of each horizontal
+    /// band of columns; the indices are into `groups`, which `open_menu`
+    /// only edits in place (never reorders). Every other menu has no
+    /// headings and keeps the plain column layout.
+    fn headings(&self) -> Vec<(usize, &'static str)> {
+        if self.name == "dispatch" {
+            vec![(0, "Transient commands"), (3, "Applying changes"), (4, "Essential commands")]
+        } else {
+            Vec::new()
         }
-        rows
     }
+
+    /// The rows of `render`, as pieces of text and what they are (for the
+    /// faces of the popup). Headings, when present, share the first row
+    /// and the suffixes are the columns below it, so the dispatch is only
+    /// one row taller than its longest column. Columns are aligned by
+    /// display width, so that descriptions in CJK scripts line up too.
+    pub fn render_cells(&self, active: &BTreeMap<String, bool>) -> Vec<Vec<(String, Cell)>> {
+        render_columns(&self.groups, active, &self.headings())
+    }
+}
+
+/// The groups of one menu, laid out as columns aligned by display width.
+/// HEADINGS marks the first group of each band: every column gets a
+/// heading row (empty except for those groups), keeping the headings
+/// horizontal and all suffixes on the rows below.
+fn render_columns(groups: &[Vec<MenuEntry>], active: &BTreeMap<String, bool>, headings: &[(usize, &'static str)]) -> Vec<Vec<(String, Cell)>> {
+    let cols: Vec<Vec<Vec<(String, Cell)>>> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let mut lines: Vec<Vec<(String, Cell)>> = Vec::new();
+            if !headings.is_empty() {
+                lines.push(headings.iter().find(|(at, _)| *at == i).map(|(_, t)| vec![((*t).to_string(), Cell::Group)]).unwrap_or_default());
+            }
+            lines.extend(g.iter().filter(|e| !e.hidden).flat_map(|e| display_cells(e, active)));
+            lines
+        })
+        .filter(|g| !g.is_empty())
+        .collect();
+    let line_width = |l: &[(String, Cell)]| l.iter().map(|(t, _)| str_width(t)).sum::<usize>();
+    let widths: Vec<usize> = cols.iter().map(|g| g.iter().map(|l| line_width(l)).max().unwrap_or(0)).collect();
+    let nrows = cols.iter().map(Vec::len).max().unwrap_or(0);
+    let mut rows = Vec::with_capacity(nrows);
+    for row in 0..nrows {
+        let mut line: Vec<(String, Cell)> = Vec::new();
+        for (c, w) in widths.iter().enumerate() {
+            let cell = cols[c].get(row).map_or(&[][..], Vec::as_slice);
+            line.extend(cell.iter().cloned());
+            let pad = w + 3 - line_width(cell);
+            line.push((" ".repeat(pad), Cell::Pad));
+        }
+        // the line without trailing whitespace
+        while let Some((t, _)) = line.last_mut() {
+            let trimmed = t.trim_end().len();
+            if trimmed == 0 {
+                line.pop();
+            } else {
+                t.truncate(trimmed);
+                break;
+            }
+        }
+        rows.push(line);
+    }
+    rows
 }
 
 /// What a piece of a rendered popup row is.
@@ -288,6 +319,8 @@ pub enum Cell {
     /// an inapt suffix, "(KEY DESC)"
     Inapt,
     Pad,
+    /// a Magit-style heading above a band of dispatch columns
+    Group,
 }
 
 /// The lines of `display` E, in pieces.
@@ -967,6 +1000,7 @@ pub fn registry() -> BTreeMap<String, Menu> {
                     cmd("Z", "Worktree", "worktree-menu"),
                     cmd("!", "Run", "run-menu"),
                 ],
+                // "Applying changes" (one column of the horizontal bands)
                 vec![
                     cmd("a", "Apply", "apply"),
                     cmd("v", "Reverse", "reverse"),
@@ -978,9 +1012,9 @@ pub fn registry() -> BTreeMap<String, Menu> {
                 ],
                 // "Essential commands"
                 vec![
-                    cmd("g", "       Refresh current buffer", "refresh"),
-                    cmd("q", "       Bury current buffer", "quit"),
-                    cmd("<tab>", "   Toggle section at point", "toggle-section"),
+                    cmd("g", "Refresh current buffer", "refresh"),
+                    cmd("q", "Bury current buffer", "quit"),
+                    cmd("<tab>", "Toggle section at point", "toggle-section"),
                     cmd("<return>", "Visit thing at point", "visit"),
                 ],
             ],

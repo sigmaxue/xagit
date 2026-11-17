@@ -15,7 +15,7 @@ Usage: xagit [PATH]
          outside a repository, the TUI starts with an init/clone hint
 
 Status buffer keys:
-  h / ?      dispatch (all commands)
+  h / ?      dispatch (commands grouped like Magit)
   n / p      next / previous section
   TAB        expand / collapse section
   s / u      stage / unstage

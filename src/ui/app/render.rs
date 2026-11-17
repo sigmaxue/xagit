@@ -101,6 +101,7 @@ impl App {
                         crate::ui::transient::Cell::Value => Face::PopupValue,
                         crate::ui::transient::Cell::Inapt => Face::PopupInapt,
                         crate::ui::transient::Cell::Desc | crate::ui::transient::Cell::Pad => Face::PopupDesc,
+                        crate::ui::transient::Cell::Group => Face::PopupGroup,
                     };
                     r.push(text.clone(), t.style(face));
                 }
