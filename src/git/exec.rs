@@ -600,14 +600,18 @@ impl Git {
         use std::fs::File;
         use std::io::Read;
         use std::os::fd::FromRawFd;
-        use std::process::Stdio;
+        use std::os::unix::process::CommandExt;
 
         let (mut master, mut slave) = (-1, -1);
         if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) } != 0 {
             return Err(spawn_failure(&self.toplevel, args, std::io::Error::last_os_error()));
         }
+        // Only `master` stays in the parent (owned by the reader thread).
+        // The slave is dup2'd onto fd 2 in the child via pre_exec and then
+        // closed in the parent immediately after spawn: if the parent kept
+        // a slave fd open, the reader would never see EOF and join() would
+        // block forever (this is what hung `git worktree prune`).
         let mut reader = unsafe { File::from_raw_fd(master) };
-        let terminal = unsafe { File::from_raw_fd(slave) };
         unsafe {
             libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
             libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
@@ -616,10 +620,19 @@ impl Git {
                 libc::ioctl(slave, libc::TIOCSWINSZ, &size);
             }
         }
-        cmd.stderr(Stdio::from(terminal));
-        let child = cmd.spawn();
-        cmd.stderr(Stdio::inherit());
-        let mut child = child.map_err(|e| spawn_failure(&self.toplevel, args, e))?;
+        let slave_for_child = slave;
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(slave_for_child, libc::STDERR_FILENO) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let spawned = cmd.spawn();
+        // The child has its own fd 2 now; drop the parent's slave right away.
+        unsafe { libc::close(slave); }
+        let mut child = spawned.map_err(|e| spawn_failure(&self.toplevel, args, e))?;
         let capture = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
             let mut bytes = Vec::new();
             let mut buf = [0; 8192];
