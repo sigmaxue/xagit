@@ -207,6 +207,8 @@ pub struct App {
     /// the rows of a help window shown above the minibuffer while a
     /// question is read (read-multiple-choice's help)
     minibuffer_above: std::cell::RefCell<Vec<String>>,
+    /// the module list most recently offered by read-module-path (tests)
+    last_module_choices: std::cell::RefCell<Vec<String>>,
     /// user-init-file: the options file read (enable-command saves
     /// there)
     user_init_file: Option<std::path::PathBuf>,
@@ -845,6 +847,7 @@ impl App {
             var_scopes: HashMap::new(),
             invoking_menu: None,
             minibuffer_above: std::cell::RefCell::new(Vec::new()),
+            last_module_choices: std::cell::RefCell::new(Vec::new()),
             user_init_file: None,
             minibuffer_history: std::cell::RefCell::new(Vec::new()),
             revision_history: std::cell::RefCell::new(Vec::new()),

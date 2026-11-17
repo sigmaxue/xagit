@@ -12,6 +12,17 @@ impl App {
         self.prompts.borrow().clone()
     }
 
+    /// The rows shown above the minibuffer (a module list / choice help),
+    /// for tests.
+    pub fn minibuffer_above(&self) -> Vec<String> {
+        self.minibuffer_above.borrow().clone()
+    }
+
+    /// The module candidates most recently offered for selection (tests).
+    pub fn module_choices(&self) -> Vec<String> {
+        self.last_module_choices.borrow().clone()
+    }
+
     /// Answers typed as KEYS (key labels) into the minibuffer of the
     /// next prompts, one answer per call, after the scripted answers.
     pub fn script_keys(&self, keys: &[&str]) {

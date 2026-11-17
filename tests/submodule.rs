@@ -178,3 +178,32 @@ fn update_all_confirmation_names_every_module() {
     assert!(p.contains("2 modules"), "{p}");
     assert!(p.contains("lib") && p.contains("lib2"), "{p}");
 }
+
+/// `o u` (Magit's read-module-path) offers the modules as a visible
+/// completion list; C-u still means "all modules" (no new all-candidate).
+#[test]
+fn update_offers_a_module_list_without_changing_magit_semantics() {
+    let (_td, g, _src, url) = setup();
+    let mut app = App::new(g.clone());
+    add(&mut app, &g, &url);
+    g.git_interactive(&["-c", "protocol.file.allow=always", "submodule", "add", "--name", "lib2", &url, "lib2"]).unwrap();
+    g.commit(Some("add lib2"), &[]).unwrap();
+    let mut app = App::new(g.clone());
+
+    // default: select ONE module from a list of both modules
+    app.script_answers(&["lib"]);
+    press(&mut app, &["o", "u"]);
+    let choices = app.module_choices();
+    assert_eq!(choices, ["lib", "lib2"], "both modules offered: {choices:?}");
+    // the list is not thrown into the single-line prompt, and is cleaned
+    // up after the read (so it cannot leak into a later minibuffer)
+    assert!(app.prompts().last().unwrap().starts_with("Update module"), "{:?}", app.prompts());
+    assert!(app.minibuffer_above().is_empty(), "panel cleaned after read: {:?}", app.minibuffer_above());
+
+    // C-u: still "all modules", with the confirmation naming both
+    app.script_keys(&["y"]);
+    press(&mut app, &["o", "C-u", "u"]);
+    let prompts = app.prompts();
+    let p = prompts.last().unwrap();
+    assert!(p.contains("2 modules") && p.contains("lib") && p.contains("lib2"), "{p}");
+}
