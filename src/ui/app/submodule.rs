@@ -98,28 +98,19 @@ impl App {
         (pred == ModulePred::Worktree) == worktree
     }
 
-    /// magit-read-module-path: one of the modules satisfying PRED
-    /// (require-match; there is no module at point).  Like Magit, the
-    /// minibuffer offers the module paths as completions; xagit also shows
-    /// the whole list in a panel above the minibuffer right away, so it is
-    /// obvious which modules can be selected (without pressing ?/TAB
-    /// first).  Pressing ?/TAB still switches to the live completion list.
+    /// magit-read-module-path: one of the modules satisfying PRED.
+    /// The modules are shown as a vertical list above the minibuffer from
+    /// the start; C-n/C-p (or up/down) move the highlight and RET selects
+    /// the highlighted module.  Typing still falls back to completion.
     fn read_module_path(&mut self, prompt: &str, pred: Option<ModulePred>) -> Result<Option<String>> {
         let candidates: Vec<String> =
             self.list_module_paths().into_iter().filter(|m| pred.is_none_or(|p| self.module_pred(p, m))).collect();
-        // Show the selectable modules above the prompt from the start.
-        // completion_rows produces Magit's "*Completions*" style listing.
-        let w = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-        let rows = if candidates.is_empty() {
-            vec!["0 modules available".to_string()]
-        } else {
-            crate::ui::minibuf::completion_rows(&candidates, w)
-        };
-        *self.minibuffer_above.borrow_mut() = rows.clone();
         *self.last_module_choices.borrow_mut() = candidates.clone();
+        // one-shot flag: the coming completing-read is a selectable list
+        self.list_nav.set(true);
         let table = Completion { candidates: candidates.clone(), require_match: true, multiple: false };
         let read = self.completing_read(prompt, None, Hist::Minibuffer, Some(table));
-        self.minibuffer_above.borrow_mut().clear();
+        self.list_nav.set(false);
         let Some(v) = read? else {
             return Ok(None);
         };

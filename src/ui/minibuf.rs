@@ -128,6 +128,11 @@ pub struct LineEditor {
     shown: Option<Vec<String>>,
     /// the last key completed (TAB again shows the completions)
     last_complete: bool,
+    /// select-from-list mode: C-n/C-p move a cursor over the candidate
+    /// list (one candidate per row) instead of browsing the history
+    nav: bool,
+    nav_list: Vec<String>,
+    nav_sel: usize,
 }
 
 impl LineEditor {
@@ -142,6 +147,9 @@ impl LineEditor {
             table: None,
             shown: None,
             last_complete: false,
+            nav: false,
+            nav_list: Vec::new(),
+            nav_sel: 0,
         }
     }
 
@@ -158,6 +166,48 @@ impl LineEditor {
         table.candidates.retain(|c| seen.insert(c.clone()));
         self.table = Some(table);
         self
+    }
+
+    /// Select from a vertical candidate list with C-n/C-p (and up/down):
+    /// the list is shown from the start (one candidate per row) and the
+    /// highlighted entry is put in the input, so RET selects it.  Typing a
+    /// normal character leaves list mode and falls back to completion.
+    pub fn enable_list_nav(mut self) -> LineEditor {
+        let mut list = self.table.as_ref().map(|t| t.candidates.clone()).unwrap_or_default();
+        list.sort();
+        self.nav = !list.is_empty();
+        self.nav_list = list;
+        self.nav_sel = 0;
+        self.nav_apply();
+        self
+    }
+
+    /// Whether the current completions panel is a one-per-row select list.
+    pub fn list_nav(&self) -> bool {
+        self.nav
+    }
+
+    /// Show the list with the selected row marked, and put that entry in
+    /// the input.  Used by the minibuffer renderer for highlighting too.
+    fn nav_apply(&mut self) {
+        if !self.nav || self.nav_list.is_empty() {
+            return;
+        }
+        self.nav_sel = self.nav_sel.min(self.nav_list.len() - 1);
+        let chosen = self.nav_list[self.nav_sel].clone();
+        self.text = chosen.chars().collect();
+        self.point = self.text.len();
+        let mut rows = vec![format!("{} modules (C-n/C-p to select, RET to confirm):", self.nav_list.len())];
+        for (i, c) in self.nav_list.iter().enumerate() {
+            rows.push(format!("{} {}", if i == self.nav_sel { ">" } else { " " }, c));
+        }
+        self.shown = Some(rows);
+    }
+
+    /// The selected row index in the panel (0 = header, 1.. = candidates),
+    /// for the renderer to highlight it.
+    pub fn nav_selected_row(&self) -> Option<usize> {
+        self.nav.then_some(self.nav_sel + 1)
     }
 
     /// The possible completions shown (the *Completions* buffer), if any.
@@ -340,6 +390,31 @@ impl LineEditor {
     /// Handle KEY (minibuffer-local-map and the global editing keys).
     pub fn key(&mut self, key: &Key) -> Step {
         let last_complete = std::mem::take(&mut self.last_complete);
+        // select-from-list: C-n/C-p (and up/down) move the highlight over
+        // the candidate list; RET keeps the normal require-match exit.
+        if self.nav {
+            match (key.ctrl, key.code.as_str()) {
+                (true, "n") | (false, "down") | (false, "M-n") => {
+                    self.nav_sel = (self.nav_sel + 1) % self.nav_list.len();
+                    self.nav_apply();
+                    return Step::Continue;
+                }
+                (true, "p") | (false, "up") | (false, "M-p") => {
+                    self.nav_sel = (self.nav_sel + self.nav_list.len() - 1) % self.nav_list.len();
+                    self.nav_apply();
+                    return Step::Continue;
+                }
+                // RET / C-g keep their usual meaning (the input already
+                // holds the highlighted candidate)
+                (false, "enter") | (true, "j") | (true, "m") | (true, "g") | (false, "esc") => {}
+                // typing, TAB, ?, cursor edits leave list mode and fall
+                // back to ordinary completion
+                _ => {
+                    self.nav = false;
+                    self.shown = None;
+                }
+            }
+        }
         if let Some(t) = &self.table {
             let require_match = t.require_match && !t.multiple;
             match (key.ctrl, key.code.as_str()) {

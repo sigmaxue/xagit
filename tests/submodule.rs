@@ -207,3 +207,35 @@ fn update_offers_a_module_list_without_changing_magit_semantics() {
     let p = prompts.last().unwrap();
     assert!(p.contains("2 modules") && p.contains("lib") && p.contains("lib2"), "{p}");
 }
+
+/// The `o u` module list is navigated with C-n/C-p: the highlighted
+/// module is selected with RET (strictly one module, Magit-style).
+#[test]
+fn update_module_list_c_n_c_p_selects() {
+    let (_td, g, _src, url) = setup();
+    let mut app = App::new(g.clone());
+    add(&mut app, &g, &url);
+    g.git_interactive(&["-c", "protocol.file.allow=always", "submodule", "add", "--name", "lib2", &url, "lib2"]).unwrap();
+    g.commit(Some("add lib2"), &[]).unwrap();
+    let mut app = App::new(g.clone());
+
+    // C-n moves the highlight to "lib2", RET selects it
+    app.script_keys(&["C-n", "RET"]);
+    press(&mut app, &["o", "u"]);
+    assert_eq!(app.module_choices(), ["lib", "lib2"]);
+    // the update ran with lib2 as the module argument
+    let echo = app.echo().unwrap_or("").to_string();
+    assert!(echo.contains("lib2"), "C-n selected lib2: echo={echo:?} msg={}", app.message());
+
+    // C-p from the first wraps to the last (lib2)
+    app.script_keys(&["C-p", "RET"]);
+    press(&mut app, &["o", "u"]);
+    let echo2 = app.echo().unwrap_or("").to_string();
+    assert!(echo2.contains("lib2"), "C-p wrapped to lib2: {echo2:?}");
+
+    // plain RET picks the first highlighted module (lib)
+    app.script_keys(&["RET"]);
+    press(&mut app, &["o", "u"]);
+    let echo3 = app.echo().unwrap_or("").to_string();
+    assert!(echo3.contains("lib ") || echo3.trim_end().ends_with("lib"), "RET picked lib: {echo3:?}");
+}

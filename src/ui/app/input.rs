@@ -178,6 +178,10 @@ impl App {
         if let Some(t) = table {
             ed = ed.with_completion(t);
         }
+        // one-shot: the next read shows a C-n/C-p selectable candidate list
+        if self.list_nav.replace(false) {
+            ed = ed.enable_list_nav();
+        }
         if let Some(i) = initial {
             ed = ed.with_initial_input(&i);
         }
@@ -248,6 +252,13 @@ impl App {
             let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
             let (w, h) = (w as usize, h as usize);
             let list = match ed.completions() {
+                // select-from-list: one candidate per row, keep the
+                // vertical order (do not reflow into columns)
+                Some(c) if ed.list_nav() => {
+                    let mut rows = c.to_vec();
+                    rows.truncate(h.saturating_sub(1));
+                    rows
+                }
                 Some(c) => {
                     let mut rows = crate::ui::minibuf::completion_rows(c, w);
                     rows.truncate(h.saturating_sub(1) / 2);
@@ -263,10 +274,16 @@ impl App {
             self.repaint_rows(last.saturating_sub(covered), last.saturating_sub(list.len()));
             // the completions on a panel above the prompt
             let panel = t.style(Face::SectionHighlight);
+            let selected = ed.nav_selected_row();
             for (i, r) in list.iter().enumerate() {
                 let y = last - list.len() + i;
                 let mut row = Row::new(panel);
-                row.push(r.clone(), Style::default().over(panel));
+                let style = if selected == Some(i) {
+                    t.style(Face::CursorLine).over(panel)
+                } else {
+                    Style::default().over(panel)
+                };
+                row.push(r.clone(), style);
                 let _ = paint::write_row(&mut out, t, y as u16, &row, w);
             }
             covered = list.len();
