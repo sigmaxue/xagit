@@ -106,11 +106,10 @@ impl App {
         let candidates: Vec<String> =
             self.list_module_paths().into_iter().filter(|m| pred.is_none_or(|p| self.module_pred(p, m))).collect();
         *self.last_module_choices.borrow_mut() = candidates.clone();
-        // one-shot flag: the coming completing-read is a selectable list
-        self.list_nav.set(true);
+        // require_match completion is automatically a C-n/C-p selectable
+        // single-column list (see LineEditor::enable_list_nav)
         let table = Completion { candidates: candidates.clone(), require_match: true, multiple: false };
         let read = self.completing_read(prompt, None, Hist::Minibuffer, Some(table));
-        self.list_nav.set(false);
         let Some(v) = read? else {
             return Ok(None);
         };

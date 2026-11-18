@@ -78,21 +78,15 @@ fn common_prefix(words: &[&String]) -> String {
 /// The rows of the *Completions* buffer for CANDS in WIDTH columns: the
 /// header ("N possible completions:") and the candidates sorted, in
 /// columns across (completions-format horizontal).
-pub fn completion_rows(cands: &[String], width: usize) -> Vec<String> {
+pub fn completion_rows(cands: &[String], _width: usize) -> Vec<String> {
+    // One candidate per row (a selectable vertical list), instead of the
+    // old multi-column *Completions* grid.  C-n/C-p move a highlight over
+    // these rows in the minibuffer.
     let mut sorted: Vec<&String> = cands.iter().collect();
     sorted.sort();
     let mut rows = vec![format!("{} possible completions:", sorted.len())];
-    let col = sorted.iter().map(|c| c.chars().count()).max().unwrap_or(0) + 2;
-    let per_row = (width / col.max(1)).max(1);
-    for chunk in sorted.chunks(per_row) {
-        let mut row = String::new();
-        for (i, c) in chunk.iter().enumerate() {
-            row.push_str(c);
-            if i + 1 < chunk.len() {
-                row.push_str(&" ".repeat(col - c.chars().count()));
-            }
-        }
-        rows.push(row);
+    for c in sorted {
+        rows.push(format!("  {c}"));
     }
     rows
 }
@@ -128,11 +122,15 @@ pub struct LineEditor {
     shown: Option<Vec<String>>,
     /// the last key completed (TAB again shows the completions)
     last_complete: bool,
-    /// select-from-list mode: C-n/C-p move a cursor over the candidate
-    /// list (one candidate per row) instead of browsing the history
+    /// select-from-list: C-n/C-p move a cursor over the candidate list
+    /// (one candidate per row).  `nav_armed` means a list can be opened;
+    /// `nav` means it is currently shown and actively navigated.
     nav: bool,
+    nav_armed: bool,
     nav_list: Vec<String>,
     nav_sel: usize,
+    /// a C-n/C-p key was used: RET should take the highlighted row
+    nav_chosen: bool,
 }
 
 impl LineEditor {
@@ -148,8 +146,10 @@ impl LineEditor {
             shown: None,
             last_complete: false,
             nav: false,
+            nav_armed: false,
             nav_list: Vec::new(),
             nav_sel: 0,
+            nav_chosen: false,
         }
     }
 
@@ -168,15 +168,16 @@ impl LineEditor {
         self
     }
 
-    /// Select from a vertical candidate list with C-n/C-p (and up/down):
-    /// the list is shown from the start (one candidate per row) and the
-    /// highlighted entry is put in the input, so RET selects it.  Typing a
-    /// normal character leaves list mode and falls back to completion.
+    /// Offer the candidates as a vertical, C-n/C-p navigable single-column
+    /// list.  The list is shown from the start but the input stays empty:
+    /// typing a value works exactly as before (no preselected text to
+    /// append to).  C-n/C-p highlight a row; RET then takes that candidate.
     pub fn enable_list_nav(mut self) -> LineEditor {
         let mut list = self.table.as_ref().map(|t| t.candidates.clone()).unwrap_or_default();
         list.sort();
-        self.nav = !list.is_empty();
         self.nav_list = list;
+        self.nav_armed = !self.nav_list.is_empty();
+        self.nav = self.nav_armed;
         self.nav_sel = 0;
         self.nav_apply();
         self
@@ -187,17 +188,14 @@ impl LineEditor {
         self.nav
     }
 
-    /// Show the list with the selected row marked, and put that entry in
-    /// the input.  Used by the minibuffer renderer for highlighting too.
+    /// Refresh the list rows with the highlighted entry marked.  The input
+    /// is NOT overwritten, so free typing is unaffected.
     fn nav_apply(&mut self) {
         if !self.nav || self.nav_list.is_empty() {
             return;
         }
         self.nav_sel = self.nav_sel.min(self.nav_list.len() - 1);
-        let chosen = self.nav_list[self.nav_sel].clone();
-        self.text = chosen.chars().collect();
-        self.point = self.text.len();
-        let mut rows = vec![format!("{} modules (C-n/C-p to select, RET to confirm):", self.nav_list.len())];
+        let mut rows = vec![format!("{} possible completions (C-n/C-p, RET):", self.nav_list.len())];
         for (i, c) in self.nav_list.iter().enumerate() {
             rows.push(format!("{} {}", if i == self.nav_sel { ">" } else { " " }, c));
         }
@@ -390,27 +388,37 @@ impl LineEditor {
     /// Handle KEY (minibuffer-local-map and the global editing keys).
     pub fn key(&mut self, key: &Key) -> Step {
         let last_complete = std::mem::take(&mut self.last_complete);
-        // select-from-list: C-n/C-p (and up/down) move the highlight over
-        // the candidate list; RET keeps the normal require-match exit.
+        // Single-column select list: C-n/C-p (and up/down) move the
+        // highlight.  The list is shown but the input is left alone, so
+        // typing works as before.  RET takes the highlighted candidate
+        // only once a navigation key was used; otherwise it exits with
+        // the typed text.  M-p/M-n stay bound to minibuffer history.
         if self.nav {
             match (key.ctrl, key.code.as_str()) {
-                (true, "n") | (false, "down") | (false, "M-n") => {
-                    self.nav_sel = (self.nav_sel + 1) % self.nav_list.len();
+                (true, "n") | (false, "down") | (true, "p") | (false, "up") => {
+                    let down = key.code == "n" || key.code == "down";
+                    if down {
+                        self.nav_sel = (self.nav_sel + 1) % self.nav_list.len();
+                    } else {
+                        self.nav_sel = (self.nav_sel + self.nav_list.len() - 1) % self.nav_list.len();
+                    }
+                    self.nav_chosen = true;
                     self.nav_apply();
                     return Step::Continue;
                 }
-                (true, "p") | (false, "up") | (false, "M-p") => {
-                    self.nav_sel = (self.nav_sel + self.nav_list.len() - 1) % self.nav_list.len();
-                    self.nav_apply();
-                    return Step::Continue;
+                // RET takes the highlighted row only after navigating;
+                // otherwise the normal path applies (empty input uses the
+                // default, typed text is completed as usual)
+                (false, "enter") | (true, "j") | (true, "m") if self.nav_chosen => {
+                    return Step::Done(self.nav_list[self.nav_sel].clone());
                 }
-                // RET / C-g keep their usual meaning (the input already
-                // holds the highlighted candidate)
-                (false, "enter") | (true, "j") | (true, "m") | (true, "g") | (false, "esc") => {}
-                // typing, TAB, ?, cursor edits leave list mode and fall
-                // back to ordinary completion
+                // C-g / ESC quit; plain RET falls through to normal exit
+                (true, "g") | (false, "esc") | (false, "enter") | (true, "j") | (true, "m") => {}
+                // TAB, ?, M-p/M-n, cursor edits and typing leave list
+                // mode so the value is not prefixed by a candidate
                 _ => {
                     self.nav = false;
+                    self.nav_chosen = false;
                     self.shown = None;
                 }
             }

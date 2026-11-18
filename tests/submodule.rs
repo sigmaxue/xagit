@@ -233,8 +233,8 @@ fn update_module_list_c_n_c_p_selects() {
     let echo2 = app.echo().unwrap_or("").to_string();
     assert!(echo2.contains("lib2"), "C-p wrapped to lib2: {echo2:?}");
 
-    // plain RET picks the first highlighted module (lib)
-    app.script_keys(&["RET"]);
+    // navigate down then back up: RET takes the highlighted module (lib)
+    app.script_keys(&["C-n", "C-p", "RET"]);
     press(&mut app, &["o", "u"]);
     let echo3 = app.echo().unwrap_or("").to_string();
     assert!(echo3.contains("lib ") || echo3.trim_end().ends_with("lib"), "RET picked lib: {echo3:?}");

@@ -97,10 +97,10 @@ fn completion_help() {
     assert_eq!(type_keys(&mut ed, &["?"]), Step::Continue);
     assert_eq!(ed.text(), "?");
     assert_eq!(type_keys(&mut ed, &["TAB"]), Step::Message("TAB is undefined".into()));
-    // the *Completions* buffer
+    // the *Completions* buffer: one candidate per row (selectable list)
     let rows = completion_rows(&strs(&["bb", "a", "ccc"]), 12);
-    assert_eq!(rows, ["3 possible completions:", "a    bb", "ccc"]);
-    assert_eq!(completion_rows(&strs(&["x"]), 0), ["1 possible completions:", "x"]);
+    assert_eq!(rows, ["3 possible completions:", "  a", "  bb", "  ccc"]);
+    assert_eq!(completion_rows(&strs(&["x"]), 0), ["1 possible completions:", "  x"]);
 }
 
 #[test]
@@ -181,4 +181,31 @@ fn revision_history() {
     }
     assert_eq!(app.prompts().last().unwrap(), "Log rev,s");
     assert_eq!(app.revision_history(), ["new".to_string(), main, "feature".into()]);
+}
+
+/// Every completion read offers a single-column, C-n/C-p navigable list.
+/// The input stays empty (typing is unaffected); navigating then RET takes
+/// the highlighted candidate, while plain RET keeps the normal exit.
+#[test]
+fn list_navigation_is_generic() {
+    let cands = strs(&["zeta", "alpha", "mid"]);
+    let table = Completion { candidates: cands.clone(), require_match: true, multiple: false };
+
+    // C-n twice -> the third sorted candidate ("zeta"); RET takes it
+    let mut ed = LineEditor::new(Vec::new(), None).with_completion(table.clone()).enable_list_nav();
+    assert_eq!(ed.text(), "", "no preselected text");
+    assert_eq!(type_keys(&mut ed, &["C-n", "C-n"]), Step::Continue);
+    assert_eq!(type_keys(&mut ed, &["RET"]), Step::Done("zeta".into()));
+
+    // typed input is not prefixed by a candidate
+    let mut ed = LineEditor::new(Vec::new(), None).with_completion(table.clone()).enable_list_nav();
+    assert_eq!(type_keys(&mut ed, &["m", "i", "d"]), Step::Continue);
+    assert_eq!(ed.text(), "mid");
+    assert_eq!(type_keys(&mut ed, &["RET"]), Step::Done("mid".into()));
+
+    // plain RET (no navigation) keeps the ordinary completion exit (not
+    // the highlighted candidate): with require-match and empty input it
+    // stays empty, so defaults/history are unaffected
+    let mut ed = LineEditor::new(Vec::new(), Some("dflt".into())).with_completion(table).enable_list_nav();
+    assert_eq!(type_keys(&mut ed, &["RET"]), Step::Done(String::new()));
 }

@@ -196,8 +196,6 @@ pub struct App {
     instant_keys: std::cell::RefCell<Vec<(String, String)>>,
     /// the INITIAL-INPUT of the next question read
     initial_input: std::cell::RefCell<Option<String>>,
-    /// next completing-read uses a C-n/C-p selectable candidate list
-    list_nav: std::cell::Cell<bool>,
     /// set while the search prompt (C-s / C-r) is read; a second C-s / C-r
     /// there submits the text typed so far, and records the direction
     search_read: std::cell::RefCell<Option<SearchRead>>,
@@ -845,7 +843,6 @@ impl App {
             scripted_keys: std::cell::RefCell::new(std::collections::VecDeque::new()),
             instant_keys: std::cell::RefCell::new(Vec::new()),
             initial_input: std::cell::RefCell::new(None),
-            list_nav: std::cell::Cell::new(false),
             search_read: std::cell::RefCell::new(None),
             var_scopes: HashMap::new(),
             invoking_menu: None,

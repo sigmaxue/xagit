@@ -178,10 +178,9 @@ impl App {
         if let Some(t) = table {
             ed = ed.with_completion(t);
         }
-        // one-shot: the next read shows a C-n/C-p selectable candidate list
-        if self.list_nav.replace(false) {
-            ed = ed.enable_list_nav();
-        }
+        // Every completion read offers a single-column, C-n/C-p navigable
+        // candidate list; the input stays empty so typing is unchanged.
+        ed = ed.enable_list_nav();
         if let Some(i) = initial {
             ed = ed.with_initial_input(&i);
         }
