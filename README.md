@@ -99,7 +99,7 @@ xagit 不在 `PATH` 时设置 `g:xagit_cmd`；仓库目录默认取当前文件�
 
 配置项（`xagit-directory`/`xagit-width`/`xagit-height`/`xagit-posframe` 等）与排错见 [emacs/README.md](emacs/README.md)。
 
-凡带候选项的 minibuffer 补全（分支、tag、远端、模块、文件路径、commit 等）都把候选以**单列列表**显示在提示上方（`N possible completions`），可用 `C-n`/`C-p`（或上下方向键）上下移动高亮、`RET` 选中高亮项；直接输入字符则回到普通补全/自由输入（`TAB`/`?` 补全、`M-p`/`M-n` 浏览历史），不预填候选项、不改变默认值与 require-match 行为。
+凡带候选项的 minibuffer 补全（分支、tag、远端、模块、文件路径、commit 等）都把候选以**单列列表**显示在提示上方（`N possible completions`），可用 `C-n`/`C-p`（或上下方向键）上下移动高亮、`RET` 选中高亮项；直接输入字符则回到普通补全/自由输入（`TAB`/`?` 补全、`M-p`/`M-n` 浏览历史），不预填候选项、不改变默认值与 require-match 行为。面板按统一的左侧栏对齐：当前项前是琥珀色 `▌`（ASCII 终端为 `>`）并以强调色加粗，候选中与输入匹配的部分用较淡的强调色标出；标题行右端显示 `当前/总数` 与键位提示。候选多于屏幕行数时窗口随高亮滚动，保证当前项始终可见；过长的候选以 `…` 收尾，无颜色终端改用粗体/下划线区分。
 
 ## 快速开始
 

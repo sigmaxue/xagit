@@ -45,6 +45,13 @@ const PCM_DELIMITERS: &[char] = &['-', '_', '.', '/', ':', '|', ' '];
 /// delimiter in INPUT may be preceded by any text in CAND, `*` matches
 /// any text, and the start is anchored ("o/m" matches "origin/master").
 fn pcm_match(input: &str, cand: &str) -> bool {
+    pcm_ranges(input, cand).is_some()
+}
+
+/// The byte ranges of CAND that INPUT matches, in order (None when it
+/// does not match). The ranges are what the minibuffer paints in the
+/// candidate's accent color.
+fn pcm_ranges(input: &str, cand: &str) -> Option<Vec<(usize, usize)>> {
     let mut pieces: Vec<String> = vec![String::new()];
     for c in input.chars() {
         if c == '*' {
@@ -55,15 +62,54 @@ fn pcm_match(input: &str, cand: &str) -> bool {
             p.push(c);
         }
     }
-    let Some(rest) = cand.strip_prefix(pieces[0].as_str()) else { return false };
-    let mut rest = rest;
-    for p in &pieces[1..] {
-        match rest.find(p.as_str()) {
-            Some(i) => rest = &rest[i + p.len()..],
-            None => return false,
-        }
+    let head = pieces[0].as_str();
+    if !cand.starts_with(head) {
+        return None;
     }
-    true
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    if !head.is_empty() {
+        ranges.push((0, head.len()));
+    }
+    let mut at = head.len();
+    for p in &pieces[1..] {
+        if p.is_empty() {
+            continue;
+        }
+        let i = cand[at..].find(p.as_str())?;
+        let start = at + i;
+        ranges.push((start, start + p.len()));
+        at = start + p.len();
+    }
+    Some(ranges)
+}
+
+/// The parts of TEXT, each marked as matched by INPUT or not. The input
+/// is matched with the same partial-completion rules as completion, so
+/// what is highlighted is exactly what made the candidate match.
+pub fn highlight_parts<'a>(text: &'a str, input: &str) -> Vec<(&'a str, bool)> {
+    let Some(ranges) = pcm_ranges(input, text) else {
+        return vec![(text, false)];
+    };
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    for (start, end) in ranges {
+        let start = start.max(at).min(text.len());
+        let end = end.max(start).min(text.len());
+        if start > at {
+            out.push((&text[at..start], false));
+        }
+        if end > start {
+            out.push((&text[start..end], true));
+        }
+        at = end;
+    }
+    if at < text.len() {
+        out.push((&text[at..], false));
+    }
+    if out.is_empty() {
+        out.push((text, false));
+    }
+    out
 }
 
 fn common_prefix(words: &[&String]) -> String {
@@ -89,6 +135,80 @@ pub fn completion_rows(cands: &[String], _width: usize) -> Vec<String> {
         rows.push(format!("  {c}"));
     }
     rows
+}
+
+/// One row of the panel above the minibuffer prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelLine {
+    /// the count, dimmed, with the keys and position at the right
+    Header(String),
+    /// a candidate, with the list cursor on it or not
+    Item { text: String, selected: bool },
+    /// a line of help text (read-multiple-choice)
+    Note(String),
+}
+
+/// The panel above the prompt. POSITION is the 1-based place of the
+/// selection and the number of candidates; HINT names the keys that
+/// move it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionPanel {
+    pub lines: Vec<PanelLine>,
+    pub position: Option<(usize, usize)>,
+    pub hint: Option<&'static str>,
+}
+
+impl CompletionPanel {
+    fn empty() -> CompletionPanel {
+        CompletionPanel { lines: Vec::new(), position: None, hint: None }
+    }
+}
+
+/// The rows of ED's completions panel, in ROOM screen rows. A navigated
+/// list is a window onto the candidates, centred on the selection so
+/// C-n/C-p never move the highlight out of view; the other lists keep
+/// only as many rows as fit. ABOVE is the help text shown when there is
+/// no completion list.
+pub fn completion_panel(ed: &LineEditor, above: &[String], room: usize) -> CompletionPanel {
+    if room == 0 {
+        return CompletionPanel::empty();
+    }
+    if ed.list_nav() {
+        let shown = ed.completions().unwrap_or_default();
+        let Some(header) = shown.first() else { return CompletionPanel::empty() };
+        let all: Vec<&str> = shown
+            .iter()
+            .skip(1)
+            .map(|r| r.strip_prefix("> ").or_else(|| r.strip_prefix("  ")).unwrap_or(r.as_str()))
+            .collect();
+        let total = all.len();
+        if total == 0 {
+            return CompletionPanel::empty();
+        }
+        let sel = ed.nav_sel.min(total - 1);
+        let body = room - 1;
+        let start = if total <= body { 0 } else { sel.saturating_sub(body / 2).min(total - body) };
+        let mut lines = vec![PanelLine::Header(header.clone())];
+        for (i, text) in all.iter().enumerate().skip(start).take(body) {
+            lines.push(PanelLine::Item { text: (*text).to_string(), selected: i == sel });
+        }
+        return CompletionPanel { lines, position: Some((sel + 1, total)), hint: Some("C-n/C-p  RET") };
+    }
+    if let Some(cands) = ed.completions() {
+        let rows = completion_rows(cands, 0);
+        let mut it = rows.iter();
+        let Some(header) = it.next() else { return CompletionPanel::empty() };
+        let mut lines = vec![PanelLine::Header(header.clone())];
+        for r in it.take(room - 1) {
+            lines.push(PanelLine::Item { text: r.strip_prefix("  ").unwrap_or(r.as_str()).to_string(), selected: false });
+        }
+        return CompletionPanel { lines, position: None, hint: None };
+    }
+    CompletionPanel {
+        lines: above.iter().take(room).map(|s| PanelLine::Note(s.clone())).collect(),
+        position: None,
+        hint: None,
+    }
 }
 
 /// What a key did in the minibuffer.
@@ -195,17 +315,11 @@ impl LineEditor {
             return;
         }
         self.nav_sel = self.nav_sel.min(self.nav_list.len() - 1);
-        let mut rows = vec![format!("{} possible completions (C-n/C-p, RET):", self.nav_list.len())];
+        let mut rows = vec![format!("{} possible completions:", self.nav_list.len())];
         for (i, c) in self.nav_list.iter().enumerate() {
             rows.push(format!("{} {}", if i == self.nav_sel { ">" } else { " " }, c));
         }
         self.shown = Some(rows);
-    }
-
-    /// The selected row index in the panel (0 = header, 1.. = candidates),
-    /// for the renderer to highlight it.
-    pub fn nav_selected_row(&self) -> Option<usize> {
-        self.nav.then_some(self.nav_sel + 1)
     }
 
     /// The possible completions shown (the *Completions* buffer), if any.
@@ -325,6 +439,12 @@ impl LineEditor {
 
     pub fn text(&self) -> String {
         self.text.iter().collect()
+    }
+
+    /// The part of the input matched against the candidates (the last
+    /// field with completing-read-multiple).
+    pub fn completion_input(&self) -> String {
+        self.field()
     }
 
     /// The column of point in the input.
@@ -522,4 +642,70 @@ pub fn add_to_history(hist: &mut Vec<String>, input: &str, dedup: bool) {
         return;
     }
     hist.insert(0, input.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::keys::key_from_label;
+
+    fn nav(cands: &[&str]) -> LineEditor {
+        let table = Completion {
+            candidates: cands.iter().map(|s| s.to_string()).collect(),
+            require_match: true,
+            multiple: false,
+        };
+        LineEditor::new(Vec::new(), None).with_completion(table).enable_list_nav()
+    }
+
+    #[test]
+    fn pcm_ranges_mark_what_the_input_matched() {
+        assert_eq!(pcm_ranges("mas", "master"), Some(vec![(0, 3)]));
+        assert_eq!(pcm_ranges("o/m", "origin/master"), Some(vec![(0, 1), (6, 8)]));
+        assert_eq!(pcm_ranges("", "master"), Some(vec![]));
+        assert_eq!(pcm_ranges("zz", "master"), None);
+        assert_eq!(highlight_parts("master", "mas"), [("mas", true), ("ter", false)]);
+    }
+
+    #[test]
+    fn panel_keeps_the_selection_in_view() {
+        let cands: Vec<String> = ('a'..='l').map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = cands.iter().map(String::as_str).collect();
+        let mut ed = nav(&refs);
+        ed.nav_sel = 10;
+        ed.nav_apply();
+        let p = completion_panel(&ed, &[], 6);
+        assert_eq!(p.position, Some((11, 12)));
+        assert_eq!(p.hint, Some("C-n/C-p  RET"));
+        assert_eq!(p.lines.len(), 6);
+        assert_eq!(p.lines[0], PanelLine::Header("12 possible completions:".into()));
+        assert!(p.lines.contains(&PanelLine::Item { text: "k".into(), selected: true }));
+    }
+
+    #[test]
+    fn panel_falls_back_to_help_lines() {
+        let ed = LineEditor::new(Vec::new(), None);
+        let p = completion_panel(&ed, &["first".into(), "second".into()], 1);
+        assert_eq!(p.lines, vec![PanelLine::Note("first".into())]);
+        assert_eq!(p.position, None);
+    }
+
+    #[test]
+    fn completion_list_has_a_header_and_sorted_items() {
+        let mut ed = LineEditor::new(Vec::new(), None).with_completion(Completion {
+            candidates: vec!["bb".into(), "a".into(), "ccc".into()],
+            require_match: false,
+            multiple: false,
+        });
+        ed.key(&key_from_label("?"));
+        assert_eq!(
+            completion_panel(&ed, &[], 4).lines,
+            vec![
+                PanelLine::Header("3 possible completions:".into()),
+                PanelLine::Item { text: "a".into(), selected: false },
+                PanelLine::Item { text: "bb".into(), selected: false },
+                PanelLine::Item { text: "ccc".into(), selected: false },
+            ]
+        );
+    }
 }

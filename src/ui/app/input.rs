@@ -4,6 +4,7 @@
 //! gives each of them the parent's private fields and helpers.
 
 use super::*;
+use crate::ui::minibuf::{completion_panel, highlight_parts, PanelLine};
 
 impl App {
 
@@ -250,42 +251,27 @@ impl App {
             let mut out = stdout();
             let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
             let (w, h) = (w as usize, h as usize);
-            let list = match ed.completions() {
-                // select-from-list: one candidate per row, keep the
-                // vertical order (do not reflow into columns)
-                Some(c) if ed.list_nav() => {
-                    let mut rows = c.to_vec();
-                    rows.truncate(h.saturating_sub(1));
-                    rows
-                }
-                Some(c) => {
-                    let mut rows = crate::ui::minibuf::completion_rows(c, w);
-                    rows.truncate(h.saturating_sub(1) / 2);
-                    rows
-                }
-                None => {
-                    let mut rows: Vec<String> = self.minibuffer_above.borrow().clone();
-                    rows.truncate(h.saturating_sub(1));
-                    rows
-                }
+            let room = if ed.list_nav() || ed.completions().is_none() {
+                h.saturating_sub(1)
+            } else {
+                (h.saturating_sub(1) / 2).max(1)
             };
+            let above = self.minibuffer_above.borrow().clone();
+            let panel = completion_panel(&ed, &above, room);
+            let list = panel.lines.len();
             let last = h.saturating_sub(1);
-            self.repaint_rows(last.saturating_sub(covered), last.saturating_sub(list.len()));
-            // the completions on a panel above the prompt
-            let panel = t.style(Face::SectionHighlight);
-            let selected = ed.nav_selected_row();
-            for (i, r) in list.iter().enumerate() {
-                let y = last - list.len() + i;
-                let mut row = Row::new(panel);
-                let style = if selected == Some(i) {
-                    t.style(Face::CursorLine).over(panel)
-                } else {
-                    Style::default().over(panel)
-                };
-                row.push(r.clone(), style);
+            self.repaint_rows(last.saturating_sub(covered), last.saturating_sub(list));
+            // The panel above the prompt: a dim header, then one candidate
+            // per row with a gutter for the list cursor. Only the selected
+            // row and the parts matching the input are coloured; the rest
+            // stays plain so the panel reads as text, not as a widget.
+            let input = ed.completion_input();
+            for (i, line) in panel.lines.iter().enumerate() {
+                let y = last - list + i;
+                let row = completion_row(t, line, &panel, &input, w);
                 let _ = paint::write_row(&mut out, t, y as u16, &row, w);
             }
-            covered = list.len();
+            covered = list;
             let text = ed.text();
             let mut row = Row::new(Style::default());
             row.push(prompt.clone(), t.style(Face::Prompt)).push(text.clone(), Style::default());
@@ -488,4 +474,128 @@ impl App {
         self.mark.is_some()
     }
 
+}
+
+/// One row of the completions panel, styled. Kept out of the terminal
+/// loop so its alignment and faces can be tested.
+fn completion_row(
+    t: &crate::ui::theme::Theme,
+    line: &PanelLine,
+    panel: &crate::ui::minibuf::CompletionPanel,
+    input: &str,
+    w: usize,
+) -> Row {
+    let bg = t.style(Face::SectionHighlight);
+    let dim = t.style(Face::Dim).over(bg);
+    let plain = Style::default().over(bg);
+    let matched = t.style(Face::CompletionMatch).over(bg);
+    let selection = t.style(Face::CompletionSelected).over(bg);
+    let mut row = Row::new(bg);
+    match line {
+        PanelLine::Header(text) => {
+            let mut left = Row::new(bg);
+            left.push("  ", dim).push(text.clone(), dim);
+            let mut right = Row::new(bg);
+            if let Some((at, n)) = panel.position {
+                right.push(format!("{at}/{n}"), dim);
+            }
+            if let Some(hint) = panel.hint {
+                if right.width() > 0 {
+                    right.push("   ", dim);
+                }
+                right.push(hint.to_string(), dim);
+            }
+            right.push("  ", dim);
+            row = Row::split(left, right, w);
+        }
+        PanelLine::Note(text) => {
+            row.push("  ", bg).push(text.clone(), plain);
+        }
+        PanelLine::Item { text, selected } => {
+            row.push("  ", bg);
+            if *selected {
+                row.push(format!("{} ", t.glyphs.cursor), selection);
+            } else {
+                row.push("  ", bg);
+            }
+            // leave the gutter and a right margin; a long candidate
+            // ends in an ellipsis, not a silent cut
+            let text_room = w.saturating_sub(6);
+            let shown = if crate::ui::width::str_width(text) > text_room {
+                let mark = if t.glyphs.cursor == '>' { "~" } else { "…" };
+                let cut = crate::ui::width::truncate(text, text_room.saturating_sub(1));
+                format!("{cut}{mark}")
+            } else {
+                text.clone()
+            };
+            if *selected {
+                row.push(shown, selection);
+            } else {
+                for (part, hit) in highlight_parts(&shown, input) {
+                    row.push(part.to_string(), if hit { matched } else { plain });
+                }
+            }
+        }
+    }
+    row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::minibuf::CompletionPanel;
+    use crate::ui::theme::{Depth, Face, Theme};
+
+    fn panel() -> CompletionPanel {
+        CompletionPanel { lines: Vec::new(), position: None, hint: None }
+    }
+
+    fn truecolor() -> Theme {
+        Theme { depth: Depth::True, ..Theme::default() }
+    }
+
+    #[test]
+    fn selected_row_has_the_cursor_gutter_and_accent_text() {
+        let t = truecolor();
+        let row = completion_row(&t, &PanelLine::Item { text: "master".into(), selected: true }, &panel(), "mas", 40);
+        assert_eq!(row.plain(), "  ▌ master");
+        let sel = t.style(Face::CompletionSelected).over(t.style(Face::SectionHighlight));
+        assert_eq!(row.spans.len(), 2, "{row:?}");
+        assert_eq!(row.spans[1].text, "▌ master");
+        assert_eq!(row.spans[1].style, sel);
+    }
+
+    #[test]
+    fn unselected_row_marks_only_the_matched_part() {
+        let t = truecolor();
+        let row = completion_row(&t, &PanelLine::Item { text: "master".into(), selected: false }, &panel(), "mas", 40);
+        assert_eq!(row.plain(), "    master");
+        let bg = t.style(Face::SectionHighlight);
+        let hit = t.style(Face::CompletionMatch).over(bg);
+        let plain = Style::default().over(bg);
+        assert!(row.spans.iter().any(|s| s.text == "mas" && s.style == hit), "{row:?}");
+        assert!(row.spans.iter().any(|s| s.text == "ter" && s.style == plain), "{row:?}");
+    }
+
+    #[test]
+    fn header_puts_the_position_at_the_right_edge() {
+        let t = truecolor();
+        let p = CompletionPanel { lines: Vec::new(), position: Some((3, 12)), hint: Some("C-n/C-p  RET") };
+        let row = completion_row(&t, &PanelLine::Header("12 possible completions:".into()), &p, "", 40);
+        assert_eq!(row.width(), 40);
+        let text = row.plain();
+        assert!(text.contains("3/12"), "{text}");
+        assert!(text.trim_end().ends_with("C-n/C-p  RET"), "{text}");
+    }
+
+    #[test]
+    fn mono_selection_is_bold_and_long_names_end_in_an_ellipsis() {
+        let t = Theme::default();
+        let row = completion_row(&t, &PanelLine::Item { text: "master".into(), selected: true }, &panel(), "", 40);
+        assert!(row.spans.iter().any(|s| s.style.bold), "{row:?}");
+        let long = "a".repeat(60);
+        let row = completion_row(&t, &PanelLine::Item { text: long, selected: false }, &panel(), "", 20);
+        assert!(row.plain().ends_with('…'), "{}", row.plain());
+        assert_eq!(row.width(), 18, "{}", row.plain());
+    }
 }

@@ -120,7 +120,10 @@ pub enum Face {
     PopupGroup,
     /// the minibuffer
     Prompt,
-    Completion,
+    /// the part of a completion candidate that matches the input
+    CompletionMatch,
+    /// the candidate the minibuffer list cursor is on
+    CompletionSelected,
     /// the cursor's line and section (magit-section-highlight), the region
     CursorLine,
     SectionHighlight,
@@ -469,7 +472,9 @@ impl Theme {
         let tint = |c: Rgb| if basic { None } else { Some(c) };
         match face {
             Face::Default | Face::Context | Face::PopupDesc => Style::default(),
-            Face::Dim | Face::Count | Face::Margin | Face::Fringe | Face::HintText | Face::Completion => Style::fg(p.dim),
+            Face::Dim | Face::Count | Face::Margin | Face::Fringe | Face::HintText => Style::fg(p.dim),
+            Face::CompletionMatch => Style::fg(p.accent),
+            Face::CompletionSelected => Style::fg(p.accent).bold(),
             Face::SectionHeading => Style::fg(p.heading).bold(),
             Face::Label => Style::fg(p.dim),
             Face::Hash => Style::fg(p.hash),
@@ -605,10 +610,11 @@ fn mono(face: Face) -> Style {
         }
         Face::HeaderBar | Face::ModeLine | Face::ModeLineDim | Face::Message | Face::Region => reverse,
         Face::Error => Style { bold: true, ..reverse },
-        Face::BranchCurrent | Face::Head | Face::HintKey | Face::PopupKey | Face::PopupTitle | Face::Prompt => bold,
+        Face::BranchCurrent | Face::Head | Face::HintKey | Face::PopupKey | Face::PopupTitle | Face::Prompt
+        | Face::CompletionSelected => bold,
         Face::PopupGroup | Face::HunkRange | Face::Conflict | Face::FileUnmerged | Face::CursorLine | Face::Gutter => bold,
         Face::SearchMatch | Face::Point => reverse,
-        Face::PopupValue => Style { underline: true, ..Style::default() },
+        Face::PopupValue | Face::CompletionMatch => Style { underline: true, ..Style::default() },
         Face::Meta | Face::PopupInapt => Style { italic: true, ..Style::default() },
         // keep diff additions / removals distinguishable on a monochrome
         // terminal (the colored styles use green / red backgrounds instead)
@@ -648,7 +654,6 @@ fn mono(face: Face) -> Style {
         | Face::HintText
         | Face::PopupRule
         | Face::PopupDesc
-        | Face::Completion
         | Face::SectionHighlight
         | Face::Fringe => Style::default(),
     }
@@ -771,5 +776,16 @@ mod tests {
         let t = Theme { depth: Depth::True, light: false, glyphs: UNICODE };
         assert!(t.style(Face::Added).bg.is_some());
         assert_eq!(t.style(Face::Default), Style::default());
+    }
+
+    #[test]
+    fn completion_faces_survive_without_colors() {
+        let mono = Theme { depth: Depth::Mono, light: false, glyphs: ASCII };
+        assert!(mono.style(Face::CompletionSelected).bold);
+        assert!(mono.style(Face::CompletionMatch).underline);
+        let color = Theme { depth: Depth::True, light: false, glyphs: UNICODE };
+        assert_eq!(color.style(Face::CompletionSelected).fg, color.style(Face::CompletionMatch).fg);
+        assert!(color.style(Face::CompletionSelected).bold);
+        assert!(!color.style(Face::CompletionMatch).bold);
     }
 }
