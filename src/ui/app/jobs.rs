@@ -13,6 +13,13 @@ use super::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+/// A main-thread-only action to take after a background task succeeds.
+#[derive(Debug, Clone)]
+pub(super) enum TaskAfter {
+    /// the worktree of this buffer was deleted: switch to the primary one
+    SwitchToPrimary { primary: std::path::PathBuf },
+}
+
 /// What a worker sends back.
 pub(super) enum Done {
     /// a buffer built for the refresh of generation GEN of MODE and ARGS
@@ -21,6 +28,9 @@ pub(super) enum Done {
     Started { id: u64, pid: u32 },
     /// job ID is done
     Git { id: u64, args: Vec<String>, ok: String, result: Result<(), (String, bool)> },
+    /// a general background task (e.g. moving a worktree to the trash)
+    /// finished; AFTER runs on the main thread on success
+    Task { id: u64, ok: String, result: Result<(), String>, after: Option<TaskAfter> },
 }
 
 /// A git command running in the background.
@@ -379,6 +389,11 @@ impl App {
                 }
                 self.refresh();
             }
+            Done::Task { id, ok, result, after } => {
+                self.jobs.running.retain(|r| r.id != id);
+                self.jobs.mark_idle();
+                self.finish_task(&ok, after, result);
+            }
         }
     }
 
@@ -410,6 +425,52 @@ impl App {
             });
             let _ = tx.send(Done::Git { id, args, ok, result });
         });
+    }
+
+    /// Run a slow, self-contained task (no App state) on a worker thread
+    /// so the TUI keeps responding — e.g. moving a whole worktree to the
+    /// trash (which may shell out to Finder / `trash` and take a while).
+    /// OK is reported on success; AFTER is applied on the main thread.
+    /// Without a terminal it runs synchronously (tests).
+    pub(super) fn run_task_async<F>(&mut self, label: &str, ok: &str, after: Option<TaskAfter>, f: F)
+    where
+        F: FnOnce() -> Result<(), String> + Send + 'static,
+    {
+        if !self.jobs.enabled {
+            let result = f();
+            self.finish_task(ok, after, result);
+            return;
+        }
+        self.jobs.next_id += 1;
+        let id = self.jobs.next_id;
+        self.set_msg(&format!("Running {label}..."));
+        self.jobs.running.push(Running { id, label: label.to_string(), pid: None });
+        self.jobs.mark_busy();
+        let (tx, ok, after) = (self.jobs.tx.clone(), ok.to_string(), after);
+        std::thread::spawn(move || {
+            let result = f();
+            let _ = tx.send(Done::Task { id, ok, result, after });
+        });
+    }
+
+    fn finish_task(&mut self, ok: &str, after: Option<TaskAfter>, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                if let Some(TaskAfter::SwitchToPrimary { primary }) = after {
+                    match Git::discover(&primary) {
+                        Ok(git) => self.switch_repository(git),
+                        Err(e) => {
+                            self.report_error(&e);
+                            self.refresh();
+                            return;
+                        }
+                    }
+                }
+                self.set_msg(ok);
+            }
+            Err(e) => self.report_error(&anyhow::anyhow!("{e}")),
+        }
+        self.refresh();
     }
 
     /// The busy indicator of the mode line: a turning glyph and what
@@ -477,7 +538,7 @@ impl App {
             return true;
         }
         let n = self.jobs.running.len();
-        let prompt = format!("{n} git process{} still running; kill and quit? ", if n == 1 { "" } else { "es" });
+        let prompt = format!("{n} background job{} still running; quit anyway? ", if n == 1 { " is" } else { "s are" });
         if !self.yes_no(&prompt).unwrap_or(false) {
             self.quit = false;
             self.set_msg("");

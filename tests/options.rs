@@ -557,3 +557,28 @@ fn worktree_delete_current() {
     assert!(app.visible_lines()[0].text.starts_with("Head:"), "{:?}", app.visible_lines()[0].text);
     assert!(app.visible_lines().iter().any(|l| l.text.contains("master")));
 }
+
+/// Moving a worktree to the trash runs on a worker thread: the key returns
+/// immediately (the UI keeps responding), the result arrives when the
+/// background task finishes.
+#[test]
+fn trash_worktree_runs_in_the_background() {
+    let (_td, g, _) = repo_with_commit();
+    let ttd = tempfile::tempdir().unwrap();
+    let trash = ttd.path().join("trash");
+    let wt = ttd.path().join("wt");
+    git(&g, &["worktree", "add", "-q", "-b", "wt", &wt.to_string_lossy()]);
+    let mut app = App::new(g.clone());
+    app.set_options(options(&format!("trash-directory {}\nmagit-no-confirm trash", trash.display())));
+    app.set_background(true);
+    let wt_path = wt.canonicalize().unwrap().to_string_lossy().into_owned();
+    app.script_answers(&[&wt_path]);
+    press(&mut app, &["%", "k"]);
+    // the command did not block: it is queued as a background task
+    assert!(app.message().starts_with("Running trash worktree"), "{}", app.message());
+    app.wait_background();
+    assert!(!wt.exists() && trash.join("wt").is_dir(), "{}", app.message());
+    let list = g.git_string(&["worktree", "list", "--porcelain"]).unwrap();
+    assert!(!list.contains(&format!("worktree {wt_path}\n")), "pruned: {list}");
+    assert!(app.message().starts_with("Trashed worktree"), "{}", app.message());
+}

@@ -171,6 +171,19 @@ impl App {
             return Ok(());
         }
         let trash = self.options.delete_by_moving_to_trash;
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Moving a whole worktree to the trash (Finder / `trash`, or a
+        // cross-volume copy) can take a long time.  Run the whole delete +
+        // prune on a worker thread so the UI keeps responding; only the
+        // repository switch happens on the main thread afterwards.
+        let deleting_current = dir.exists()
+            && self.git.toplevel.exists()
+            && dir.canonicalize().ok() == self.git.toplevel.canonicalize().ok();
+        let primary = std::path::PathBuf::from(&worktrees[0].0);
+        let git = self.git.clone();
+        let trash_dir = self.options.trash_directory.clone();
+        let ok = format!("{} worktree \"{name}\"", if trash { "Trashed" } else { "Deleted" });
+
         if dir.exists() {
             let uncommitted = !self.git.git_lines(&["-C", &path, "status", "--porcelain"]).is_empty();
             let action = match (uncommitted, trash) {
@@ -178,7 +191,6 @@ impl App {
                 (false, true) => "trash",
                 (false, false) => "delete",
             };
-            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let prompt = format!(
                 "{} worktree \"{name}\"{}",
                 if trash { "Trash" } else { "Delete" },
@@ -187,34 +199,29 @@ impl App {
             if !self.confirm(action, &prompt)? {
                 return Ok(());
             }
-            let res = if trash {
-                crate::ui::trash::move_to_trash(&dir, self.options.trash_directory.as_deref())
-            } else {
-                self.git.git_interactive(&["worktree", "remove", "--force", &path]).map_err(|e| e.to_string())
-            };
-            if let Err(e) = res {
-                self.set_msg(&e);
-                return Ok(());
-            }
         }
-        if self.git.toplevel.exists() {
-            let res = self.git.git_interactive(&["worktree", "prune"]);
-            self.done("", res.map(|_| String::new()));
-            return Ok(());
-        }
-        // the worktree of this buffer was deleted: pruned from the primary
-        // one, whose status replaces a status buffer
-        let primary = std::path::PathBuf::from(&worktrees[0].0);
-        let git = match Git::discover(&primary) {
-            Ok(g) => g,
-            Err(e) => {
-                self.set_msg(&e.to_string());
-                return Ok(());
-            }
+
+        let after = if deleting_current {
+            Some(super::jobs::TaskAfter::SwitchToPrimary { primary: primary.clone() })
+        } else {
+            None
         };
-        let res = git.git_interactive(&["worktree", "prune"]);
-        self.switch_repository(git);
-        self.done("", res.map(|_| String::new()));
+        let task = move || -> Result<(), String> {
+            if trash {
+                crate::ui::trash::move_to_trash(&dir, trash_dir.as_deref())?;
+            } else {
+                git.git_interactive(&["worktree", "remove", "--force", &path]).map_err(|e| e.to_string())?;
+            }
+            // if this buffer's worktree was deleted, prune from the primary
+            let prune_git = if deleting_current {
+                Git::discover(&primary).map_err(|e| e.to_string())?
+            } else {
+                git.clone()
+            };
+            prune_git.git_interactive(&["worktree", "prune"]).map_err(|e| e.to_string())
+        };
+        let label = format!("{} worktree \"{name}\"", if trash { "trash" } else { "delete" });
+        self.run_task_async(&label, &ok, after, task);
         Ok(())
     }
 
