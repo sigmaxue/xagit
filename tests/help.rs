@@ -70,8 +70,9 @@ fn starting_outside_a_repository_shows_the_hint() {
 fn version_prints_the_package_version() {
     let out = xagit().arg("--version").output().unwrap();
     assert!(out.status.success());
-    // Cargo.toml declares 1.0.0; main.rs derives VERSION from it.
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "v1.0.0\n");
+    // main.rs derives VERSION from CARGO_PKG_VERSION
+    let version = format!("v{}\n", env!("CARGO_PKG_VERSION"));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), version.as_str());
     assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -83,7 +84,8 @@ fn version_needs_no_repository_and_works_after_a_path() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "v1.0.0\n");
+    let version = format!("v{}\n", env!("CARGO_PKG_VERSION"));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), version.as_str());
 }
 
 #[test]

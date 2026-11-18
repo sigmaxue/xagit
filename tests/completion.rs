@@ -97,10 +97,10 @@ fn completion_help() {
     assert_eq!(type_keys(&mut ed, &["?"]), Step::Continue);
     assert_eq!(ed.text(), "?");
     assert_eq!(type_keys(&mut ed, &["TAB"]), Step::Message("TAB is undefined".into()));
-    // the *Completions* buffer: one candidate per row (selectable list)
+    // the *Completions* buffer
     let rows = completion_rows(&strs(&["bb", "a", "ccc"]), 12);
-    assert_eq!(rows, ["3 possible completions:", "  a", "  bb", "  ccc"]);
-    assert_eq!(completion_rows(&strs(&["x"]), 0), ["1 possible completions:", "  x"]);
+    assert_eq!(rows, ["3 possible completions:", "a    bb", "ccc"]);
+    assert_eq!(completion_rows(&strs(&["x"]), 0), ["1 possible completions:", "x"]);
 }
 
 #[test]
@@ -183,11 +183,12 @@ fn revision_history() {
     assert_eq!(app.revision_history(), ["new".to_string(), main, "feature".into()]);
 }
 
-/// Every completion read offers a single-column, C-n/C-p navigable list.
-/// The input stays empty (typing is unaffected); navigating then RET takes
-/// the highlighted candidate, while plain RET keeps the normal exit.
+/// List navigation is an opt-in capability of LineEditor: App enables it
+/// only for read-module-path. The input stays empty (typing is unaffected);
+/// navigating then RET takes the highlighted candidate, while plain RET
+/// keeps the normal exit.
 #[test]
-fn list_navigation_is_generic() {
+fn list_navigation_is_opt_in() {
     let cands = strs(&["zeta", "alpha", "mid"]);
     let table = Completion { candidates: cands.clone(), require_match: true, multiple: false };
 
@@ -208,4 +209,20 @@ fn list_navigation_is_generic() {
     // stays empty, so defaults/history are unaffected
     let mut ed = LineEditor::new(Vec::new(), Some("dflt".into())).with_completion(table).enable_list_nav();
     assert_eq!(type_keys(&mut ed, &["RET"]), Step::Done(String::new()));
+}
+
+/// Only read-module-path opts into the C-n/C-p list. An ordinary
+/// completing-read (checkout a branch here) keeps TAB / ? completion and
+/// the history keys, so C-n is not a list cursor and RET falls back to
+/// the default instead of selecting a branch.
+#[test]
+fn ordinary_completions_do_not_open_a_select_list() {
+    let (_td, g, _) = repo_with_commit();
+    let start = g.current_branch().unwrap();
+    g.branch_create("feature", None).unwrap();
+    let mut app = App::new(g.clone());
+    app.script_keys(&["C-n", "C-n", "RET"]);
+    press(&mut app, &["b", "b"]);
+    assert_eq!(app.prompts().last().map(String::as_str), Some("Checkout"), "{:?}", app.prompts());
+    assert_eq!(g.current_branch().as_deref(), Some(start.as_str()), "{}", app.message());
 }

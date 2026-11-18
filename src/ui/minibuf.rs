@@ -124,15 +124,21 @@ fn common_prefix(words: &[&String]) -> String {
 /// The rows of the *Completions* buffer for CANDS in WIDTH columns: the
 /// header ("N possible completions:") and the candidates sorted, in
 /// columns across (completions-format horizontal).
-pub fn completion_rows(cands: &[String], _width: usize) -> Vec<String> {
-    // One candidate per row (a selectable vertical list), instead of the
-    // old multi-column *Completions* grid.  C-n/C-p move a highlight over
-    // these rows in the minibuffer.
+pub fn completion_rows(cands: &[String], width: usize) -> Vec<String> {
     let mut sorted: Vec<&String> = cands.iter().collect();
     sorted.sort();
     let mut rows = vec![format!("{} possible completions:", sorted.len())];
-    for c in sorted {
-        rows.push(format!("  {c}"));
+    let col = sorted.iter().map(|c| c.chars().count()).max().unwrap_or(0) + 2;
+    let per_row = (width / col.max(1)).max(1);
+    for chunk in sorted.chunks(per_row) {
+        let mut row = String::new();
+        for (i, c) in chunk.iter().enumerate() {
+            row.push_str(c);
+            if i + 1 < chunk.len() {
+                row.push_str(&" ".repeat(col - c.chars().count()));
+            }
+        }
+        rows.push(row);
     }
     rows
 }
@@ -144,7 +150,7 @@ pub enum PanelLine {
     Header(String),
     /// a candidate, with the list cursor on it or not
     Item { text: String, selected: bool },
-    /// a line of help text (read-multiple-choice)
+    /// a line of help text, or of the *Completions* grid
     Note(String),
 }
 
@@ -164,12 +170,13 @@ impl CompletionPanel {
     }
 }
 
-/// The rows of ED's completions panel, in ROOM screen rows. A navigated
-/// list is a window onto the candidates, centred on the selection so
-/// C-n/C-p never move the highlight out of view; the other lists keep
-/// only as many rows as fit. ABOVE is the help text shown when there is
-/// no completion list.
-pub fn completion_panel(ed: &LineEditor, above: &[String], room: usize) -> CompletionPanel {
+/// The rows of ED's completions panel, in ROOM screen rows and WIDTH
+/// columns. A navigated list (submodule selection) is a window onto the
+/// candidates, centred on the selection so C-n/C-p never move the
+/// highlight out of view; ordinary completions keep Magit's multi-column
+/// *Completions* grid. ABOVE is the help text shown when there is no
+/// completion list.
+pub fn completion_panel(ed: &LineEditor, above: &[String], room: usize, width: usize) -> CompletionPanel {
     if room == 0 {
         return CompletionPanel::empty();
     }
@@ -195,12 +202,12 @@ pub fn completion_panel(ed: &LineEditor, above: &[String], room: usize) -> Compl
         return CompletionPanel { lines, position: Some((sel + 1, total)), hint: Some("C-n/C-p  RET") };
     }
     if let Some(cands) = ed.completions() {
-        let rows = completion_rows(cands, 0);
+        let rows = completion_rows(cands, width);
         let mut it = rows.iter();
         let Some(header) = it.next() else { return CompletionPanel::empty() };
         let mut lines = vec![PanelLine::Header(header.clone())];
         for r in it.take(room - 1) {
-            lines.push(PanelLine::Item { text: r.strip_prefix("  ").unwrap_or(r.as_str()).to_string(), selected: false });
+            lines.push(PanelLine::Note(r.clone()));
         }
         return CompletionPanel { lines, position: None, hint: None };
     }
@@ -674,7 +681,7 @@ mod tests {
         let mut ed = nav(&refs);
         ed.nav_sel = 10;
         ed.nav_apply();
-        let p = completion_panel(&ed, &[], 6);
+        let p = completion_panel(&ed, &[], 6, 40);
         assert_eq!(p.position, Some((11, 12)));
         assert_eq!(p.hint, Some("C-n/C-p  RET"));
         assert_eq!(p.lines.len(), 6);
@@ -685,13 +692,13 @@ mod tests {
     #[test]
     fn panel_falls_back_to_help_lines() {
         let ed = LineEditor::new(Vec::new(), None);
-        let p = completion_panel(&ed, &["first".into(), "second".into()], 1);
+        let p = completion_panel(&ed, &["first".into(), "second".into()], 1, 40);
         assert_eq!(p.lines, vec![PanelLine::Note("first".into())]);
         assert_eq!(p.position, None);
     }
 
     #[test]
-    fn completion_list_has_a_header_and_sorted_items() {
+    fn ordinary_completions_keep_the_column_grid() {
         let mut ed = LineEditor::new(Vec::new(), None).with_completion(Completion {
             candidates: vec!["bb".into(), "a".into(), "ccc".into()],
             require_match: false,
@@ -699,12 +706,11 @@ mod tests {
         });
         ed.key(&key_from_label("?"));
         assert_eq!(
-            completion_panel(&ed, &[], 4).lines,
+            completion_panel(&ed, &[], 4, 12).lines,
             vec![
                 PanelLine::Header("3 possible completions:".into()),
-                PanelLine::Item { text: "a".into(), selected: false },
-                PanelLine::Item { text: "bb".into(), selected: false },
-                PanelLine::Item { text: "ccc".into(), selected: false },
+                PanelLine::Note("a    bb".into()),
+                PanelLine::Note("ccc".into()),
             ]
         );
     }

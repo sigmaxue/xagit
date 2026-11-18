@@ -179,9 +179,11 @@ impl App {
         if let Some(t) = table {
             ed = ed.with_completion(t);
         }
-        // Every completion read offers a single-column, C-n/C-p navigable
-        // candidate list; the input stays empty so typing is unchanged.
-        ed = ed.enable_list_nav();
+        // one-shot: only read-module-path asks for the C-n/C-p selectable
+        // candidate list; the other completing-reads keep TAB / ? completion
+        if self.list_nav.replace(false) {
+            ed = ed.enable_list_nav();
+        }
         if let Some(i) = initial {
             ed = ed.with_initial_input(&i);
         }
@@ -257,7 +259,7 @@ impl App {
                 (h.saturating_sub(1) / 2).max(1)
             };
             let above = self.minibuffer_above.borrow().clone();
-            let panel = completion_panel(&ed, &above, room);
+            let panel = completion_panel(&ed, &above, room, w);
             let list = panel.lines.len();
             let last = h.saturating_sub(1);
             self.repaint_rows(last.saturating_sub(covered), last.saturating_sub(list));
