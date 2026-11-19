@@ -512,9 +512,14 @@ pub(crate) fn upstream_header(g: &Git, br: &str, upstream: Option<&str>, keyword
             let s = rev_summary(g, up).map(|(_, s)| s).unwrap_or_else(|| "(no commit message)".into());
             format!("{up} {s}")
         }
-        (None, Some(r), Some(m)) if r == "." => format!("{m} does not exist"),
-        (None, Some(r), Some(m)) if g.remotes().contains(r) => format!("{m} does not exist on {r}"),
-        (None, Some(r), Some(m)) => format!("{m} from {r}"),
+        // Still configured, but the remote-tracking ref was deleted (or
+        // pruned): show the name it used to track and mark the association
+        // as gone, instead of looking as if the remote were still linked.
+        (None, Some(r), Some(m)) if r == "." => format!("{m} (gone)"),
+        (None, Some(r), Some(m)) if g.remotes().contains(r) => {
+            format!("{r}/{} (gone)", m.strip_prefix("refs/heads/").unwrap_or(m.as_str()))
+        }
+        (None, Some(r), Some(m)) => format!("{m} from {r} (gone)"),
         _ => "invalid upstream configuration".into(),
     };
     Some(format!("{keyword:<10}{rest}"))
@@ -564,10 +569,16 @@ fn insert_headers(b: &mut Builder, g: &Git) {
     // magit-insert-headers: the first header is made the parent of the rest
     let n = headers.len();
     for (i, (text, ident)) in headers.into_iter().enumerate() {
+        let gone = (ident == "header:upstream").then(|| {
+            text.find("(gone)").map(|a| (a, a + "(gone)".len()))
+        }).flatten();
         if i == 0 {
             b.heading(text, LineKind::Head, ident, 0, n > 1);
         } else {
             b.line(text, LineKind::Head, ident, true, 1);
+        }
+        if let Some((a, z)) = gone {
+            b.faces(vec![(a, z, Face::UpstreamGone)]);
         }
     }
     b.root_blank();

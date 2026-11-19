@@ -90,6 +90,34 @@ fn sections() {
     assert_eq!(t.len(), 11);
 }
 
+/// Deleting the remote-tracking branch leaves branch.<b>.remote/merge in
+/// place. Both the status header and the refs buffer must say that the
+/// association is gone, instead of showing a live upstream.
+#[test]
+fn gone_upstream_is_marked() {
+    use xagit_lib::ui::theme::Face;
+    let (_o, _td, g) = repo();
+    git(&g, &["update-ref", "-d", "refs/remotes/origin/master"]);
+
+    let app = App::new(g.clone());
+    let status: Vec<String> = app.visible_lines().iter().map(|l| l.text.clone()).collect();
+    assert!(status.iter().any(|l| l.starts_with("Merge:") && l.contains("origin/master (gone)")), "{status:?}");
+    let line = app.visible_lines().iter().find(|l| l.text.starts_with("Merge:")).unwrap();
+    assert!(
+        line.faces.iter().any(|&(a, b, f)| &line.text[a..b] == "(gone)" && f == Face::UpstreamGone),
+        "{:?}", line.faces
+    );
+
+    let app = refs(&g);
+    let t = texts(&app);
+    assert!(t.iter().any(|l| l.contains("origin/master (gone)")), "{t:?}");
+    let line = app.visible_lines().iter().find(|l| l.text.contains("origin/master (gone)")).unwrap();
+    assert!(
+        line.faces.iter().any(|&(a, b, f)| &line.text[a..b] == "(gone)" && f == Face::UpstreamGone),
+        "{:?}", line.faces
+    );
+}
+
 #[test]
 fn detached_head_and_tracking() {
     let (_o, _td, g) = repo();

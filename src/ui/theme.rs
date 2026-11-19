@@ -63,6 +63,8 @@ pub enum Face {
     Refs,
     /// "N>" / "<N" of the refs buffer
     Ahead,
+    /// a configured upstream whose remote-tracking branch is gone
+    UpstreamGone,
     /// a commit line's graph (colored by column)
     Graph,
     /// the "pick"/"edit" … word of a sequence line, cherry marks
@@ -487,6 +489,7 @@ impl Theme {
             Face::Stash => Style::fg(p.stash),
             Face::Refs => Style::fg(p.local),
             Face::Ahead => Style::fg(p.accent),
+            Face::UpstreamGone => Style::fg(p.error).italic(),
             Face::Graph => Style::fg(p.dim),
             Face::Keyword => Style::fg(p.keyword),
             // magit-sequence-*: pick inherits default, stop is green, part
@@ -623,6 +626,7 @@ fn mono(face: Face) -> Style {
         Face::SequencePart => Style { underline: true, ..Style::default() },
         Face::SequenceDrop => Style { italic: true, ..Style::default() },
         Face::Removed => Style { italic: true, ..Style::default() },
+        Face::UpstreamGone => Style { italic: true, ..bold },
         // Exhaustive on purpose: adding a Face must force a decision about
         // how it looks on a mono terminal, instead of silently becoming
         // plain text.
@@ -787,5 +791,14 @@ mod tests {
         assert_eq!(color.style(Face::CompletionSelected).fg, color.style(Face::CompletionMatch).fg);
         assert!(color.style(Face::CompletionSelected).bold);
         assert!(!color.style(Face::CompletionMatch).bold);
+    }
+
+    #[test]
+    fn upstream_gone_is_visible_without_colors() {
+        let mono = Theme { depth: Depth::Mono, light: false, glyphs: ASCII };
+        let s = mono.style(Face::UpstreamGone);
+        assert!(s.italic && s.bold);
+        let color = Theme { depth: Depth::True, light: false, glyphs: UNICODE };
+        assert!(color.style(Face::UpstreamGone).italic);
     }
 }

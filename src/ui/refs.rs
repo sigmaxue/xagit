@@ -135,6 +135,8 @@ struct Local {
     ahead: String,
     behind: String,
     upstream: String,
+    /// `%(upstream:track)` said [gone]: the tracking ref was deleted
+    gone: bool,
     msg: String,
 }
 
@@ -233,12 +235,20 @@ impl Refs<'_> {
         let current = get(0) == Some("*");
         let branch = get(1).map(str::to_string);
         let track = get(5).unwrap_or_default();
+        // git reports "[gone]" when branch.<b>.remote/merge are still set
+        // but the remote-tracking ref no longer exists (deleted + prune).
+        let gone = track.contains("gone");
         Local {
             pretty: branch.clone().unwrap_or_else(|| "(detached)".into()),
             current,
             ahead: track_count(track, "ahead").map(|n| format!("{n}>")).unwrap_or_default(),
             behind: track_count(track, "behind").map(|n| format!("<{n}")).unwrap_or_default(),
-            upstream: get(3).map(|u| format!("{u} ")).unwrap_or_default(),
+            upstream: match (get(3), gone) {
+                (Some(u), true) => format!("{u} (gone) "),
+                (Some(u), false) => format!("{u} "),
+                (None, _) => String::new(),
+            },
+            gone,
             msg: get(9).unwrap_or_default().to_string(),
             branch,
         }
@@ -272,6 +282,13 @@ impl Refs<'_> {
             let focus = self.focus_column(l.branch.as_deref(), l.current, false);
             let pad = self.pad(l.pretty.len() + l.ahead.len() + l.behind.len());
             let heading = format!("{focus}{}{}{pad}{}{}{}", l.pretty, l.ahead, l.behind, l.upstream, l.msg);
+            // the "(gone)" marker sits in the upstream column, after the
+            // focus/name/counts/padding; paint_ref would leave it plain
+            let upstream_at = focus.len() + l.pretty.len() + l.ahead.len() + pad.len() + l.behind.len();
+            let gone = l.gone.then(|| l.upstream.find("(gone)").map(|i| {
+                let a = upstream_at + i;
+                (a, a + "(gone)".len())
+            })).flatten();
             match &l.branch {
                 Some(b) => {
                     let kind = LineKind::Ref { kind: RefKind::Local, name: b.clone() };
@@ -296,6 +313,9 @@ impl Refs<'_> {
                     self.b.faces(faces);
                     self.ref_margin("HEAD");
                 }
+            }
+            if let Some((a, z)) = gone {
+                self.b.faces(vec![(a, z, Face::UpstreamGone)]);
             }
         }
         self.b.empty(1);
