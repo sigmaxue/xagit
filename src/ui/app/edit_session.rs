@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 pub enum EditDone {
     /// a rebase command (start): report like after_rebase
     Rebase,
+    /// "r r": report like rebase_result with "rebase continued"
+    RebaseContinue,
     /// a cherry-pick / revert run: NAME on success
     Sequence(String),
     /// a plain command: OK on success (empty: no message)
@@ -180,6 +182,7 @@ impl App {
         let result = res.map_err(|e| anyhow::anyhow!("{e}"));
         match done {
             EditDone::Rebase => self.after_rebase(result),
+            EditDone::RebaseContinue => self.rebase_result(result, "rebase continued"),
             EditDone::Sequence(name) => self.done(&name, result.map(|()| String::new())),
             EditDone::Plain(ok) => self.done(&ok, result.map(|()| String::new())),
         }

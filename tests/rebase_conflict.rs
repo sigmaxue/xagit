@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use xagit_lib::prelude::Git;
-use xagit_lib::ui::app::App;
+use xagit_lib::ui::app::{App, BufferMode};
 
 fn ok(g: &Git, args: &[&str]) {
     let out = std::process::Command::new("git")
@@ -105,6 +105,10 @@ fn continuing_with_unresolved_conflicts_is_refused() {
     // stopped sequence is never reported as a failed command.
     assert_eq!(app.message(), "Cannot continue rebase with unstaged changes");
     assert!(!app.message().contains("failed"), "{}", app.message());
+    // the refusal leaves the sequence and the conflict in front
+    let lines = status_lines(&app);
+    assert!(lines.iter().any(|l| l == "Rebasing a onto b"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("unmerged")), "{lines:?}");
 }
 
 #[test]
@@ -115,9 +119,86 @@ fn resolving_the_conflict_and_continuing_finishes_the_rebase() {
     write(&g, "file.txt", "resolved\n");
     ok(&g, &["add", "file.txt"]);
     press(&mut app, &["r", "r"]);
+    // Magit's continue opens COMMIT_EDITMSG: accept it in the built-in buffer
+    finish_edits(&mut app, None);
     assert!(!g.rebase_in_progress(), "{}", app.message());
     assert!(app.message().starts_with("rebase continued"), "{}", app.message());
     assert_eq!(g.git_string(&["log", "-1", "--format=%s"]).unwrap(), "a work");
+    assert_eq!(read(&g, "file.txt"), "resolved\n");
+}
+
+/// Two commits on `a` each conflict with `b`: the rebase has to stop, let
+/// the first conflict be resolved and continued, then stop again for the
+/// second one (Magit's `r r` works step by step through a sequence).
+fn two_conflicting_commits() -> (tempfile::TempDir, Git) {
+    let (td, g, _) = repo_with_commit();
+    write(&g, "one.txt", "base one\n");
+    write(&g, "two.txt", "base two\n");
+    ok(&g, &["add", "."]);
+    ok(&g, &["commit", "-qm", "base files"]);
+    ok(&g, &["checkout", "-q", "-b", "b"]);
+    write(&g, "one.txt", "b one\n");
+    write(&g, "two.txt", "b two\n");
+    ok(&g, &["commit", "-qam", "b work"]);
+    ok(&g, &["checkout", "-q", "-b", "a", "master"]);
+    write(&g, "one.txt", "a one\n");
+    ok(&g, &["commit", "-qam", "a one"]);
+    write(&g, "two.txt", "a two\n");
+    ok(&g, &["commit", "-qam", "a two"]);
+    (td, g)
+}
+
+#[test]
+fn continuing_advances_to_the_next_conflict() {
+    let (_td, g) = two_conflicting_commits();
+    let mut app = App::new(g.clone());
+    rebase_onto_b(&mut app);
+    assert!(g.rebase_in_progress(), "{}", app.message());
+
+    write(&g, "one.txt", "resolved one\n");
+    ok(&g, &["add", "one.txt"]);
+    press(&mut app, &["r", "r"]);
+    finish_edits(&mut app, None);
+    assert!(g.rebase_in_progress(), "{}", app.message());
+    let lines = status_lines(&app);
+    assert!(lines.iter().any(|l| l == "Rebasing a onto b"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("two.txt")), "{lines:?}");
+    assert!(app.message().contains("r r continue"), "{}", app.message());
+
+    write(&g, "two.txt", "resolved two\n");
+    ok(&g, &["add", "two.txt"]);
+    press(&mut app, &["r", "r"]);
+    finish_edits(&mut app, None);
+    assert!(!g.rebase_in_progress(), "{}", app.message());
+    assert_eq!(g.git_string(&["log", "-1", "--format=%s"]).unwrap(), "a two");
+    assert_eq!(read(&g, "one.txt"), "resolved one\n");
+    assert_eq!(read(&g, "two.txt"), "resolved two\n");
+}
+
+/// Magit's continue is an asynchronous sequencer: with a reword todo,
+/// `git rebase --continue` asks for a commit message after the conflict is
+/// resolved. The built-in text buffer answers it and the sequence goes on.
+#[test]
+fn continuing_a_reword_conflict_opens_the_builtin_message_buffer() {
+    let (_td, g) = conflicting_branches();
+    let out = std::process::Command::new("git")
+        .current_dir(&g.toplevel)
+        .args(["-c", "core.editor=true", "rebase", "-i", "b"])
+        .env("GIT_SEQUENCE_EDITOR", "perl -i -pe 's/^pick /reword /'")
+        .env("GIT_EDITOR", "true")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(g.rebase_in_progress());
+    let mut app = App::new(g.clone());
+    write(&g, "file.txt", "resolved\n");
+    ok(&g, &["add", "file.txt"]);
+    press(&mut app, &["r", "r"]);
+    assert_eq!(app.mode(), &BufferMode::TextEdit, "{}", app.message());
+    assert_eq!(app.text_edit_title().as_deref(), Some("COMMIT_EDITMSG"));
+    finish_edits(&mut app, Some("a reworded\n"));
+    assert!(!g.rebase_in_progress(), "{}", app.message());
+    assert_eq!(g.git_string(&["log", "-1", "--format=%s"]).unwrap(), "a reworded");
     assert_eq!(read(&g, "file.txt"), "resolved\n");
 }
 

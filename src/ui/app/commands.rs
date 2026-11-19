@@ -617,18 +617,32 @@ impl App {
                 self.reshelve_since_select(keyid)?;
             }
             // magit-rebase-continue: refuse without a rebase or with unstaged
-            // changes (unresolved conflicts are unstaged too)
+            // changes (unresolved conflicts are unstaged too). Continue is a
+            // sequencer step, not a plain git call: git may ask for a commit
+            // message (reword/squash/edit, or after resolving a conflict),
+            // so run it with the built-in editor on a worker thread, like
+            // Magit's asynchronous sequencer. core.editor=true would silently
+            // skip that message and leave the sequence stuck.
             "rebase-continue" => {
                 if !self.git.rebase_in_progress() {
                     self.set_msg("No rebase in progress");
+                    self.refresh();
                     return Ok(());
                 }
                 if !self.git.git_ok(&["diff", "--quiet", "--ignore-submodules"]) {
                     self.set_msg("Cannot continue rebase with unstaged changes");
+                    // Magit's refusal leaves the status buffer (with the
+                    // conflicts and the sequence) in front; rebuild it here
+                    // so edits made outside xagit are visible right away.
+                    self.refresh();
                     return Ok(());
                 }
-                let res = g!().rebase_continue();
-                self.rebase_result(res, "rebase continued");
+                return self.start_edit_git(
+                    vec!["rebase".into(), "--continue".into()],
+                    None,
+                    super::edit_session::EditDone::RebaseContinue,
+                    None,
+                );
             }
             "rebase-skip" => {
                 if !self.git.rebase_in_progress() {
